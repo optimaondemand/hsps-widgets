@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Truth Table Builder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+  .wrap { max-width: 940px; margin: 0 auto; }
+
+  .panel {
+    background: #fff;
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: 0 2px 10px rgba(14,28,66,0.10);
+    margin-bottom: 14px;
+  }
+  .panel h3 {
+    color: #0E1C42;
+    font-size: 0.92rem;
+    margin-bottom: 10px;
+    border-bottom: 2px solid #EEF1F8;
+    padding-bottom: 6px;
+  }
+
+  /* Expression slots */
+  .expr-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .expr-label { font-size: 0.8rem; font-weight: 700; color: #6b7a99; min-width: 96px; }
+  .expr-box {
+    flex: 1;
+    min-width: 200px;
+    min-height: 44px;
+    border: 2px solid #D0D9E8;
+    border-radius: 9px;
+    padding: 8px 12px;
+    font-size: 1.25rem;
+    letter-spacing: 2px;
+    background: #F8FAFD;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    color: #0E1C42;
+  }
+  .expr-box.active { border-color: #55C8E8; background: #fff; box-shadow: 0 0 0 3px rgba(85,200,232,0.25); }
+  .expr-box .placeholder { color: #9aa7c0; font-size: 0.85rem; letter-spacing: 0; }
+  .expr-status { font-size: 0.78rem; min-width: 130px; }
+  .expr-status.ok { color: #1e7d46; }
+  .expr-status.bad { color: #C0392B; }
+
+  .keys { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
+  .key {
+    min-width: 46px;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 9px;
+    font-size: 1.15rem;
+    font-weight: 700;
+    cursor: pointer;
+    background: #0E1C42;
+    color: #fff;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .key:hover { background: #1d3266; }
+  .key:active { transform: scale(0.94); }
+  .key.atom { background: #C7922C; }
+  .key.atom:hover { background: #a87a20; }
+  .key.util { background: #fff; color: #C0392B; border: 2px solid #F1C9C4; font-size: 0.9rem; }
+  .key.util:hover { background: #FDECEC; }
+
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
+  .preset {
+    border: 1.5px solid #D0D9E8;
+    background: #F8FAFD;
+    color: #0E1C42;
+    border-radius: 16px;
+    padding: 5px 12px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .preset:hover { background: #EEF1F8; border-color: #55C8E8; }
+
+  /* Action buttons */
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-bottom: 14px; }
+  .btn {
+    padding: 11px 24px;
+    border: none;
+    border-radius: 9px;
+    font-size: 0.95rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .btn:active { transform: scale(0.96); }
+  .btn-next { background: #C7922C; color: #fff; font-size: 1.02rem; }
+  .btn-next:hover { background: #a87a20; }
+  .btn-next:disabled { background: #d8dfec; color: #8b97ad; cursor: default; }
+  .btn-all { background: #0E1C42; color: #fff; }
+  .btn-all:hover { background: #1d3266; }
+  .btn-all:disabled { background: #d8dfec; color: #8b97ad; cursor: default; }
+  .btn-reset { background: #C0392B; color: #fff; }
+  .btn-reset:hover { background: #96281c; }
+
+  .hint { text-align: center; font-size: 0.83rem; color: #6b7a99; margin-bottom: 12px; }
+
+  /* Table */
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; margin: 0 auto; }
+  th, td {
+    border: 1px solid #D0D9E8;
+    padding: 8px 14px;
+    text-align: center;
+    font-size: 1.02rem;
+    min-width: 52px;
+    white-space: nowrap;
+  }
+  th { background: #0E1C42; color: #fff; font-weight: 700; letter-spacing: 1px; }
+  th.atom-h { background: #55C8E8; color: #0E1C42; }
+  th.full1 { background: #C7922C; }
+  th.full2 { background: #7A5DA8; }
+  td.t { color: #1e7d46; font-weight: 700; }
+  td.f { color: #C0392B; font-weight: 700; }
+  td.hidden-cell { color: #c3cbdc; font-weight: 400; }
+  td.pop { animation: pop 0.25s ease; }
+  @keyframes pop { 0% { transform: scale(0.4); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+
+  /* Verdicts */
+  .verdict {
+    border-radius: 9px;
+    padding: 10px 14px;
+    font-size: 0.92rem;
+    margin-top: 10px;
+    line-height: 1.5;
+    display: none;
+  }
+  .verdict.show { display: block; animation: pop 0.25s ease; }
+  .v-taut { background: #E9F7EF; border-left: 5px solid #1e7d46; color: #145a31; }
+  .v-contra { background: #FDECEC; border-left: 5px solid #C0392B; color: #8A1F16; }
+  .v-cont { background: #EEF1F8; border-left: 5px solid #0E1C42; color: #0E1C42; }
+
+  .compare-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-top: 6px; }
+  .cmp {
+    border-radius: 9px;
+    padding: 10px 12px;
+    font-size: 0.86rem;
+    line-height: 1.45;
+    border: 1.5px solid #D0D9E8;
+    background: #F8FAFD;
+  }
+  .cmp .cmp-title { font-weight: 700; font-size: 0.82rem; margin-bottom: 4px; }
+  .cmp.yes { border-color: #1e7d46; background: #E9F7EF; }
+  .cmp.no { border-color: #E8B4AD; background: #FDF7F6; }
+  .cmp .mark { font-size: 1.05rem; font-weight: 700; }
+  .cmp.yes .mark { color: #1e7d46; }
+  .cmp.no .mark { color: #C0392B; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Truth Table Builder</h1>
+  <div class="subtitle">Build a proposition, then fill its table one column at a time &mdash; simplest pieces first, just as you would by hand.</div>
+
+  <div class="panel">
+    <h3>1 &middot; Build your proposition(s)</h3>
+    <div class="expr-row">
+      <div class="expr-label">Proposition 1</div>
+      <div class="expr-box active" id="box1" onclick="setActive(1)"><span class="placeholder">tap the keys below&hellip;</span></div>
+      <div class="expr-status" id="status1"></div>
+    </div>
+    <div class="expr-row">
+      <div class="expr-label">Proposition 2 <span style="font-weight:400">(optional)</span></div>
+      <div class="expr-box" id="box2" onclick="setActive(2)"><span class="placeholder">for comparing two propositions</span></div>
+      <div class="expr-status" id="status2"></div>
+    </div>
+    <div class="keys">
+      <button class="key atom" onclick="addTok('A')">A</button>
+      <button class="key atom" onclick="addTok('B')">B</button>
+      <button class="key atom" onclick="addTok('C')">C</button>
+      <button class="key" onclick="addTok('¬')">&#172;</button>
+      <button class="key" onclick="addTok('∧')">&#8743;</button>
+      <button class="key" onclick="addTok('∨')">&#8744;</button>
+      <button class="key" onclick="addTok('(')">(</button>
+      <button class="key" onclick="addTok(')')">)</button>
+      <button class="key util" onclick="backspace()">&#9003; undo</button>
+      <button class="key util" onclick="clearExpr()">clear</button>
+    </div>
+    <div class="presets">
+      <button class="preset" onclick="loadPreset(['A','∨','¬','A'],null)">A &#8744; &#172;A</button>
+      <button class="preset" onclick="loadPreset(['A','∧','¬','A'],null)">A &#8743; &#172;A</button>
+      <button class="preset" onclick="loadPreset(['(','A','∨','B',')','∧','¬','(','A','∧','B',')'],null)">(A&#8744;B) &#8743; &#172;(A&#8743;B)</button>
+      <button class="preset" onclick="loadPreset(['¬','(','A','∨','B',')'],['¬','A','∧','¬','B'])">compare: &#172;(A&#8744;B) vs &#172;A&#8743;&#172;B</button>
+      <button class="preset" onclick="loadPreset(['A','∨','(','B','∧','C',')'],null)">A &#8744; (B&#8743;C)</button>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-next" id="btnNext" onclick="fillNext()" disabled>Fill next column</button>
+    <button class="btn btn-all" id="btnAll" onclick="fillAll()" disabled>Fill the whole table</button>
+    <button class="btn btn-reset" onclick="resetAll()">Reset</button>
+  </div>
+  <div class="hint" id="hint">Enter a proposition above to begin.</div>
+
+  <div class="panel">
+    <h3>2 &middot; The table</h3>
+    <div class="table-scroll" id="tableArea">
+      <div style="text-align:center; color:#9aa7c0; font-size:0.9rem; padding: 18px 0;">Your table will appear here.</div>
+    </div>
+    <div class="verdict" id="verdict1"></div>
+    <div class="verdict" id="verdict2"></div>
+  </div>
+
+  <div class="panel" id="comparePanel" style="display:none;">
+    <h3>3 &middot; The comparison verdicts</h3>
+    <div style="font-size:0.85rem; color:#6b7a99; margin-bottom:8px;">Complete both propositions&rsquo; columns to unlock. The table itself decides &mdash; no opinion required.</div>
+    <div class="compare-grid" id="compareGrid"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+let tokens1 = [], tokens2 = [], active = 1;
+let ast1 = null, ast2 = null, parseErr1 = '', parseErr2 = '';
+let columns = [], atoms = [], rows = [], revealed = 0, built = false;
+
+/* ---------- parser ---------- */
+function tokenize(arr){ return arr.slice(); }
+function parse(toks){
+  let i = 0;
+  function peek(){ return toks[i]; }
+  function eat(){ return toks[i++]; }
+  function parseOr(){
+    // ∧ and ∨ may not be mixed without parentheses — that would be ambiguous,
+    // exactly as the lesson teaches.
+    let l = parseNot();
+    let op = null;
+    while (peek() === '∧' || peek() === '∨'){
+      if (op && peek() !== op) throw new Error('ambiguous — add parentheses');
+      op = eat();
+      const r = parseNot();
+      l = {type: op === '∧' ? 'and' : 'or', l, r};
+    }
+    return l;
+  }
+  function parseNot(){
+    if (peek() === '¬'){ eat(); return {type:'not', sub: parseNot()}; }
+    return parseAtom();
+  }
+  function parseAtom(){
+    const t = peek();
+    if (t === 'A' || t === 'B' || t === 'C'){ eat(); return {type:'atom', name:t}; }
+    if (t === '('){
+      eat();
+      const e = parseOr();
+      if (peek() !== ')') throw new Error('missing )');
+      eat();
+      return e;
+    }
+    if (t === undefined) throw new Error('incomplete');
+    throw new Error('unexpected ' + t);
+  }
+  const e = parseOr();
+  if (i < toks.length) throw new Error('extra symbols after a complete proposition');
+  return e;
+}
+function fmt(node){
+  if (node.type === 'atom') return node.name;
+  if (node.type === 'not'){
+    return '¬' + (node.sub.type === 'atom' || node.sub.type === 'not' ? fmt(node.sub) : '(' + fmt(node.sub) + ')');
+  }
+  const sym = node.type === 'and' ? ' ∧ ' : ' ∨ ';
+  const side = ch => (ch.type === 'and' || ch.type === 'or') && ch.type !== node.type
+    ? '(' + fmt(ch) + ')' : fmt(ch);
+  return side(node.l) + sym + side(node.r);
+}
+function evalNode(node, env){
+  switch(node.type){
+    case 'atom': return env[node.name];
+    case 'not': return !evalNode(node.sub, env);
+    case 'and': return evalNode(node.l, env) && evalNode(node.r, env);
+    case 'or': return evalNode(node.l, env) || evalNode(node.r, env);
+  }
+}
+function collectAtoms(node, set){
+  if (node.type === 'atom') set.add(node.name);
+  else if (node.type === 'not') collectAtoms(node.sub, set);
+  else { collectAtoms(node.l, set); collectAtoms(node.r, set); }
+}
+function size(node){
+  if (node.type === 'atom') return 1;
+  if (node.type === 'not') return 1 + size(node.sub);
+  return 1 + size(node.l) + size(node.r);
+}
+function collectSubs(node, map){
+  if (node.type === 'not') collectSubs(node.sub, map);
+  else if (node.type === 'and' || node.type === 'or'){ collectSubs(node.l, map); collectSubs(node.r, map); }
+  if (node.type !== 'atom'){
+    const key = fmt(node, 0);
+    if (!map.has(key)) map.set(key, node);
+  }
+}
+
+/* ---------- expression editing ---------- */
+function setActive(n){
+  active = n;
+  document.getElementById('box1').classList.toggle('active', n === 1);
+  document.getElementById('box2').classList.toggle('active', n === 2);
+}
+function addTok(t){
+  const arr = active === 1 ? tokens1 : tokens2;
+  if (arr.length >= 24) return;
+  arr.push(t);
+  refresh();
+}
+function backspace(){
+  const arr = active === 1 ? tokens1 : tokens2;
+  arr.pop();
+  refresh();
+}
+function clearExpr(){
+  if (active === 1) tokens1 = []; else tokens2 = [];
+  refresh();
+}
+function loadPreset(t1, t2){
+  tokens1 = t1.slice();
+  tokens2 = t2 ? t2.slice() : [];
+  refresh();
+}
+function renderBox(id, arr, ph){
+  const box = document.getElementById(id);
+  box.innerHTML = arr.length ? arr.join(' ') : '<span class="placeholder">' + ph + '</span>';
+}
+function refresh(){
+  renderBox('box1', tokens1, 'tap the keys below&hellip;');
+  renderBox('box2', tokens2, 'for comparing two propositions');
+  ast1 = ast2 = null; parseErr1 = parseErr2 = '';
+  if (tokens1.length){
+    try { ast1 = parse(tokenize(tokens1)); } catch(e){ parseErr1 = e.message; }
+  }
+  if (tokens2.length){
+    try { ast2 = parse(tokenize(tokens2)); } catch(e){ parseErr2 = e.message; }
+  }
+  const s1 = document.getElementById('status1');
+  s1.textContent = !tokens1.length ? '' : (ast1 ? '✓ well-formed' : '… ' + parseErr1);
+  s1.className = 'expr-status ' + (ast1 ? 'ok' : 'bad');
+  const s2 = document.getElementById('status2');
+  s2.textContent = !tokens2.length ? '' : (ast2 ? '✓ well-formed' : '… ' + parseErr2);
+  s2.className = 'expr-status ' + (ast2 ? 'ok' : 'bad');
+  buildTable();
+}
+
+/* ---------- table ---------- */
+function buildTable(){
+  built = false; revealed = 0; columns = []; rows = [];
+  document.getElementById('verdict1').className = 'verdict';
+  document.getElementById('verdict2').className = 'verdict';
+  document.getElementById('comparePanel').style.display = (tokens2.length ? 'block' : 'none');
+  document.getElementById('compareGrid').innerHTML = '<div style="color:#9aa7c0; font-size:0.85rem;">Waiting for both columns&hellip;</div>';
+  const ok1 = ast1, ok2 = tokens2.length ? ast2 : true;
+  if (!ok1 || !ok2){
+    document.getElementById('tableArea').innerHTML = '<div style="text-align:center; color:#9aa7c0; font-size:0.9rem; padding: 18px 0;">' + (tokens1.length ? 'Finish a well-formed proposition to see its table.' : 'Your table will appear here.') + '</div>';
+    document.getElementById('btnNext').disabled = true;
+    document.getElementById('btnAll').disabled = true;
+    document.getElementById('hint').textContent = tokens1.length && !ast1 ? 'Keep going — the proposition isn’t complete yet.' : 'Enter a proposition above to begin.';
+    return;
+  }
+  const atomSet = new Set();
+  collectAtoms(ast1, atomSet);
+  if (ast2 && tokens2.length) collectAtoms(ast2, atomSet);
+  atoms = ['A','B','C'].filter(a => atomSet.has(a));
+  const subMap = new Map();
+  collectSubs(ast1, subMap);
+  if (ast2 && tokens2.length) collectSubs(ast2, subMap);
+  const key1 = fmt(ast1, 0);
+  const key2 = (ast2 && tokens2.length) ? fmt(ast2, 0) : null;
+  const subs = Array.from(subMap.entries())
+    .sort((x, y) => size(x[1]) - size(y[1]) || x[0].length - y[0].length)
+    .filter(([k]) => k !== key1 && k !== key2);
+  columns = subs.map(([k, n]) => ({key:k, node:n, kind:'sub'}));
+  columns.push({key:key1, node:ast1, kind:'full1'});
+  if (key2 && key2 !== key1) columns.push({key:key2, node:ast2, kind:'full2'});
+  // rows: T first, standard book order
+  const n = atoms.length;
+  rows = [];
+  for (let r = 0; r < (1 << n); r++){
+    const env = {};
+    atoms.forEach((a, idx) => { env[a] = !((r >> (n - 1 - idx)) & 1); });
+    rows.push(env);
+  }
+  built = true;
+  renderTable();
+  document.getElementById('btnNext').disabled = false;
+  document.getElementById('btnAll').disabled = false;
+  document.getElementById('hint').textContent = 'The reference columns are filled in. Now fill the remaining ' + columns.length + ' column' + (columns.length === 1 ? '' : 's') + ', simplest first.';
+}
+function renderTable(popCol){
+  let html = '<table><thead><tr>';
+  atoms.forEach(a => { html += '<th class="atom-h">' + a + '</th>'; });
+  columns.forEach((c, i) => {
+    const cls = c.kind === 'full1' ? 'full1' : (c.kind === 'full2' ? 'full2' : '');
+    html += '<th class="' + cls + '">' + escapeHtml(c.key) + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+  rows.forEach(env => {
+    html += '<tr>';
+    atoms.forEach(a => { html += cell(env[a], true, false); });
+    columns.forEach((c, i) => {
+      if (i < revealed) html += cell(evalNode(c.node, env), true, i === popCol);
+      else html += '<td class="hidden-cell">?</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('tableArea').innerHTML = html;
+}
+function cell(v, shown, pop){
+  return '<td class="' + (v ? 't' : 'f') + (pop ? ' pop' : '') + '">' + (v ? 'T' : 'F') + '</td>';
+}
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+function fillNext(){
+  if (!built || revealed >= columns.length) return;
+  revealed++;
+  renderTable(revealed - 1);
+  afterReveal();
+}
+function fillAll(){
+  if (!built) return;
+  revealed = columns.length;
+  renderTable(revealed - 1);
+  afterReveal();
+}
+function afterReveal(){
+  const remaining = columns.length - revealed;
+  document.getElementById('btnNext').disabled = remaining === 0;
+  document.getElementById('btnAll').disabled = remaining === 0;
+  document.getElementById('hint').textContent = remaining
+    ? remaining + ' column' + (remaining === 1 ? '' : 's') + ' to go — each new column only needs columns you’ve already filled.'
+    : 'Table complete. Read the verdicts below — then check your by-hand table against this one.';
+  columns.forEach((c, i) => {
+    if (i < revealed && (c.kind === 'full1' || c.kind === 'full2')) showVerdict(c);
+  });
+  if (revealed === columns.length && tokens2.length && ast1 && ast2) showCompare();
+}
+function showVerdict(c){
+  const vals = rows.map(env => evalNode(c.node, env));
+  const allT = vals.every(v => v), allF = vals.every(v => !v);
+  const el = document.getElementById(c.kind === 'full1' ? 'verdict1' : 'verdict2');
+  let cls, text;
+  if (allT){ cls = 'v-taut'; text = '<strong>' + escapeHtml(c.key) + '</strong> is true in <strong>every</strong> row: a <strong>logical truth (tautology)</strong>. Its truth is guaranteed as a matter of logic alone.'; }
+  else if (allF){ cls = 'v-contra'; text = '<strong>' + escapeHtml(c.key) + '</strong> is false in <strong>every</strong> row: a <strong>contradiction</strong>. No possible situation makes it true.'; }
+  else { cls = 'v-cont'; text = '<strong>' + escapeHtml(c.key) + '</strong> is true in some rows and false in others: <strong>contingent</strong>. The world decides, not logic.'; }
+  el.className = 'verdict show ' + cls;
+  el.innerHTML = text;
+}
+function showCompare(){
+  const v1 = rows.map(env => evalNode(ast1, env));
+  const v2 = rows.map(env => evalNode(ast2, env));
+  const eq = v1.every((v, i) => v === v2[i]);
+  const me = !v1.some((v, i) => v && v2[i]);
+  const e12 = !v1.some((v, i) => v && !v2[i]);
+  const e21 = !v2.some((v, i) => v && !v1[i]);
+  const firstDiff = v1.findIndex((v, i) => v !== v2[i]);
+  const firstBoth = v1.findIndex((v, i) => v && v2[i]);
+  const cex12 = v1.findIndex((v, i) => v && !v2[i]);
+  const cex21 = v2.findIndex((v, i) => v && !v1[i]);
+  const grid = document.getElementById('compareGrid');
+  grid.innerHTML =
+    cmpCard('Logically equivalent?', eq,
+      eq ? 'The two columns match in every row — each entails the other.'
+         : 'Columns differ at row ' + (firstDiff + 1) + '. Not equivalent.') +
+    cmpCard('Mutually exclusive?', me,
+      me ? 'No row makes both true — they can never hold together.'
+         : 'Row ' + (firstBoth + 1) + ' makes both true, so they are compatible.') +
+    cmpCard('Does 1 entail 2?', e12,
+      e12 ? 'No row has T for 1 and F for 2 — whenever 1 holds, 2 must.'
+          : 'Row ' + (cex12 + 1) + ' has T for 1 but F for 2: a counterexample.') +
+    cmpCard('Does 2 entail 1?', e21,
+      e21 ? 'No row has T for 2 and F for 1 — whenever 2 holds, 1 must.'
+          : 'Row ' + (cex21 + 1) + ' has T for 2 but F for 1: a counterexample.');
+}
+function cmpCard(title, yes, detail){
+  return '<div class="cmp ' + (yes ? 'yes' : 'no') + '"><div class="cmp-title">' + title +
+    ' <span class="mark">' + (yes ? '✓ yes' : '✗ no') + '</span></div>' + detail + '</div>';
+}
+function resetAll(){
+  tokens1 = []; tokens2 = []; setActive(1);
+  refresh();
+}
+
+/* preload a meaningful default */
+loadPreset(['(','A','∨','B',')','∧','¬','(','A','∧','B',')'], null);
+</script>
+</body>
+</html>
