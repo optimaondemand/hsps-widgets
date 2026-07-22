@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Urn Drawer — With & Without Replacement</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .preset-btn {
+    padding: 7px 12px;
+    border: 2px solid #0E1C42;
+    border-radius: 8px;
+    background: #fff;
+    color: #0E1C42;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .preset-btn:hover { background: #F8FAFD; }
+  .preset-btn.active { background: #0E1C42; color: #fff; }
+  .custom-inputs { display: flex; gap: 6px; align-items: center; font-size: 0.8rem; font-weight: 700; color: #0E1C42; }
+  .custom-inputs input {
+    width: 52px;
+    padding: 6px;
+    border: 2px solid #D0D9E8;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    text-align: center;
+  }
+
+  .toggle-group {
+    display: flex;
+    background: #fff;
+    border: 2px solid #0E1C42;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .toggle-btn {
+    padding: 8px 16px;
+    border: none;
+    background: transparent;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: #0E1C42;
+  }
+  .toggle-btn.active { background: #0E1C42; color: #fff; }
+
+  .action-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .btn {
+    padding: 9px 18px;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn-gold { background: #C7922C; color: #fff; }
+  .btn-gold:hover { background: #a87820; }
+  .btn-gold:disabled { background: #cbb98f; cursor: not-allowed; }
+  .btn-navy { background: #0E1C42; color: #fff; }
+  .btn-navy:hover { background: #1a2f63; }
+  .btn-red { background: #C0392B; color: #fff; }
+  .btn-red:hover { background: #96281c; }
+
+  .main-grid {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    flex-wrap: wrap;
+    max-width: 860px;
+    margin: 0 auto 14px auto;
+  }
+  .panel {
+    background: #fff;
+    border: 2px solid #D0D9E8;
+    border-radius: 12px;
+    padding: 14px 16px;
+    flex: 1;
+    min-width: 280px;
+  }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .urn-viz {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: center;
+    padding: 10px;
+    background: #F8FAFD;
+    border: 2px solid #D0D9E8;
+    border-radius: 10px;
+    min-height: 90px;
+    max-height: 220px;
+    overflow-y: auto;
+    margin-bottom: 10px;
+  }
+  .marble {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: transform 0.15s, opacity 0.3s;
+  }
+  .marble.black { background: #0E1C42; border: 1.5px solid #0E1C42; }
+  .marble.white { background: #fff; border: 1.5px solid #6b7a99; }
+  .marble.drawing { transform: scale(1.6); box-shadow: 0 0 0 4px rgba(199,146,44,0.5); }
+  .urn-count { text-align: center; font-size: 0.92rem; font-weight: 700; color: #0E1C42; margin-bottom: 8px; }
+
+  .next-prob {
+    background: #EEF1F8;
+    border-left: 5px solid #0E1C42;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 4px;
+  }
+  .next-prob .label { font-size: 0.72rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.05em; }
+  .next-prob .value { font-size: 1.35rem; font-weight: 900; color: #0E1C42; }
+  .next-prob .value .dec { font-size: 0.9rem; font-weight: 700; color: #C7922C; margin-left: 8px; }
+  .prob-moved { color: #C0392B !important; }
+
+  .drawn-display {
+    text-align: center;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #0E1C42;
+    min-height: 28px;
+    margin-bottom: 10px;
+  }
+
+  .stats-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .stat-chip {
+    background: #F8FAFD;
+    border: 2px solid #D0D9E8;
+    border-radius: 10px;
+    padding: 8px 14px;
+    text-align: center;
+    min-width: 84px;
+  }
+  .stat-chip .val { font-size: 1.25rem; font-weight: 900; color: #0E1C42; }
+  .stat-chip .lbl { font-size: 0.68rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .freq-bar-wrap { background: #F8FAFD; border: 2px solid #D0D9E8; border-radius: 8px; height: 26px; overflow: hidden; margin-bottom: 6px; position: relative; }
+  .freq-bar { background: #0E1C42; height: 100%; width: 0%; transition: width 0.25s; }
+  .freq-target { position: absolute; top: 0; bottom: 0; width: 2px; background: #C0392B; }
+  .freq-caption { font-size: 0.75rem; color: #6b7a99; text-align: center; margin-bottom: 10px; }
+
+  .history-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 8px;
+    background: #F8FAFD;
+    border: 2px solid #D0D9E8;
+    border-radius: 8px;
+    min-height: 34px;
+  }
+  .hist-dot { width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; }
+  .hist-dot.black { background: #0E1C42; }
+  .hist-dot.white { background: #fff; border: 1.5px solid #6b7a99; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63);
+    color: #fff;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.83rem;
+    max-width: 860px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+  .empty-msg { text-align: center; color: #C0392B; font-weight: 700; font-size: 0.85rem; min-height: 20px; }
+</style>
+</head>
+<body>
+<h1>&#127994; Urn Drawer</h1>
+<p class="subtitle">Draw marbles with or without replacement &mdash; and watch what happens to the probability of the <em>next</em> draw.</p>
+
+<div class="controls">
+  <button class="preset-btn active" id="pX" onclick="setPreset('X')">Urn X &mdash; 3 black / 1 white</button>
+  <button class="preset-btn" id="pY" onclick="setPreset('Y')">Urn Y &mdash; 1 black / 3 white</button>
+  <button class="preset-btn" id="p50" onclick="setPreset('50')">50 / 50 urn</button>
+  <div class="custom-inputs">
+    <span>Custom:</span>
+    <input type="number" id="customB" min="0" max="99" value="3" aria-label="black marbles"> black
+    <input type="number" id="customW" min="0" max="99" value="1" aria-label="white marbles"> white
+    <button class="preset-btn" id="pC" onclick="setPreset('C')">Set</button>
+  </div>
+</div>
+
+<div class="controls">
+  <div class="toggle-group">
+    <button class="toggle-btn active" id="modeWith" onclick="setMode(true)">With replacement</button>
+    <button class="toggle-btn" id="modeWithout" onclick="setMode(false)">Without replacement</button>
+  </div>
+</div>
+
+<div class="action-row">
+  <button class="btn btn-gold" id="draw1" onclick="draw(1)">Draw 1&times;</button>
+  <button class="btn btn-gold" id="draw10" onclick="draw(10)">Draw 10&times;</button>
+  <button class="btn btn-navy" onclick="resetDraws()">Reset draws (refill urn)</button>
+  <button class="btn btn-red" onclick="resetAll()">Reset everything</button>
+</div>
+<div class="empty-msg" id="emptyMsg"></div>
+
+<div class="main-grid">
+  <div class="panel">
+    <h3>The urn right now</h3>
+    <div class="urn-count" id="urnCount"></div>
+    <div class="urn-viz" id="urnViz"></div>
+    <div class="next-prob">
+      <div class="label">P(black on the next draw)</div>
+      <div class="value"><span id="nextProbFrac">&mdash;</span><span class="dec" id="nextProbDec"></span></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Your draws so far</h3>
+    <div class="drawn-display" id="drawnDisplay">Press <strong>Draw</strong> to begin.</div>
+    <div class="stats-row">
+      <div class="stat-chip"><div class="val" id="statDraws">0</div><div class="lbl">Draws</div></div>
+      <div class="stat-chip"><div class="val" id="statBlack">0</div><div class="lbl">Black</div></div>
+      <div class="stat-chip"><div class="val" id="statWhite">0</div><div class="lbl">White</div></div>
+      <div class="stat-chip"><div class="val" id="statFreq">&mdash;</div><div class="lbl">Rel. freq. black</div></div>
+    </div>
+    <div class="freq-bar-wrap">
+      <div class="freq-bar" id="freqBar"></div>
+      <div class="freq-target" id="freqTarget" style="display:none"></div>
+    </div>
+    <div class="freq-caption" id="freqCaption">Relative frequency of black (red line = starting probability of black)</div>
+    <div class="history-strip" id="historyStrip"></div>
+  </div>
+</div>
+
+<div class="insight" id="insightBox">
+  <strong>What to watch:</strong> In <strong>with replacement</strong> mode, every drawn marble goes back, so the urn &mdash; and the
+  probability readout &mdash; never changes: the draws are <strong>independent</strong>. Switch to <strong>without replacement</strong>
+  and draw a few times: each marble you remove changes the mix, and P(black on the next draw) moves after every single draw.
+  That movement <em>is</em> dependence &mdash; the past whispering to the future.
+</div>
+
+<script>
+  let baseB = 3, baseW = 1;      // urn composition at reset
+  let curB = 3, curW = 1;        // current contents (differs from base only without replacement)
+  let withReplacement = true;
+  let draws = 0, gotB = 0, gotW = 0;
+  let history = [];
+  let startProb = 0.75;
+
+  function gcd(a, b) { return b ? gcd(b, a % b) : a; }
+  function fracStr(num, den) {
+    if (den === 0) return '&mdash;';
+    if (num === 0) return '0';
+    const g = gcd(num, den);
+    const n = num / g, d = den / g;
+    return d === 1 ? String(n) : n + '/' + d;
+  }
+
+  function setPreset(which) {
+    ['pX','pY','p50','pC'].forEach(id => document.getElementById(id).classList.remove('active'));
+    if (which === 'X') { baseB = 3; baseW = 1; document.getElementById('pX').classList.add('active'); }
+    else if (which === 'Y') { baseB = 1; baseW = 3; document.getElementById('pY').classList.add('active'); }
+    else if (which === '50') { baseB = 50; baseW = 50; document.getElementById('p50').classList.add('active'); }
+    else {
+      let b = parseInt(document.getElementById('customB').value, 10);
+      let w = parseInt(document.getElementById('customW').value, 10);
+      if (isNaN(b) || b < 0) b = 0;
+      if (isNaN(w) || w < 0) w = 0;
+      b = Math.min(b, 99); w = Math.min(w, 99);
+      if (b + w === 0) { b = 1; w = 1; }
+      baseB = b; baseW = w;
+      document.getElementById('customB').value = b;
+      document.getElementById('customW').value = w;
+      document.getElementById('pC').classList.add('active');
+    }
+    resetDraws();
+  }
+
+  function setMode(withRep) {
+    withReplacement = withRep;
+    document.getElementById('modeWith').className = 'toggle-btn' + (withRep ? ' active' : '');
+    document.getElementById('modeWithout').className = 'toggle-btn' + (!withRep ? ' active' : '');
+    resetDraws();
+  }
+
+  function resetDraws() {
+    curB = baseB; curW = baseW;
+    draws = 0; gotB = 0; gotW = 0; history = [];
+    startProb = (baseB + baseW) > 0 ? baseB / (baseB + baseW) : 0;
+    document.getElementById('drawnDisplay').innerHTML = 'Press <strong>Draw</strong> to begin.';
+    document.getElementById('emptyMsg').textContent = '';
+    render();
+  }
+
+  function resetAll() {
+    document.getElementById('customB').value = 3;
+    document.getElementById('customW').value = 1;
+    setMode(true);
+    setPreset('X');
+  }
+
+  function drawOnce() {
+    const total = curB + curW;
+    if (total === 0) return null;
+    const isBlack = Math.random() < curB / total;
+    if (isBlack) { gotB++; if (!withReplacement) curB--; }
+    else { gotW++; if (!withReplacement) curW--; }
+    draws++;
+    history.push(isBlack ? 'black' : 'white');
+    return isBlack;
+  }
+
+  function draw(n) {
+    let last = null;
+    for (let i = 0; i < n; i++) {
+      const r = drawOnce();
+      if (r === null) break;
+      last = r;
+    }
+    if (last === null) {
+      document.getElementById('emptyMsg').textContent = 'The urn is empty — press "Reset draws" to refill it.';
+    } else {
+      const name = last ? 'BLACK' : 'WHITE';
+      const dot = last
+        ? '<span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#0E1C42;vertical-align:-2px;"></span>'
+        : '<span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#fff;border:1.5px solid #6b7a99;vertical-align:-2px;"></span>';
+      document.getElementById('drawnDisplay').innerHTML = 'Last draw: ' + dot + ' <strong>' + name + '</strong>' +
+        (withReplacement ? ' (returned to the urn)' : ' (set aside)');
+    }
+    render();
+  }
+
+  function render() {
+    const total = curB + curW;
+    // urn viz (cap at 120 dots for the display, note if truncated)
+    const viz = document.getElementById('urnViz');
+    viz.innerHTML = '';
+    const shown = Math.min(total, 120);
+    const shownB = total > 0 ? Math.round(shown * curB / total) : 0;
+    // interleave deterministically so colours are visually mixed
+    const order = [];
+    for (let i = 0; i < shown; i++) {
+      const before = Math.floor(i * shownB / shown);
+      const after = Math.floor((i + 1) * shownB / shown);
+      order.push(after > before ? 'black' : 'white');
+    }
+    for (const c of order) {
+      const m = document.createElement('div');
+      m.className = 'marble ' + c;
+      viz.appendChild(m);
+    }
+    document.getElementById('urnCount').innerHTML =
+      'Contains: <span style="color:#0E1C42">' + curB + ' black</span> &middot; ' + curW + ' white (' + total + ' total)' +
+      (total > 120 ? ' &mdash; showing 120' : '');
+
+    // next-draw probability
+    const fracEl = document.getElementById('nextProbFrac');
+    const decEl = document.getElementById('nextProbDec');
+    if (total === 0) { fracEl.innerHTML = '&mdash;'; decEl.textContent = ''; }
+    else {
+      fracEl.innerHTML = fracStr(curB, total);
+      decEl.textContent = '≈ ' + (curB / total).toFixed(4);
+      const moved = Math.abs(curB / total - startProb) > 1e-9;
+      fracEl.className = moved ? 'prob-moved' : '';
+      decEl.className = 'dec' + (moved ? ' prob-moved' : '');
+    }
+
+    // stats
+    document.getElementById('statDraws').textContent = draws;
+    document.getElementById('statBlack').textContent = gotB;
+    document.getElementById('statWhite').textContent = gotW;
+    document.getElementById('statFreq').textContent = draws > 0 ? (gotB / draws).toFixed(3) : '—';
+    document.getElementById('freqBar').style.width = draws > 0 ? (100 * gotB / draws) + '%' : '0%';
+    const tgt = document.getElementById('freqTarget');
+    tgt.style.display = 'block';
+    tgt.style.left = (100 * startProb) + '%';
+
+    // history (last 60)
+    const strip = document.getElementById('historyStrip');
+    strip.innerHTML = '';
+    history.slice(-60).forEach(c => {
+      const d = document.createElement('div');
+      d.className = 'hist-dot ' + c;
+      strip.appendChild(d);
+    });
+
+    document.getElementById('draw1').disabled = total === 0;
+    document.getElementById('draw10').disabled = total === 0;
+  }
+
+  resetAll();
+</script>
+</body>
+</html>

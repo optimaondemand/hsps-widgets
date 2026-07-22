@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Two-Way Table Explorer — Joint, Marginal & Conditional</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .preset-btn, .mode-btn {
+    padding: 7px 12px;
+    border: 2px solid #0E1C42;
+    border-radius: 8px;
+    background: #fff;
+    color: #0E1C42;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .preset-btn.active, .mode-btn.active { background: #0E1C42; color: #fff; }
+  .mode-group { display: flex; background: #fff; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .mode-group .mode-btn { border: none; border-radius: 0; }
+
+  .table-wrap { max-width: 720px; margin: 0 auto 12px auto; background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 0 auto; }
+  th, td { border: 1px solid #D0D9E8; padding: 8px 10px; text-align: center; font-size: 0.88rem; min-width: 86px; }
+  th { background: #0E1C42; color: #fff; font-size: 0.78rem; }
+  th.corner { background: #fff; border: none; }
+  .rowhead { background: #EEF1F8; font-weight: 700; color: #0E1C42; }
+  td.cell { cursor: pointer; font-weight: 700; color: #0E1C42; position: relative; }
+  td.cell input {
+    width: 62px;
+    border: 1px solid #D0D9E8;
+    border-radius: 4px;
+    text-align: center;
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #0E1C42;
+    padding: 2px;
+  }
+  td.cell .pct { display: block; font-size: 0.72rem; color: #6b7a99; font-weight: 400; margin-top: 2px; }
+  td.total { background: #F8FAFD; font-weight: 900; color: #0E1C42; cursor: pointer; }
+  td.hl-joint { background: #FDF3E3; box-shadow: inset 0 0 0 2px #C7922C; }
+  td.hl-context { background: #E8F6FB; }
+  td.hl-total { background: #FDF3E3; box-shadow: inset 0 0 0 2px #C7922C; }
+
+  .readout {
+    max-width: 720px;
+    margin: 0 auto 12px auto;
+    background: #EEF1F8;
+    border-left: 5px solid #0E1C42;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    min-height: 52px;
+  }
+  .readout strong { color: #C0392B; }
+  .readout .hint { color: #6b7a99; font-size: 0.82rem; }
+
+  .bars-panel { max-width: 720px; margin: 0 auto 12px auto; background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; }
+  .bars-panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .bar-label { min-width: 110px; font-size: 0.8rem; font-weight: 700; color: #0E1C42; text-align: right; }
+  .bar-track { flex: 1; display: flex; height: 26px; border-radius: 6px; overflow: hidden; border: 1px solid #D0D9E8; }
+  .bar-seg { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 0.68rem; font-weight: 700; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .bars-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.75rem; margin-top: 6px; }
+  .bars-legend .legend-item { display: flex; align-items: center; gap: 5px; }
+  .bars-legend .legend-box { width: 13px; height: 13px; border-radius: 3px; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63);
+    color: #fff;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.83rem;
+    max-width: 720px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#128202; Two-Way Table Explorer</h1>
+<p class="subtitle">Click any cell or total to see the probability it holds. Switch views to read the same table three different ways.</p>
+
+<div class="controls">
+  <button class="preset-btn active" id="preset0" onclick="loadPreset(0)">Study method &times; Exam result</button>
+  <button class="preset-btn" id="preset1" onclick="loadPreset(1)">App version &times; Signed up (A/B test)</button>
+  <span style="font-size:0.8rem;font-weight:700;color:#0E1C42;">&mdash; or edit any count directly</span>
+</div>
+
+<div class="controls">
+  <div class="mode-group">
+    <button class="mode-btn active" id="mode-counts" onclick="setMode('counts')">Counts</button>
+    <button class="mode-btn" id="mode-joint" onclick="setMode('joint')">Joint (share of everyone)</button>
+    <button class="mode-btn" id="mode-row" onclick="setMode('row')">Conditional on row</button>
+    <button class="mode-btn" id="mode-col" onclick="setMode('col')">Conditional on column</button>
+  </div>
+</div>
+
+<div class="table-wrap"><div id="tableHost"></div></div>
+
+<div class="readout" id="readout"><span class="hint">Click a cell for a joint probability, a row or column total for a marginal one. In a conditional view, clicking a cell shows the conditional probability instead.</span></div>
+
+<div class="bars-panel">
+  <h3>Each row as a segmented bar (column shares within the row)</h3>
+  <div id="barsHost"></div>
+  <div class="bars-legend" id="barsLegend"></div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> The same table answers three different questions. <strong>Joint</strong>: what share of
+  <em>everyone</em> sits in this cell? <strong>Marginal</strong>: what share lands in this row (or column), ignoring the other
+  variable entirely? <strong>Conditional</strong>: <em>among</em> one row only, how do the columns split? If the segmented bars
+  look the same from row to row, the two variables are telling you nothing about each other &mdash; that is what independence
+  looks like in data. Bars that differ row-to-row are evidence of association (though never, by themselves, of causation).
+</div>
+
+<script>
+  const SEG_COLORS = ['#0E1C42', '#C7922C', '#2196D0'];
+  const PRESETS = [
+    {
+      rowName: 'Study method', colName: 'Exam result',
+      rows: ['Flashcards', 'Rereading'], cols: ['Passed', 'Did not pass'],
+      data: [[45, 15], [28, 32]]
+    },
+    {
+      rowName: 'App version', colName: 'Outcome',
+      rows: ['Version A', 'Version B'], cols: ['Signed up', 'Did not'],
+      data: [[62, 438], [89, 411]]
+    }
+  ];
+
+  let state = JSON.parse(JSON.stringify(PRESETS[0]));
+  let mode = 'counts';
+  let sel = null; // {type:'cell'|'rowTotal'|'colTotal', r, c}
+
+  function loadPreset(i) {
+    state = JSON.parse(JSON.stringify(PRESETS[i]));
+    sel = null;
+    document.getElementById('preset0').className = 'preset-btn' + (i === 0 ? ' active' : '');
+    document.getElementById('preset1').className = 'preset-btn' + (i === 1 ? ' active' : '');
+    render();
+  }
+
+  function setMode(m) {
+    mode = m;
+    ['counts','joint','row','col'].forEach(x =>
+      document.getElementById('mode-' + x).className = 'mode-btn' + (x === m ? ' active' : ''));
+    render();
+  }
+
+  function totals() {
+    const rT = state.data.map(row => row.reduce((a, b) => a + b, 0));
+    const cT = state.cols.map((_, c) => state.data.reduce((a, row) => a + row[c], 0));
+    const g = rT.reduce((a, b) => a + b, 0);
+    return { rT, cT, g };
+  }
+
+  function editCell(r, c, val) {
+    let v = parseInt(val, 10);
+    if (isNaN(v) || v < 0) v = 0;
+    state.data[r][c] = Math.min(v, 99999);
+    render();
+  }
+
+  function clickCell(r, c) { sel = { type: 'cell', r, c }; render(); }
+  function clickRowTotal(r) { sel = { type: 'rowTotal', r }; render(); }
+  function clickColTotal(c) { sel = { type: 'colTotal', c }; render(); }
+
+  function fmt(x) { return (Math.round(x * 10000) / 10000).toString(); }
+  function pct(x) { return (100 * x).toFixed(1) + '%'; }
+
+  function cellDisplay(r, c, t) {
+    const n = state.data[r][c];
+    if (mode === 'counts') return '';
+    let share = 0, base = '';
+    if (mode === 'joint') { share = t.g ? n / t.g : 0; }
+    else if (mode === 'row') { share = t.rT[r] ? n / t.rT[r] : 0; }
+    else { share = t.cT[c] ? n / t.cT[c] : 0; }
+    return '<span class="pct">' + pct(share) + '</span>';
+  }
+
+  function render() {
+    const t = totals();
+
+    // table
+    let h = '<table><tr><th class="corner"></th>';
+    state.cols.forEach(cn => h += '<th>' + cn + '</th>');
+    h += '<th>Total</th></tr>';
+    state.rows.forEach((rn, r) => {
+      h += '<tr><td class="rowhead">' + rn + '</td>';
+      state.cols.forEach((cn, c) => {
+        let cls = 'cell';
+        if (sel) {
+          if (sel.type === 'cell' && sel.r === r && sel.c === c) cls += ' hl-joint';
+          else if (sel.type === 'cell' && mode === 'row' && sel.r === r) cls += ' hl-context';
+          else if (sel.type === 'cell' && mode === 'col' && sel.c === c) cls += ' hl-context';
+          else if (sel.type === 'rowTotal' && sel.r === r) cls += ' hl-context';
+          else if (sel.type === 'colTotal' && sel.c === c) cls += ' hl-context';
+        }
+        h += '<td class="' + cls + '" onclick="clickCell(' + r + ',' + c + ')">' +
+             '<input type="number" min="0" value="' + state.data[r][c] + '" ' +
+             'onclick="event.stopPropagation();clickCell(' + r + ',' + c + ')" ' +
+             'onchange="editCell(' + r + ',' + c + ', this.value)">' +
+             cellDisplay(r, c, t) + '</td>';
+      });
+      const rtCls = 'total' + (sel && sel.type === 'rowTotal' && sel.r === r ? ' hl-total' : '');
+      h += '<td class="' + rtCls + '" onclick="clickRowTotal(' + r + ')">' + t.rT[r] + '</td></tr>';
+    });
+    h += '<tr><td class="rowhead">Total</td>';
+    state.cols.forEach((cn, c) => {
+      const ctCls = 'total' + (sel && sel.type === 'colTotal' && sel.c === c ? ' hl-total' : '');
+      h += '<td class="' + ctCls + '" onclick="clickColTotal(' + c + ')">' + t.cT[c] + '</td>';
+    });
+    h += '<td class="total">' + t.g + '</td></tr></table>';
+    document.getElementById('tableHost').innerHTML = h;
+
+    // readout
+    const ro = document.getElementById('readout');
+    if (!sel) {
+      ro.innerHTML = '<span class="hint">Click a cell for a joint probability, a row or column total for a marginal one. In a conditional view, clicking a cell shows the conditional probability instead.</span>';
+    } else if (sel.type === 'rowTotal') {
+      const r = sel.r;
+      ro.innerHTML = '<strong>Marginal:</strong> P(' + state.rows[r] + ') = ' + t.rT[r] + '/' + t.g +
+        ' = ' + (t.g ? fmt(t.rT[r] / t.g) : '—') + ' (' + (t.g ? pct(t.rT[r] / t.g) : '—') +
+        ') &mdash; the share of all ' + t.g + ' in the &ldquo;' + state.rows[r] + '&rdquo; row, ignoring ' + state.colName.toLowerCase() + ' entirely.';
+    } else if (sel.type === 'colTotal') {
+      const c = sel.c;
+      ro.innerHTML = '<strong>Marginal:</strong> P(' + state.cols[c] + ') = ' + t.cT[c] + '/' + t.g +
+        ' = ' + (t.g ? fmt(t.cT[c] / t.g) : '—') + ' (' + (t.g ? pct(t.cT[c] / t.g) : '—') +
+        ') &mdash; the share of all ' + t.g + ' in the &ldquo;' + state.cols[c] + '&rdquo; column, ignoring ' + state.rowName.toLowerCase() + ' entirely.';
+    } else {
+      const { r, c } = sel;
+      const n = state.data[r][c];
+      if (mode === 'row') {
+        ro.innerHTML = '<strong>Conditional:</strong> P(' + state.cols[c] + ' | ' + state.rows[r] + ') = ' +
+          n + '/' + t.rT[r] + ' = ' + (t.rT[r] ? fmt(n / t.rT[r]) : '—') + ' (' + (t.rT[r] ? pct(n / t.rT[r]) : '—') +
+          ') &mdash; among the ' + t.rT[r] + ' in &ldquo;' + state.rows[r] + '&rdquo; only, this is the share in &ldquo;' + state.cols[c] + '&rdquo;. The row total is the new denominator.';
+      } else if (mode === 'col') {
+        ro.innerHTML = '<strong>Conditional:</strong> P(' + state.rows[r] + ' | ' + state.cols[c] + ') = ' +
+          n + '/' + t.cT[c] + ' = ' + (t.cT[c] ? fmt(n / t.cT[c]) : '—') + ' (' + (t.cT[c] ? pct(n / t.cT[c]) : '—') +
+          ') &mdash; among the ' + t.cT[c] + ' in &ldquo;' + state.cols[c] + '&rdquo; only, this is the share in &ldquo;' + state.rows[r] + '&rdquo;. The column total is the new denominator.';
+      } else {
+        ro.innerHTML = '<strong>Joint:</strong> P(' + state.rows[r] + ' ∧ ' + state.cols[c] + ') = ' +
+          n + '/' + t.g + ' = ' + (t.g ? fmt(n / t.g) : '—') + ' (' + (t.g ? pct(n / t.g) : '—') +
+          ') &mdash; the share of all ' + t.g + ' who are in this one cell: both &ldquo;' + state.rows[r] + '&rdquo; and &ldquo;' + state.cols[c] + '&rdquo;.';
+      }
+    }
+
+    // segmented bars
+    let bh = '';
+    state.rows.forEach((rn, r) => {
+      bh += '<div class="bar-row"><div class="bar-label">' + rn + ' (' + t.rT[r] + ')</div><div class="bar-track">';
+      state.cols.forEach((cn, c) => {
+        const share = t.rT[r] ? state.data[r][c] / t.rT[r] : 0;
+        bh += '<div class="bar-seg" style="width:' + (100 * share) + '%;background:' + SEG_COLORS[c % SEG_COLORS.length] + '">' +
+          (share > 0.12 ? pct(share) : '') + '</div>';
+      });
+      bh += '</div></div>';
+    });
+    document.getElementById('barsHost').innerHTML = bh;
+    document.getElementById('barsLegend').innerHTML = state.cols.map((cn, c) =>
+      '<div class="legend-item"><div class="legend-box" style="background:' + SEG_COLORS[c % SEG_COLORS.length] + '"></div>' + cn + '</div>').join('');
+  }
+
+  render();
+</script>
+</body>
+</html>

@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Base-Rate Grid — 1,000 People, One Screening Test</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls {
+    display: flex;
+    gap: 18px;
+    justify-content: center;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .slider-group { text-align: center; }
+  .slider-group label { display: block; font-size: 0.78rem; font-weight: 700; color: #0E1C42; margin-bottom: 4px; }
+  .slider-group input[type=range] { width: 170px; accent-color: #0E1C42; }
+  .slider-group .readout { font-size: 0.92rem; font-weight: 900; color: #C7922C; }
+
+  .toggle-row { display: flex; gap: 10px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .toggle-btn {
+    padding: 8px 16px;
+    border: 2px solid #0E1C42;
+    border-radius: 8px;
+    background: #fff;
+    color: #0E1C42;
+    font-size: 0.83rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .toggle-btn.active { background: #0E1C42; color: #fff; }
+  .btn-reset { padding: 8px 16px; border: none; border-radius: 8px; background: #C0392B; color: #fff; font-size: 0.83rem; font-weight: 700; cursor: pointer; }
+
+  .layout { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; max-width: 960px; margin: 0 auto 14px auto; }
+  .grid-panel, .side-panel {
+    background: #fff;
+    border: 2px solid #D0D9E8;
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .grid-panel { flex: 2; min-width: 320px; }
+  .side-panel { flex: 1; min-width: 260px; }
+  .grid-panel h3, .side-panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .people-grid {
+    display: grid;
+    grid-template-columns: repeat(40, 1fr);
+    gap: 2px;
+  }
+  .person {
+    aspect-ratio: 1;
+    border-radius: 2px;
+    min-width: 0;
+  }
+  .person.tp { background: #C0392B; }
+  .person.fn { background: #f2c4bf; border: 1px solid #C0392B; }
+  .person.fp { background: #C7922C; }
+  .person.tn { background: #dde4ef; }
+  .person.hidden-person { visibility: hidden; }
+
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; font-size: 0.75rem; color: #1a2340; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-box { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
+
+  .count-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .count-table th, .count-table td {
+    border: 1px solid #D0D9E8;
+    padding: 6px 8px;
+    font-size: 0.8rem;
+    text-align: center;
+  }
+  .count-table th { background: #0E1C42; color: #fff; font-size: 0.72rem; }
+  .count-table .rowhead { background: #EEF1F8; font-weight: 700; }
+
+  .answer-box {
+    background: #EEF1F8;
+    border-left: 5px solid #0E1C42;
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .answer-box .label { font-size: 0.72rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+  .answer-box .value { font-size: 1.45rem; font-weight: 900; color: #C0392B; }
+  .answer-box .detail { font-size: 0.8rem; color: #1a2340; margin-top: 4px; line-height: 1.5; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63);
+    color: #fff;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.83rem;
+    max-width: 960px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#129658; The Base-Rate Grid</h1>
+<p class="subtitle">1,000 people take a screening test. Some are sick, most are not &mdash; and the test is good, but not perfect. Who are the positives?</p>
+
+<div class="controls">
+  <div class="slider-group">
+    <label for="prevSlider">Base rate (how many of the 1,000 are sick)</label>
+    <input type="range" id="prevSlider" min="1" max="500" value="10" oninput="render()">
+    <div class="readout" id="prevReadout"></div>
+  </div>
+  <div class="slider-group">
+    <label for="sensSlider">Sensitivity (sick people who test positive)</label>
+    <input type="range" id="sensSlider" min="50" max="100" value="90" oninput="render()">
+    <div class="readout" id="sensReadout"></div>
+  </div>
+  <div class="slider-group">
+    <label for="fprSlider">False-positive rate (healthy people who test positive)</label>
+    <input type="range" id="fprSlider" min="0" max="30" value="9" oninput="render()">
+    <div class="readout" id="fprReadout"></div>
+  </div>
+</div>
+
+<div class="toggle-row">
+  <button class="toggle-btn active" id="viewAll" onclick="setView(false)">Show all 1,000 people</button>
+  <button class="toggle-btn" id="viewPos" onclick="setView(true)">Show only the positives</button>
+  <button class="btn-reset" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="grid-panel">
+    <h3 id="gridTitle">The whole population</h3>
+    <div class="people-grid" id="peopleGrid"></div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-box" style="background:#C0392B"></div>Sick, tests positive (true positive)</div>
+      <div class="legend-item"><div class="legend-box" style="background:#f2c4bf;border:1px solid #C0392B"></div>Sick, tests negative (missed)</div>
+      <div class="legend-item"><div class="legend-box" style="background:#C7922C"></div>Healthy, tests positive (false alarm)</div>
+      <div class="legend-item"><div class="legend-box" style="background:#dde4ef"></div>Healthy, tests negative</div>
+    </div>
+  </div>
+  <div class="side-panel">
+    <h3>The counts</h3>
+    <table class="count-table">
+      <tr><th></th><th>Tests +</th><th>Tests &minus;</th><th>Total</th></tr>
+      <tr><td class="rowhead">Sick</td><td id="cTP">&mdash;</td><td id="cFN">&mdash;</td><td id="cSick">&mdash;</td></tr>
+      <tr><td class="rowhead">Healthy</td><td id="cFP">&mdash;</td><td id="cTN">&mdash;</td><td id="cHealthy">&mdash;</td></tr>
+      <tr><td class="rowhead">Total</td><td id="cPos">&mdash;</td><td id="cNeg">&mdash;</td><td>1000</td></tr>
+    </table>
+    <div class="answer-box">
+      <div class="label">If you test positive, the probability you are actually sick:</div>
+      <div class="value" id="pSickGivenPos">&mdash;</div>
+      <div class="detail" id="pDetail"></div>
+    </div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> Keep the test exactly as good as it is and drag the <strong>base rate</strong> down.
+  When the condition is rare, the healthy crowd is so enormous that even a small false-positive
+  <em>rate</em> produces a huge false-positive <em>count</em> &mdash; gold squares swamp red ones among the positives.
+  The test didn't change; the population did. That is the base rate doing the work most intuitions leave out.
+</div>
+
+<script>
+  let positivesOnly = false;
+
+  function setView(posOnly) {
+    positivesOnly = posOnly;
+    document.getElementById('viewAll').className = 'toggle-btn' + (!posOnly ? ' active' : '');
+    document.getElementById('viewPos').className = 'toggle-btn' + (posOnly ? ' active' : '');
+    render();
+  }
+
+  function resetAll() {
+    document.getElementById('prevSlider').value = 10;
+    document.getElementById('sensSlider').value = 90;
+    document.getElementById('fprSlider').value = 9;
+    setView(false);
+  }
+
+  function render() {
+    const sick = parseInt(document.getElementById('prevSlider').value, 10);
+    const sens = parseInt(document.getElementById('sensSlider').value, 10) / 100;
+    const fpr = parseInt(document.getElementById('fprSlider').value, 10) / 100;
+    const healthy = 1000 - sick;
+
+    const tp = Math.round(sick * sens);
+    const fn = sick - tp;
+    const fp = Math.round(healthy * fpr);
+    const tn = healthy - fp;
+    const pos = tp + fp, neg = fn + tn;
+
+    document.getElementById('prevReadout').textContent = sick + ' in 1,000 (' + (sick / 10).toFixed(1) + '%)';
+    document.getElementById('sensReadout').textContent = Math.round(sens * 100) + '%';
+    document.getElementById('fprReadout').textContent = Math.round(fpr * 100) + '%';
+
+    document.getElementById('cTP').textContent = tp;
+    document.getElementById('cFN').textContent = fn;
+    document.getElementById('cSick').textContent = sick;
+    document.getElementById('cFP').textContent = fp;
+    document.getElementById('cTN').textContent = tn;
+    document.getElementById('cHealthy').textContent = healthy;
+    document.getElementById('cPos').textContent = pos;
+    document.getElementById('cNeg').textContent = neg;
+
+    const ans = document.getElementById('pSickGivenPos');
+    const det = document.getElementById('pDetail');
+    if (pos === 0) {
+      ans.textContent = 'undefined';
+      det.textContent = 'Nobody tested positive at these settings.';
+    } else {
+      ans.textContent = tp + '/' + pos + ' ≈ ' + (100 * tp / pos).toFixed(1) + '%';
+      det.textContent = 'Of the ' + pos + ' people who test positive, only ' + tp +
+        (tp === 1 ? ' is' : ' are') + ' actually sick — the other ' + fp + ' are false alarms from the healthy crowd of ' + healthy + '.';
+    }
+
+    document.getElementById('gridTitle').textContent = positivesOnly
+      ? 'Only the people who tested positive (' + pos + ' of 1,000)'
+      : 'The whole population';
+
+    // build grid: order people so the sick cluster in the top-left reading order
+    const grid = document.getElementById('peopleGrid');
+    const cells = [];
+    for (let i = 0; i < tp; i++) cells.push('tp');
+    for (let i = 0; i < fn; i++) cells.push('fn');
+    for (let i = 0; i < fp; i++) cells.push('fp');
+    for (let i = 0; i < tn; i++) cells.push('tn');
+    let html = '';
+    for (const c of cells) {
+      const hide = positivesOnly && (c === 'fn' || c === 'tn');
+      html += '<div class="person ' + c + (hide ? ' hidden-person' : '') + '"></div>';
+    }
+    grid.innerHTML = html;
+  }
+
+  render();
+</script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Counting Explorer — Arrangements & Selections</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .ctl-group { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; font-weight: 700; color: #0E1C42; }
+  .stepper { display: flex; align-items: center; gap: 6px; background: #fff; border: 2px solid #0E1C42; border-radius: 8px; padding: 3px 6px; }
+  .stepper button {
+    width: 26px; height: 26px;
+    border: none; border-radius: 6px;
+    background: #0E1C42; color: #fff;
+    font-size: 1rem; font-weight: 900; cursor: pointer;
+    line-height: 1;
+  }
+  .stepper button:disabled { background: #b9c3d8; cursor: not-allowed; }
+  .stepper .num { min-width: 24px; text-align: center; font-size: 1.05rem; font-weight: 900; color: #0E1C42; }
+
+  .toggle-group { display: flex; background: #fff; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .toggle-btn { padding: 8px 14px; border: none; background: transparent; font-size: 0.83rem; font-weight: 700; cursor: pointer; color: #0E1C42; }
+  .toggle-btn.active { background: #0E1C42; color: #fff; }
+
+  .pool-row { display: flex; gap: 6px; justify-content: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .tile {
+    width: 34px; height: 34px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 900; font-size: 1rem;
+    box-shadow: 0 2px 5px rgba(14,28,66,0.25);
+    flex-shrink: 0;
+  }
+  .tile.small { width: 24px; height: 24px; font-size: 0.75rem; border-radius: 6px; box-shadow: none; }
+
+  .formula-panel {
+    background: #fff;
+    border: 2px solid #D0D9E8;
+    border-radius: 12px;
+    padding: 14px 18px;
+    max-width: 860px;
+    margin: 0 auto 12px auto;
+    text-align: center;
+  }
+  .formula-main { font-size: 1.5rem; font-weight: 900; color: #0E1C42; margin-bottom: 4px; }
+  .formula-main .hl { color: #C7922C; }
+  .formula-sub { font-size: 0.85rem; color: #6b7a99; }
+
+  .enum-panel {
+    background: #fff;
+    border: 2px solid #D0D9E8;
+    border-radius: 12px;
+    padding: 14px 16px;
+    max-width: 860px;
+    margin: 0 auto 12px auto;
+  }
+  .enum-panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+  .enum-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .enum-item {
+    display: flex; gap: 3px;
+    background: #F8FAFD;
+    border: 2px solid #D0D9E8;
+    border-radius: 8px;
+    padding: 5px 7px;
+  }
+  .enum-item.clickable { cursor: pointer; }
+  .enum-item.clickable:hover { border-color: #55C8E8; }
+  .enum-item.selected { border-color: #C7922C; background: #FDF3E3; }
+  .enum-note { font-size: 0.8rem; color: #6b7a99; margin-top: 10px; }
+
+  .expand-panel {
+    background: #FDF3E3;
+    border: 2px solid #C7922C;
+    border-radius: 12px;
+    padding: 12px 16px;
+    max-width: 860px;
+    margin: 0 auto 12px auto;
+  }
+  .expand-panel h3 { font-size: 0.78rem; color: #8a6414; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .expand-panel .enum-grid { margin-bottom: 6px; }
+  .expand-caption { font-size: 0.82rem; color: #8a6414; font-weight: 700; }
+
+  .fact-panel {
+    background: #fff;
+    border: 2px solid #D0D9E8;
+    border-radius: 12px;
+    padding: 14px 16px;
+    max-width: 860px;
+    margin: 0 auto 12px auto;
+  }
+  .fact-panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+  .fact-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .fact-label { min-width: 64px; font-size: 0.8rem; font-weight: 700; color: #0E1C42; text-align: right; }
+  .fact-bar-wrap { flex: 1; background: #F8FAFD; border-radius: 5px; height: 18px; overflow: hidden; }
+  .fact-bar { height: 100%; background: #b9c3d8; border-radius: 5px; transition: width 0.3s; }
+  .fact-row.current .fact-bar { background: #C7922C; }
+  .fact-row.current .fact-label { color: #C7922C; }
+  .fact-val { min-width: 74px; font-size: 0.8rem; font-weight: 700; color: #0E1C42; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63);
+    color: #fff;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.83rem;
+    max-width: 860px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#128290; Counting Explorer</h1>
+<p class="subtitle">Build every arrangement and every selection of r items from a pool of n &mdash; and watch the counts explode.</p>
+
+<div class="controls">
+  <div class="ctl-group">Pool size n:
+    <div class="stepper">
+      <button id="nMinus" onclick="changeN(-1)">&minus;</button>
+      <div class="num" id="nVal">4</div>
+      <button id="nPlus" onclick="changeN(1)">+</button>
+    </div>
+  </div>
+  <div class="ctl-group">Choose r:
+    <div class="stepper">
+      <button id="rMinus" onclick="changeR(-1)">&minus;</button>
+      <div class="num" id="rVal">2</div>
+      <button id="rPlus" onclick="changeR(1)">+</button>
+    </div>
+  </div>
+  <div class="toggle-group">
+    <button class="toggle-btn active" id="modeP" onclick="setMode('P')">Arrangements &mdash; order matters (nPr)</button>
+    <button class="toggle-btn" id="modeC" onclick="setMode('C')">Selections &mdash; order ignored (nCr)</button>
+  </div>
+</div>
+
+<div class="pool-row" id="poolRow"></div>
+
+<div class="formula-panel">
+  <div class="formula-main" id="formulaMain"></div>
+  <div class="formula-sub" id="formulaSub"></div>
+</div>
+
+<div class="enum-panel">
+  <h3 id="enumTitle">All arrangements</h3>
+  <div class="enum-grid" id="enumGrid"></div>
+  <div class="enum-note" id="enumNote"></div>
+</div>
+
+<div class="expand-panel" id="expandPanel" style="display:none">
+  <h3>Inside one selection</h3>
+  <div class="enum-grid" id="expandGrid"></div>
+  <div class="expand-caption" id="expandCaption"></div>
+</div>
+
+<div class="fact-panel">
+  <h3>The factorial explosion &mdash; n! (all n items arranged)</h3>
+  <div id="factRows"></div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> In <strong>arrangements</strong> mode, ABC and CBA count separately &mdash; order matters, and the
+  count is a falling product: n &times; (n&minus;1) &times; &hellip;. Switch to <strong>selections</strong> mode and the grid collapses:
+  every group of r! orderings shrinks to a single selection, which is why nCr = nPr &divide; r!.
+  <strong>Click any selection</strong> to see exactly which arrangements collapsed into it. Then nudge n upward and watch the
+  factorial panel &mdash; adding one item doesn't add to the count, it <em>multiplies</em> it.
+</div>
+
+<script>
+  const LETTERS = ['A','B','C','D','E','F','G','H'];
+  const COLORS = ['#0E1C42','#C7922C','#2196D0','#1e7d46','#C0392B','#7d3c98','#b9770e','#5d6d7e'];
+  const MAX_SHOW = 120;
+  let n = 4, r = 2, mode = 'P';
+  let selectedCombo = null;
+
+  function fact(k) { let f = 1; for (let i = 2; i <= k; i++) f *= i; return f; }
+  function nPr(n, r) { let p = 1; for (let i = 0; i < r; i++) p *= (n - i); return p; }
+  function nCr(n, r) { return nPr(n, r) / fact(r); }
+  function fallingStr(n, r) {
+    const parts = [];
+    for (let i = 0; i < r; i++) parts.push(n - i);
+    return parts.join(' × ');
+  }
+
+  function combosOf(pool, r, cap) {
+    const out = [];
+    function rec(start, cur) {
+      if (out.length >= cap) return;
+      if (cur.length === r) { out.push(cur.slice()); return; }
+      for (let i = start; i < pool.length && out.length < cap; i++) rec(i + 1, cur.concat(pool[i]));
+    }
+    rec(0, []);
+    return out;
+  }
+  function permsOf(pool, r, cap) {
+    const out = [];
+    function rec(cur, used) {
+      if (out.length >= cap) return;
+      if (cur.length === r) { out.push(cur.slice()); return; }
+      for (let i = 0; i < pool.length && out.length < cap; i++) {
+        if (used[i]) continue;
+        used[i] = true; rec(cur.concat(pool[i]), used); used[i] = false;
+      }
+    }
+    rec([], new Array(pool.length).fill(false));
+    return out;
+  }
+
+  function tileHTML(letter, small) {
+    const idx = LETTERS.indexOf(letter);
+    return '<div class="tile' + (small ? ' small' : '') + '" style="background:' + COLORS[idx] + '">' + letter + '</div>';
+  }
+
+  function changeN(d) { n = Math.min(8, Math.max(2, n + d)); if (r > n) r = n; selectedCombo = null; render(); }
+  function changeR(d) { r = Math.min(n, Math.max(1, r + d)); selectedCombo = null; render(); }
+  function setMode(m) {
+    mode = m; selectedCombo = null;
+    document.getElementById('modeP').className = 'toggle-btn' + (m === 'P' ? ' active' : '');
+    document.getElementById('modeC').className = 'toggle-btn' + (m === 'C' ? ' active' : '');
+    render();
+  }
+
+  function pickCombo(key) {
+    selectedCombo = (selectedCombo === key) ? null : key;
+    render();
+  }
+
+  function render() {
+    document.getElementById('nVal').textContent = n;
+    document.getElementById('rVal').textContent = r;
+    document.getElementById('nMinus').disabled = n <= 2;
+    document.getElementById('nPlus').disabled = n >= 8;
+    document.getElementById('rMinus').disabled = r <= 1;
+    document.getElementById('rPlus').disabled = r >= n;
+
+    const pool = LETTERS.slice(0, n);
+    document.getElementById('poolRow').innerHTML = pool.map(l => tileHTML(l, false)).join('');
+
+    const p = nPr(n, r), c = nCr(n, r);
+    if (mode === 'P') {
+      document.getElementById('formulaMain').innerHTML =
+        '<span class="hl">' + n + 'P' + r + '</span> = ' + fallingStr(n, r) + ' = <span class="hl">' + p.toLocaleString('en-US') + '</span>';
+      document.getElementById('formulaSub').textContent =
+        r + ' slot' + (r > 1 ? 's' : '') + ' to fill: ' + n + ' choices for the first, then ' +
+        (r > 1 ? (n - 1) + ' for the next, and so on — the multiplication principle at work.' : 'and that’s the whole count.');
+    } else {
+      document.getElementById('formulaMain').innerHTML =
+        '<span class="hl">' + n + 'C' + r + '</span> = ' + n + 'P' + r + ' ÷ ' + r + '! = ' +
+        p.toLocaleString('en-US') + ' ÷ ' + fact(r).toLocaleString('en-US') + ' = <span class="hl">' + c.toLocaleString('en-US') + '</span>';
+      document.getElementById('formulaSub').textContent =
+        'Each selection of ' + r + ' letters can be ordered ' + r + '! = ' + fact(r).toLocaleString('en-US') +
+        ' ways, so the arrangement count overcounts selections by exactly that factor.';
+    }
+
+    const grid = document.getElementById('enumGrid');
+    const note = document.getElementById('enumNote');
+    grid.innerHTML = '';
+    if (mode === 'P') {
+      document.getElementById('enumTitle').textContent = 'All arrangements (order matters)';
+      const items = permsOf(pool, r, MAX_SHOW);
+      items.forEach(seq => {
+        const div = document.createElement('div');
+        div.className = 'enum-item';
+        div.innerHTML = seq.map(l => tileHTML(l, true)).join('');
+        grid.appendChild(div);
+      });
+      note.textContent = p > MAX_SHOW
+        ? 'Showing the first ' + MAX_SHOW + ' of ' + p.toLocaleString('en-US') + ' arrangements — the formula counts what the screen cannot hold.'
+        : p + ' arrangement' + (p > 1 ? 's' : '') + ' in all.';
+      document.getElementById('expandPanel').style.display = 'none';
+    } else {
+      document.getElementById('enumTitle').textContent = 'All selections (order ignored) — click one to open it up';
+      const items = combosOf(pool, r, MAX_SHOW);
+      items.forEach(seq => {
+        const key = seq.join('');
+        const div = document.createElement('div');
+        div.className = 'enum-item clickable' + (selectedCombo === key ? ' selected' : '');
+        div.innerHTML = seq.map(l => tileHTML(l, true)).join('');
+        div.onclick = () => pickCombo(key);
+        grid.appendChild(div);
+      });
+      note.textContent = c > MAX_SHOW
+        ? 'Showing the first ' + MAX_SHOW + ' of ' + c.toLocaleString('en-US') + ' selections.'
+        : c + ' selection' + (c > 1 ? 's' : '') + ' in all.';
+
+      const panel = document.getElementById('expandPanel');
+      if (selectedCombo) {
+        panel.style.display = 'block';
+        const letters = selectedCombo.split('');
+        const perms = permsOf(letters, letters.length, 24);
+        const totalPerms = fact(letters.length);
+        document.getElementById('expandGrid').innerHTML = perms.map(seq =>
+          '<div class="enum-item">' + seq.map(l => tileHTML(l, true)).join('') + '</div>').join('');
+        document.getElementById('expandCaption').textContent =
+          (totalPerms > 24 ? 'Showing 24 of ' : 'All ') + totalPerms.toLocaleString('en-US') +
+          ' orderings of {' + letters.join(', ') + '} — every one of them collapses into the single selection you clicked. That is the ÷' + r + '! in the formula.';
+      } else {
+        panel.style.display = 'none';
+      }
+    }
+
+    // factorial panel (log-scale bars)
+    const rows = [];
+    const maxLog = Math.log(fact(8));
+    for (let k = 1; k <= 8; k++) {
+      const f = fact(k);
+      const w = Math.max(3, 100 * Math.log(f < 2 ? 1.5 : f) / maxLog);
+      rows.push('<div class="fact-row' + (k === n ? ' current' : '') + '">' +
+        '<div class="fact-label">' + k + '! =</div>' +
+        '<div class="fact-bar-wrap"><div class="fact-bar" style="width:' + w + '%"></div></div>' +
+        '<div class="fact-val">' + f.toLocaleString('en-US') + '</div></div>');
+    }
+    document.getElementById('factRows').innerHTML = rows.join('');
+  }
+
+  render();
+</script>
+</body>
+</html>
