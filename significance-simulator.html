@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Significance Simulator — How Rare Is Your Result in the Boring World?</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 18px; justify-content: center; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
+  .slider-group { text-align: center; }
+  .slider-group label { display: block; font-size: 0.78rem; font-weight: 700; color: #0E1C42; margin-bottom: 4px; }
+  .slider-group input[type=range] { width: 190px; accent-color: #0E1C42; }
+  .slider-group .readout { font-size: 0.95rem; font-weight: 900; color: #C7922C; }
+  .num-group { text-align: center; font-size: 0.78rem; font-weight: 700; color: #0E1C42; }
+  .num-group input {
+    display: block; margin: 4px auto 0 auto; width: 90px; padding: 7px;
+    border: 2px solid #D0D9E8; border-radius: 8px; font-size: 1rem; font-weight: 900;
+    text-align: center; color: #C7922C;
+  }
+  .num-group input:focus { outline: none; border-color: #55C8E8; }
+
+  .action-row { display: flex; gap: 8px; justify-content: center; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .btn { padding: 9px 18px; border: none; border-radius: 8px; font-size: 0.88rem; font-weight: 700; cursor: pointer; }
+  .btn:active { transform: scale(0.97); }
+  .btn-gold { background: #C7922C; color: #fff; }
+  .btn-gold:hover { background: #a87820; }
+  .btn-red { background: #C0392B; color: #fff; }
+  .btn-red:hover { background: #96281c; }
+  .toggle-group { display: flex; background: #fff; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .toggle-btn { padding: 8px 14px; border: none; background: transparent; font-size: 0.8rem; font-weight: 700; cursor: pointer; color: #0E1C42; }
+  .toggle-btn.active { background: #0E1C42; color: #fff; }
+
+  .layout { max-width: 960px; margin: 0 auto 14px auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .chart-wrap { position: relative; }
+  .chart { display: flex; align-items: flex-end; height: 230px; gap: 1px; border-bottom: 2px solid #0E1C42; padding: 0 2px; }
+  .scol { flex: 1; height: 100%; position: relative; min-width: 0; }
+  .scol .fill { position: absolute; bottom: 0; left: 0; right: 0; background: #8a94ad; border-radius: 2px 2px 0 0; transition: height 0.2s, background 0.2s; }
+  .scol.tail .fill { background: #C0392B; }
+  .obs-line { position: absolute; top: 0; bottom: 0; width: 3px; background: #C7922C; transform: translateX(-50%); transition: left 0.2s; z-index: 3; pointer-events: none; }
+  .obs-line .otag {
+    position: absolute; top: -4px; left: 6px; font-size: 0.7rem; font-weight: 900;
+    color: #C7922C; white-space: nowrap; background: rgba(255,255,255,0.85); padding: 0 4px; border-radius: 4px;
+  }
+  .xlabels { display: flex; gap: 1px; padding: 2px 2px 0 2px; }
+  .xlabels div { flex: 1; text-align: center; font-size: 0.64rem; color: #6b7a99; font-weight: 700; min-width: 0; overflow: hidden; }
+  .chart-cap { text-align: center; font-size: 0.75rem; color: #6b7a99; margin-top: 6px; }
+  .chart-cap .redbox { display: inline-block; width: 10px; height: 10px; background: #C0392B; border-radius: 2px; vertical-align: -1px; }
+  .empty-note { text-align: center; color: #6b7a99; font-size: 0.85rem; padding: 8px; }
+
+  .result-grid { display: flex; gap: 14px; flex-wrap: wrap; }
+  .pval-box { flex: 1; min-width: 260px; background: #EEF1F8; border-left: 5px solid #C7922C; border-radius: 8px; padding: 12px 14px; }
+  .pval-box .label { font-size: 0.72rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.05em; }
+  .pval-box .value { font-size: 1.5rem; font-weight: 900; color: #0E1C42; }
+  .pval-box .detail { font-size: 0.8rem; margin-top: 4px; line-height: 1.55; }
+  .conv-box { flex: 1; min-width: 260px; border-radius: 8px; padding: 12px 14px; border-left: 5px solid; font-size: 0.84rem; line-height: 1.55; transition: background 0.2s; }
+  .conv-box.sig { background: #fdf0ee; border-color: #C0392B; }
+  .conv-box.notsig { background: #F8FAFD; border-color: #0E1C42; }
+  .conv-box .headline { font-weight: 900; color: #0E1C42; margin-bottom: 2px; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px;
+    padding: 12px 16px; font-size: 0.83rem; max-width: 960px; margin: 0 auto; line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#129689; Significance Simulator</h1>
+<p class="subtitle">Suppose the coin really is fair &mdash; the &ldquo;boring world.&rdquo; How often would that boring world produce a result as extreme as yours?</p>
+
+<div class="controls">
+  <div class="slider-group">
+    <label for="nSlider">n &mdash; flips per experiment</label>
+    <input type="range" id="nSlider" min="20" max="200" value="100" oninput="onN()">
+    <div class="readout" id="nReadout">n = 100</div>
+  </div>
+  <div class="num-group">
+    <label for="obsInput">Your observed number of heads</label>
+    <input type="number" id="obsInput" min="0" max="200" value="60" oninput="onObs()">
+  </div>
+</div>
+
+<div class="action-row">
+  <button class="btn btn-gold" onclick="simulate()">Simulate 1,000 null worlds</button>
+  <div class="toggle-group">
+    <button class="toggle-btn active" id="tOne" onclick="setSided(1)">One-sided (at or beyond)</button>
+    <button class="toggle-btn" id="tTwo" onclick="setSided(2)">Two-sided</button>
+  </div>
+  <button class="btn btn-red" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <h3 id="histTitle">Heads counts across the simulated fair-coin worlds</h3>
+    <div class="empty-note" id="emptyNote">No worlds simulated yet &mdash; press the gold button.</div>
+    <div class="chart-wrap" id="chartWrap" style="display:none">
+      <div class="chart" id="chart"></div>
+      <div class="obs-line" id="obsLine"><div class="otag" id="obsTag"></div></div>
+      <div class="xlabels" id="xlabels"></div>
+    </div>
+    <div class="chart-cap" id="chartCap" style="display:none">
+      <span class="redbox"></span> = fair-coin worlds at least as extreme as your result &nbsp;&middot;&nbsp; gold line = your observed count
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="result-grid">
+      <div class="pval-box">
+        <div class="label" id="pvalLabel">Empirical p-value</div>
+        <div class="value" id="pvalValue">&mdash;</div>
+        <div class="detail" id="pvalDetail">Simulate some null worlds first.</div>
+      </div>
+      <div class="conv-box notsig" id="convBox">
+        <div class="headline">The 5% convention</div>
+        <div id="convText">By long-standing convention, a result is called &ldquo;statistically significant&rdquo; when fewer than 5% of null worlds are at least this extreme.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> A p-value is not the probability the coin is fair, and it is not the probability you are wrong.
+  It answers exactly one question: <strong>if nothing interesting were going on, how often would boring randomness alone produce a
+  result like mine?</strong> Watch the red tail: 60 heads in 100 flips lands near the edge of what a fair coin does &mdash;
+  but try 55 and see how quickly your &ldquo;impressive&rdquo; result becomes an ordinary Tuesday in the boring world.
+</div>
+
+<script>
+  let worlds = [];        // heads counts from simulated fair-coin experiments
+  let sided = 1;
+
+  function getN() { return parseInt(document.getElementById('nSlider').value, 10); }
+  function getObs() {
+    const n = getN();
+    let v = parseInt(document.getElementById('obsInput').value, 10);
+    if (isNaN(v)) v = Math.round(n / 2);
+    return Math.max(0, Math.min(n, v));
+  }
+
+  function onN() {
+    const n = getN();
+    document.getElementById('nReadout').textContent = 'n = ' + n;
+    document.getElementById('obsInput').max = n;
+    if (parseInt(document.getElementById('obsInput').value, 10) > n) document.getElementById('obsInput').value = n;
+    worlds = [];          // changing n invalidates the simulated worlds
+    render();
+  }
+  function onObs() { render(); }
+
+  function setSided(s) {
+    sided = s;
+    document.getElementById('tOne').classList.toggle('active', s === 1);
+    document.getElementById('tTwo').classList.toggle('active', s === 2);
+    render();
+  }
+
+  function resetAll() {
+    document.getElementById('nSlider').value = 100;
+    document.getElementById('obsInput').value = 60;
+    sided = 1;
+    document.getElementById('tOne').classList.add('active');
+    document.getElementById('tTwo').classList.remove('active');
+    onN();
+  }
+
+  function simulate() {
+    const n = getN();
+    for (let w = 0; w < 1000; w++) {
+      let heads = 0;
+      for (let f = 0; f < n; f++) if (Math.random() < 0.5) heads++;
+      worlds.push(heads);
+    }
+    render();
+  }
+
+  function isExtreme(k, obs, n) {
+    const mid = n / 2;
+    if (sided === 2) return Math.abs(k - mid) >= Math.abs(obs - mid) - 1e-9;
+    return obs >= mid ? k >= obs : k <= obs;
+  }
+
+  function render() {
+    const n = getN();
+    const obs = getObs();
+    document.getElementById('obsInput').value = obs;
+
+    const haveData = worlds.length > 0;
+    document.getElementById('emptyNote').style.display = haveData ? 'none' : 'block';
+    document.getElementById('chartWrap').style.display = haveData ? 'block' : 'none';
+    document.getElementById('chartCap').style.display = haveData ? 'block' : 'none';
+    document.getElementById('histTitle').textContent = haveData
+      ? 'Heads counts across ' + worlds.length.toLocaleString('en-US') + ' simulated fair-coin worlds (n = ' + n + ' flips each)'
+      : 'Heads counts across the simulated fair-coin worlds';
+
+    if (!haveData) {
+      document.getElementById('pvalValue').textContent = '—';
+      document.getElementById('pvalDetail').textContent = 'Simulate some null worlds first.';
+      document.getElementById('pvalLabel').textContent = 'Empirical p-value';
+      const cb = document.getElementById('convBox');
+      cb.className = 'conv-box notsig';
+      document.getElementById('convText').innerHTML = 'By long-standing convention, a result is called &ldquo;statistically significant&rdquo; when fewer than 5% of null worlds are at least this extreme.';
+      return;
+    }
+
+    // display range: cover the simulated data and the observed value, padded slightly
+    const mean = n / 2, sd = Math.sqrt(n) / 2;
+    let lo = Math.floor(Math.min(Math.min(...worlds), obs, mean - 4 * sd));
+    let hi = Math.ceil(Math.max(Math.max(...worlds), obs, mean + 4 * sd));
+    lo = Math.max(0, lo); hi = Math.min(n, hi);
+
+    const counts = new Array(hi - lo + 1).fill(0);
+    for (const w of worlds) if (w >= lo && w <= hi) counts[w - lo]++;
+    const maxC = Math.max(...counts, 1);
+
+    let tail = 0;
+    for (const w of worlds) if (isExtreme(w, obs, n)) tail++;
+
+    const chart = document.getElementById('chart');
+    const xl = document.getElementById('xlabels');
+    chart.innerHTML = '';
+    xl.innerHTML = '';
+    const nb = hi - lo + 1;
+    const labelEvery = nb <= 20 ? 2 : (nb <= 50 ? 5 : 10);
+    for (let k = lo; k <= hi; k++) {
+      const col = document.createElement('div');
+      col.className = 'scol' + (isExtreme(k, obs, n) ? ' tail' : '');
+      col.title = k + ' heads: ' + counts[k - lo] + ' world' + (counts[k - lo] === 1 ? '' : 's');
+      const fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.height = (counts[k - lo] / maxC * 94) + '%';
+      col.appendChild(fill);
+      chart.appendChild(col);
+      const lab = document.createElement('div');
+      lab.textContent = (k % labelEvery === 0) ? k : '';
+      xl.appendChild(lab);
+    }
+
+    // observed marker line (position across the bar area)
+    const obsLine = document.getElementById('obsLine');
+    const pct = ((obs - lo + 0.5) / nb) * 100;
+    obsLine.style.left = pct + '%';
+    document.getElementById('obsTag').textContent = 'observed: ' + obs;
+    if (pct > 78) { document.getElementById('obsTag').style.left = 'auto'; document.getElementById('obsTag').style.right = '6px'; }
+    else { document.getElementById('obsTag').style.left = '6px'; document.getElementById('obsTag').style.right = 'auto'; }
+
+    // p-value readout
+    const N = worlds.length;
+    const pval = tail / N;
+    const dirTxt = sided === 2
+      ? 'at least as far from ' + mean + ' as ' + obs + ' is (two-sided)'
+      : (obs >= mean ? '&ge; ' + obs + ' heads' : '&le; ' + obs + ' heads');
+    document.getElementById('pvalLabel').textContent = 'Empirical p-value (' + (sided === 2 ? 'two-sided' : 'one-sided') + ')';
+    document.getElementById('pvalValue').textContent = tail.toLocaleString('en-US') + '/' + N.toLocaleString('en-US') + ' = ' + pval.toFixed(3);
+    document.getElementById('pvalDetail').innerHTML = 'Of the ' + N.toLocaleString('en-US') + ' fair-coin worlds simulated, ' +
+      tail.toLocaleString('en-US') + ' produced ' + dirTxt + '. That fraction is the p-value.';
+
+    const cb = document.getElementById('convBox');
+    const sig = pval < 0.05;
+    cb.className = 'conv-box ' + (sig ? 'sig' : 'notsig');
+    document.getElementById('convText').innerHTML = '<strong>' + pval.toFixed(3) + (sig ? ' &lt; 0.05' : ' &ge; 0.05') + '.</strong> ' +
+      (sig
+        ? 'By the 5% convention this result would be called <strong>statistically significant</strong> — the boring world produces a result this extreme less than 1 time in 20. That makes fairness look strained, though it never <em>proves</em> the coin is biased.'
+        : 'By the 5% convention this result would <strong>not</strong> be called statistically significant — the boring world produces results this extreme fairly often, so your data gives little reason to doubt the fair coin.');
+  }
+
+  resetAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Binomial Builder — n, p, and the March Toward the Bell</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 20px; justify-content: center; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
+  .slider-group { text-align: center; }
+  .slider-group label { display: block; font-size: 0.78rem; font-weight: 700; color: #0E1C42; margin-bottom: 4px; }
+  .slider-group input[type=range] { width: 190px; accent-color: #0E1C42; }
+  .slider-group .readout { font-size: 0.95rem; font-weight: 900; color: #C7922C; }
+
+  .toggle-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .toggle-btn {
+    padding: 8px 16px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff;
+    color: #0E1C42; font-size: 0.83rem; font-weight: 700; cursor: pointer;
+  }
+  .toggle-btn.active { background: #0E1C42; color: #fff; }
+  .btn-reset { padding: 8px 16px; border: none; border-radius: 8px; background: #C0392B; color: #fff; font-size: 0.83rem; font-weight: 700; cursor: pointer; }
+  .btn-reset:hover { background: #96281c; }
+
+  .layout { max-width: 960px; margin: 0 auto 14px auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .stats-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .stat-chip { background: #F8FAFD; border: 2px solid #D0D9E8; border-radius: 10px; padding: 8px 16px; text-align: center; min-width: 120px; }
+  .stat-chip .val { font-size: 1.25rem; font-weight: 900; color: #0E1C42; }
+  .stat-chip .lbl { font-size: 0.68rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .chart { display: flex; align-items: flex-end; height: 240px; gap: 1px; border-bottom: 2px solid #0E1C42; padding: 0 2px; }
+  .bcol { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; cursor: pointer; min-width: 0; position: relative; }
+  .bcol .fill { width: 100%; background: #0E1C42; border-radius: 3px 3px 0 0; transition: height 0.2s, background 0.2s; }
+  .bcol:hover .fill { background: #1a2f63; }
+  .bcol.cum .fill { background: #C7922C; }
+  .bcol.sel .fill { background: #55C8E8; }
+  .xlabels { display: flex; gap: 1px; padding: 2px 2px 0 2px; }
+  .xlabels div { flex: 1; text-align: center; font-size: 0.68rem; color: #6b7a99; font-weight: 700; min-width: 0; overflow: hidden; }
+  .chart-cap { text-align: center; font-size: 0.75rem; color: #6b7a99; margin-top: 6px; }
+
+  .calc-box { background: #EEF1F8; border-left: 5px solid #55C8E8; border-radius: 8px; padding: 12px 14px; }
+  .calc-box .label { font-size: 0.72rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  .calc-box .line { font-size: 0.9rem; line-height: 1.8; word-break: break-word; }
+  .calc-box .big { font-size: 1.2rem; font-weight: 900; color: #0E1C42; }
+  .calc-box .gold { color: #C7922C; font-weight: 700; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px;
+    padding: 12px 16px; font-size: 0.83rem; max-width: 960px; margin: 0 auto; line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#128290; Binomial Builder</h1>
+<p class="subtitle">n independent tries, each with success probability p. How do the counts of successes distribute themselves?</p>
+
+<div class="controls">
+  <div class="slider-group">
+    <label for="nSlider">n &mdash; number of trials</label>
+    <input type="range" id="nSlider" min="1" max="50" value="10" oninput="onParamChange()">
+    <div class="readout" id="nReadout">n = 10</div>
+  </div>
+  <div class="slider-group">
+    <label for="pSlider">p &mdash; probability of success on each trial</label>
+    <input type="range" id="pSlider" min="5" max="95" value="50" oninput="onParamChange()">
+    <div class="readout" id="pReadout">p = 0.50</div>
+  </div>
+</div>
+
+<div class="toggle-row">
+  <button class="toggle-btn" id="cumToggle" onclick="toggleCum()">Cumulative: shade P(X &le; k)</button>
+  <button class="btn-reset" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <div class="stats-row">
+      <div class="stat-chip"><div class="val" id="evChip">&mdash;</div><div class="lbl">EV = np</div></div>
+      <div class="stat-chip"><div class="val" id="sdChip">&mdash;</div><div class="lbl">SD = &radic;(np(1&minus;p))</div></div>
+    </div>
+    <div class="chart" id="chart"></div>
+    <div class="xlabels" id="xlabels"></div>
+    <div class="chart-cap" id="chartCap">Click any bar to see exactly how its probability is computed.</div>
+  </div>
+
+  <div class="panel">
+    <h3 id="calcTitle">The computation</h3>
+    <div class="calc-box" id="calcBox">
+      <div class="line">Click a bar above.</div>
+    </div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> Slide <strong>n</strong> up from 1 toward 50 and keep your eye on the shape.
+  A lopsided little staircase becomes a smooth, symmetric <strong>bell</strong> centered at np &mdash; even when p isn&rsquo;t 0.5.
+  That march toward the bell is no accident: it is the pattern de Moivre spotted, and it is why the normal curve
+  will run the show in Semester&nbsp;2.
+</div>
+
+<script>
+  let selK = null;
+  let cumMode = false;
+  let pmf = [];
+
+  // Exact binomial coefficient via iterative product: multiply then divide each step
+  // keeps intermediate values <= C(n,k)*(n) < 2^53 for n <= 50, so results stay exact.
+  function comb(n, k) {
+    if (k < 0 || k > n) return 0;
+    k = Math.min(k, n - k);
+    let c = 1;
+    for (let i = 1; i <= k; i++) {
+      c = c * (n - k + i) / i;   // always an integer after the division at each step
+    }
+    return Math.round(c);
+  }
+
+  function fmtProb(v) {
+    if (v === 0) return '0';
+    if (v >= 0.0001) return v.toFixed(4);
+    return v.toExponential(3);
+  }
+  function fmtPow(v) {
+    if (v === 0) return '0';
+    if (v >= 0.0001) return v.toPrecision(4);
+    return v.toExponential(3);
+  }
+
+  function getParams() {
+    const n = parseInt(document.getElementById('nSlider').value, 10);
+    const p = parseInt(document.getElementById('pSlider').value, 10) / 100;
+    return {n, p};
+  }
+
+  function onParamChange() {
+    const {n} = getParams();
+    if (selK !== null && selK > n) selK = n;
+    render();
+  }
+
+  function toggleCum() {
+    cumMode = !cumMode;
+    document.getElementById('cumToggle').classList.toggle('active', cumMode);
+    render();
+  }
+
+  function resetAll() {
+    document.getElementById('nSlider').value = 10;
+    document.getElementById('pSlider').value = 50;
+    cumMode = false;
+    document.getElementById('cumToggle').classList.remove('active');
+    selK = 5;
+    render();
+  }
+
+  function selectK(k) { selK = k; render(); }
+
+  function render() {
+    const {n, p} = getParams();
+    const q = 1 - p;
+    document.getElementById('nReadout').textContent = 'n = ' + n;
+    document.getElementById('pReadout').textContent = 'p = ' + p.toFixed(2);
+
+    const ev = n * p;
+    const sd = Math.sqrt(n * p * q);
+    document.getElementById('evChip').textContent = ev.toFixed(2);
+    document.getElementById('sdChip').textContent = sd.toFixed(3);
+
+    pmf = [];
+    for (let k = 0; k <= n; k++) pmf.push(comb(n, k) * Math.pow(p, k) * Math.pow(q, n - k));
+    const maxP = Math.max(...pmf);
+
+    const chart = document.getElementById('chart');
+    const xl = document.getElementById('xlabels');
+    chart.innerHTML = '';
+    xl.innerHTML = '';
+    const labelEvery = n <= 20 ? 1 : (n <= 40 ? 2 : 5);
+    for (let k = 0; k <= n; k++) {
+      const col = document.createElement('div');
+      col.className = 'bcol'
+        + (cumMode && selK !== null && k <= selK ? ' cum' : '')
+        + (selK === k ? ' sel' : '');
+      col.title = 'P(X = ' + k + ') = ' + fmtProb(pmf[k]);
+      const fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.height = (pmf[k] / maxP * 96) + '%';
+      col.appendChild(fill);
+      col.addEventListener('click', () => selectK(k));
+      chart.appendChild(col);
+      const lab = document.createElement('div');
+      lab.textContent = (k % labelEvery === 0) ? k : '';
+      xl.appendChild(lab);
+    }
+
+    // computation panel
+    const box = document.getElementById('calcBox');
+    if (selK === null || selK > n) {
+      box.innerHTML = '<div class="line">Click a bar above.</div>';
+      return;
+    }
+    const k = selK;
+    const c = comb(n, k);
+    const pk = Math.pow(p, k);
+    const qnk = Math.pow(q, n - k);
+    const prob = pmf[k];
+    let html =
+      '<div class="label">Exact probability of ' + k + ' success' + (k === 1 ? '' : 'es') + ' in ' + n + ' trials</div>' +
+      '<div class="line">P(X = ' + k + ') = C(' + n + ', ' + k + ') &middot; p<sup>' + k + '</sup> &middot; (1&minus;p)<sup>' + (n - k) + '</sup></div>' +
+      '<div class="line">= C(' + n + ', ' + k + ') &middot; (' + p.toFixed(2) + ')<sup>' + k + '</sup> &middot; (' + q.toFixed(2) + ')<sup>' + (n - k) + '</sup></div>' +
+      '<div class="line">= <span class="gold">' + c.toLocaleString('en-US') + '</span> &times; ' + fmtPow(pk) + ' &times; ' + fmtPow(qnk) + '</div>' +
+      '<div class="line">= <span class="big">' + fmtProb(prob) + '</span></div>';
+    if (cumMode) {
+      let cum = 0;
+      for (let j = 0; j <= k; j++) cum += pmf[j];
+      cum = Math.min(cum, 1);
+      html += '<div class="line" style="margin-top:6px;border-top:1px solid #D0D9E8;padding-top:6px">' +
+        'Cumulative (gold bars): P(X &le; ' + k + ') = P(X=0) + &hellip; + P(X=' + k + ') = <span class="big">' + fmtProb(cum) + '</span></div>';
+    }
+    box.innerHTML = html;
+  }
+
+  resetAll();
+</script>
+</body>
+</html>

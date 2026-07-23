@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portfolio Diversifier — Same Expected Gain, Shrinking Risk</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 16px; justify-content: center; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+  .slider-group { text-align: center; }
+  .slider-group label { display: block; font-size: 0.78rem; font-weight: 700; color: #0E1C42; margin-bottom: 4px; }
+  .slider-group input[type=range] { width: 220px; accent-color: #0E1C42; }
+  .slider-group .readout { font-size: 0.95rem; font-weight: 900; color: #C7922C; }
+  .btn { padding: 9px 18px; border: none; border-radius: 8px; font-size: 0.85rem; font-weight: 700; cursor: pointer; }
+  .btn:active { transform: scale(0.97); }
+  .btn-gold { background: #C7922C; color: #fff; }
+  .btn-gold:hover { background: #a87820; }
+  .btn-red { background: #C0392B; color: #fff; }
+  .btn-red:hover { background: #96281c; }
+
+  .deal-box {
+    max-width: 960px; margin: 0 auto 12px auto; background: #fff; border: 2px solid #D0D9E8;
+    border-radius: 10px; padding: 10px 14px; font-size: 0.82rem; line-height: 1.55; color: #1a2340; text-align: center;
+  }
+  .deal-box strong { color: #0E1C42; }
+
+  .layout { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; max-width: 960px; margin: 0 auto 14px auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; flex: 1; min-width: 300px; }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+  .panel.current h3 { color: #0E1C42; }
+  .panel.current { border-color: #0E1C42; }
+
+  .stats-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .stat-chip { background: #F8FAFD; border: 2px solid #D0D9E8; border-radius: 10px; padding: 7px 12px; text-align: center; min-width: 100px; }
+  .stat-chip .val { font-size: 1.15rem; font-weight: 900; color: #0E1C42; }
+  .stat-chip .lbl { font-size: 0.64rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .chart { position: relative; height: 190px; border-bottom: 2px solid #0E1C42; }
+  .hbar {
+    position: absolute; bottom: 0; transform: translateX(-50%);
+    border-radius: 3px 3px 0 0; transition: height 0.2s, left 0.2s, width 0.2s;
+  }
+  .hbar.basket { background: #8a94ad; }
+  .hbar.spread { background: #0E1C42; }
+  .hbar .blab {
+    position: absolute; top: -16px; left: 50%; transform: translateX(-50%);
+    font-size: 0.64rem; font-weight: 700; color: #6b7a99; white-space: nowrap;
+  }
+  .ev-line { position: absolute; top: 0; bottom: 0; width: 2px; background: #C7922C; transition: left 0.2s; }
+  .ev-line .etag { position: absolute; top: -2px; left: 4px; font-size: 0.64rem; font-weight: 900; color: #C7922C; white-space: nowrap; }
+  .axis-labels { display: flex; justify-content: space-between; font-size: 0.68rem; color: #6b7a99; font-weight: 700; padding-top: 2px; }
+
+  .range-line { position: relative; height: 26px; margin-top: 12px; }
+  .range-track { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: #D0D9E8; }
+  .range-band {
+    position: absolute; top: 7px; height: 12px; border-radius: 6px;
+    background: rgba(85,200,232,0.45); border: 2px solid #55C8E8;
+    transition: left 0.2s, width 0.2s;
+  }
+  .range-cap { font-size: 0.7rem; color: #6b7a99; text-align: center; margin-top: 2px; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px;
+    padding: 12px 16px; font-size: 0.83rem; max-width: 960px; margin: 0 auto; line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#129370; Portfolio Diversifier</h1>
+<p class="subtitle">You have $100 to stake on favorable bets. One big bet &mdash; or many small ones?</p>
+
+<div class="deal-box">
+  <strong>The deal:</strong> every dollar staked either <strong>gains 60%</strong> or <strong>loses 40%</strong>, 50/50,
+  so each dollar is expected to grow by 10&cent;. You split your $100 evenly across <strong>k independent</strong> copies of this bet.
+</div>
+
+<div class="controls">
+  <div class="slider-group">
+    <label for="kSlider">k &mdash; number of independent bets your $100 is split across</label>
+    <input type="range" id="kSlider" min="1" max="10" value="4" oninput="onK()">
+    <div class="readout" id="kReadout">k = 4 &nbsp;(&dollar;25.00 on each)</div>
+  </div>
+  <button class="btn btn-gold" onclick="simulate()">Re-simulate 2,000 runs</button>
+  <button class="btn btn-red" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <h3>All eggs in one basket (k = 1)</h3>
+    <div class="stats-row">
+      <div class="stat-chip"><div class="val">$110.00</div><div class="lbl">EV of outcome</div></div>
+      <div class="stat-chip"><div class="val">$50.00</div><div class="lbl">SD = $50/&radic;1</div></div>
+    </div>
+    <div class="chart" id="chart1"></div>
+    <div class="axis-labels"><span>$50</span><span>$110</span><span>$170</span></div>
+    <div class="range-line">
+      <div class="range-track"></div>
+      <div class="range-band" id="band1"></div>
+    </div>
+    <div class="range-cap">Typical range: EV &plusmn; 1 SD = <span id="range1txt"></span></div>
+  </div>
+
+  <div class="panel current">
+    <h3 id="curTitle">Split across k = 4 bets</h3>
+    <div class="stats-row">
+      <div class="stat-chip"><div class="val" id="evK">$110.00</div><div class="lbl">EV of outcome</div></div>
+      <div class="stat-chip"><div class="val" id="sdK">&mdash;</div><div class="lbl" id="sdKlbl">SD = $50/&radic;k</div></div>
+    </div>
+    <div class="chart" id="chartK"></div>
+    <div class="axis-labels"><span>$50</span><span>$110</span><span>$170</span></div>
+    <div class="range-line">
+      <div class="range-track"></div>
+      <div class="range-band" id="bandK"></div>
+    </div>
+    <div class="range-cap">Typical range: EV &plusmn; 1 SD = <span id="rangeKtxt"></span></div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> Slide k upward. The gold <strong>EV line never moves</strong> &mdash; splitting the stake
+  cannot change the expected gain of $10, because expectation adds up no matter what. But the <strong>spread collapses like
+  1/&radic;k</strong>: independent bets rarely all go wrong at once, so the disasters and the jackpots cancel toward the middle.
+  Diversification is the rare free lunch &mdash; same expected reward, much less risk.
+</div>
+
+<script>
+  const RUNS = 2000, XMIN = 50, XMAX = 170, EV = 110;
+
+  function getK() { return parseInt(document.getElementById('kSlider').value, 10); }
+  const toPct = x => (100 * (x - XMIN) / (XMAX - XMIN));
+
+  function onK() { simulate(); }
+  function resetAll() { document.getElementById('kSlider').value = 4; simulate(); }
+
+  // Simulate: with w winning bets out of k, total = (100/k)*(1.6w + 0.6(k-w)) = 100*(0.6 + w/k)
+  function simCounts(k) {
+    const counts = new Array(k + 1).fill(0);
+    for (let r = 0; r < RUNS; r++) {
+      let w = 0;
+      for (let b = 0; b < k; b++) if (Math.random() < 0.5) w++;
+      counts[w]++;
+    }
+    return counts;
+  }
+
+  function drawChart(elId, k, counts) {
+    const chart = document.getElementById(elId);
+    chart.innerHTML = '';
+    const maxC = Math.max(...counts, 1);
+    const barW = Math.min(48, Math.max(10, 78 / (k + 1) * 4));  // narrower with more bars
+    for (let w = 0; w <= k; w++) {
+      const total = 100 * (0.6 + w / k);   // dollars
+      const bar = document.createElement('div');
+      bar.className = 'hbar ' + (elId === 'chart1' ? 'basket' : 'spread');
+      bar.style.left = toPct(total) + '%';
+      bar.style.width = barW + 'px';
+      bar.style.height = (counts[w] / maxC * 88) + '%';
+      bar.title = '$' + total.toFixed(2) + ' — happened ' + counts[w] + ' of ' + RUNS + ' times (' + w + ' of ' + k + ' bets won)';
+      const lab = document.createElement('div');
+      lab.className = 'blab';
+      lab.textContent = counts[w] > 0 ? counts[w] : '';
+      bar.appendChild(lab);
+      chart.appendChild(bar);
+    }
+    const line = document.createElement('div');
+    line.className = 'ev-line';
+    line.style.left = toPct(EV) + '%';
+    line.innerHTML = '<div class="etag">EV $110</div>';
+    chart.appendChild(line);
+  }
+
+  function setBand(bandId, txtId, sd) {
+    const lo = Math.max(EV - sd, XMIN), hi = Math.min(EV + sd, XMAX);
+    const band = document.getElementById(bandId);
+    band.style.left = toPct(lo) + '%';
+    band.style.width = (toPct(hi) - toPct(lo)) + '%';
+    document.getElementById(txtId).textContent = '$' + (EV - sd).toFixed(2) + ' to $' + (EV + sd).toFixed(2);
+  }
+
+  function simulate() {
+    const k = getK();
+    const stake = 100 / k;
+    document.getElementById('kReadout').innerHTML = 'k = ' + k + ' &nbsp;($' + stake.toFixed(2) + ' on each)';
+    document.getElementById('curTitle').textContent = k === 1 ? 'Split across k = 1 bet (same basket!)' : 'Split across k = ' + k + ' bets';
+
+    // Theory: each staked dollar returns 1.6 or 0.6 (mean 1.1, SD 0.5).
+    // One bet of $s has SD 0.5s; k independent bets: Var = k(0.5·100/k)^2 = 2500/k, SD = 50/√k.
+    const sd = 50 / Math.sqrt(k);
+    document.getElementById('evK').textContent = '$110.00';
+    document.getElementById('sdK').textContent = '$' + sd.toFixed(2);
+    document.getElementById('sdKlbl').innerHTML = 'SD = $50/&radic;' + k;
+
+    drawChart('chart1', 1, simCounts(1));
+    drawChart('chartK', k, simCounts(k));
+    setBand('band1', 'range1txt', 50);
+    setBand('bandK', 'rangeKtxt', sd);
+  }
+
+  simulate();
+</script>
+</body>
+</html>

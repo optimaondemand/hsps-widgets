@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dutch Book — Why Incoherent Beliefs Cost Money</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 20px; justify-content: center; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
+  .slider-group { text-align: center; }
+  .slider-group label { display: block; font-size: 0.78rem; font-weight: 700; color: #0E1C42; margin-bottom: 4px; }
+  .slider-group input[type=range] { width: 200px; accent-color: #0E1C42; }
+  .slider-group .readout { font-size: 0.95rem; font-weight: 900; color: #C7922C; }
+
+  .sum-strip { text-align: center; margin-bottom: 12px; font-size: 0.9rem; font-weight: 700; }
+  .sum-strip .pill {
+    display: inline-block; padding: 6px 16px; border-radius: 999px; border: 2px solid;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+  }
+  .pill.incoh-hi { background: #fdf0ee; color: #C0392B; border-color: #C0392B; }
+  .pill.coh { background: #EEF1F8; color: #0E1C42; border-color: #0E1C42; }
+  .pill.incoh-lo { background: #eef7f0; color: #2F7D4C; border-color: #2F7D4C; }
+
+  .action-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .btn { padding: 9px 18px; border: none; border-radius: 8px; font-size: 0.88rem; font-weight: 700; cursor: pointer; }
+  .btn:active { transform: scale(0.97); }
+  .btn-gold { background: #C7922C; color: #fff; }
+  .btn-gold:hover { background: #a87820; }
+  .btn-red { background: #C0392B; color: #fff; }
+  .btn-red:hover { background: #96281c; }
+
+  .layout { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; max-width: 960px; margin: 0 auto 14px auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; flex: 1; min-width: 300px; }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .bet-card {
+    background: #F8FAFD; border: 2px solid #D0D9E8; border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 10px; font-size: 0.85rem; line-height: 1.6;
+  }
+  .bet-card .name { font-weight: 900; color: #0E1C42; }
+  .bet-card .price { color: #C7922C; font-weight: 900; }
+
+  .ledger { width: 100%; border-collapse: collapse; margin-bottom: 10px; opacity: 0; transition: opacity 0.25s; }
+  .ledger.shown { opacity: 1; }
+  .ledger th, .ledger td { border: 1px solid #D0D9E8; padding: 7px 8px; font-size: 0.82rem; text-align: center; }
+  .ledger th { background: #0E1C42; color: #fff; font-size: 0.72rem; }
+  .ledger .rowhead { background: #EEF1F8; font-weight: 700; }
+  .ledger td.net-loss { background: #fdf0ee; color: #C0392B; font-weight: 900; }
+  .ledger td.net-zero { background: #EEF1F8; color: #0E1C42; font-weight: 900; }
+  .ledger td.net-gain { background: #eef7f0; color: #2F7D4C; font-weight: 900; }
+
+  .verdict {
+    border-radius: 8px; padding: 10px 14px; border-left: 5px solid;
+    font-size: 0.84rem; line-height: 1.55; opacity: 0; transition: opacity 0.25s;
+  }
+  .verdict.shown { opacity: 1; }
+  .verdict.loss { background: #fdf0ee; border-color: #C0392B; }
+  .verdict.zero { background: #EEF1F8; border-color: #0E1C42; }
+  .verdict.gain { background: #eef7f0; border-color: #2F7D4C; }
+  .verdict strong { color: #0E1C42; }
+
+  .placeholder { text-align: center; color: #6b7a99; font-size: 0.85rem; padding: 24px 8px; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px;
+    padding: 12px 16px; font-size: 0.83rem; max-width: 960px; margin: 0 auto; line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#9748; The Dutch Book</h1>
+<p class="subtitle">Set your personal probabilities for tomorrow&rsquo;s weather &mdash; even contradictory ones. A bookie prices bets at exactly your rates. What could go wrong?</p>
+
+<div class="controls">
+  <div class="slider-group">
+    <label for="pRain">Your P(Rain)</label>
+    <input type="range" id="pRain" min="5" max="95" value="60" oninput="onSlide()">
+    <div class="readout" id="rainReadout">0.60</div>
+  </div>
+  <div class="slider-group">
+    <label for="pNoRain">Your P(No Rain)</label>
+    <input type="range" id="pNoRain" min="5" max="95" value="60" oninput="onSlide()">
+    <div class="readout" id="noRainReadout">0.60</div>
+  </div>
+</div>
+
+<div class="sum-strip">
+  <span class="pill incoh-hi" id="sumPill">P(Rain) + P(No Rain) = 1.20</span>
+</div>
+
+<div class="action-row">
+  <button class="btn btn-gold" onclick="acceptBets()">Accept both bets</button>
+  <button class="btn btn-red" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <h3>The bookie&rsquo;s offers (priced at <em>your</em> rates)</h3>
+    <div class="bet-card">
+      <span class="name">Bet A:</span> pays <strong>$1.00</strong> if it <strong>rains</strong>, $0 otherwise.<br>
+      Since you say P(Rain) = <span id="betAp">0.60</span>, you consider a fair price to be <span class="price" id="betAprice">$0.60</span>.
+    </div>
+    <div class="bet-card">
+      <span class="name">Bet B:</span> pays <strong>$1.00</strong> if it does <strong>not rain</strong>, $0 otherwise.<br>
+      Since you say P(No Rain) = <span id="betBp">0.60</span>, you consider a fair price to be <span class="price" id="betBprice">$0.60</span>.
+    </div>
+    <div class="bet-card" style="border-style:dashed">
+      By your own lights both prices are fair &mdash; so you should be willing to <strong>buy both bets</strong>.
+      Total cost: <span class="price" id="totCost">$1.20</span>. Exactly one of them will pay <strong>$1.00</strong>.
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>The ledger &mdash; every possible world</h3>
+    <div class="placeholder" id="ledgerPlaceholder">Press <strong>Accept both bets</strong> to settle up.</div>
+    <table class="ledger" id="ledger">
+      <thead>
+        <tr><th>Tomorrow&hellip;</th><th>You paid</th><th>You collect</th><th>Your net</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="rowhead">It rains</td><td id="costR"></td><td>$1.00</td><td id="netR"></td></tr>
+        <tr><td class="rowhead">It doesn&rsquo;t rain</td><td id="costN"></td><td>$1.00</td><td id="netN"></td></tr>
+      </tbody>
+    </table>
+    <div class="verdict" id="verdict"></div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> Whenever your two probabilities total <strong>more than 1</strong>, the ledger shows the
+  same red number in <em>both</em> rows &mdash; you lose no matter what the sky does. No bad luck involved; your own beliefs
+  priced the bets. Slide the total to exactly <strong>1</strong> and the guaranteed leak stops. That is the Dutch book argument:
+  the probability axioms aren&rsquo;t arbitrary rules &mdash; they are <strong>self-defense</strong> for anyone willing to act on their beliefs.
+</div>
+
+<script>
+  let accepted = false;
+
+  function vals() {
+    return {
+      pr: parseInt(document.getElementById('pRain').value, 10) / 100,
+      pn: parseInt(document.getElementById('pNoRain').value, 10) / 100
+    };
+  }
+  const money = v => (v < 0 ? '−$' : '$') + Math.abs(v).toFixed(2);
+
+  function onSlide() { accepted = false; render(); }
+
+  function resetAll() {
+    document.getElementById('pRain').value = 60;
+    document.getElementById('pNoRain').value = 60;
+    accepted = false;
+    render();
+  }
+
+  function acceptBets() { accepted = true; render(); }
+
+  function render() {
+    const {pr, pn} = vals();
+    const sum = pr + pn;
+    const sumR = Math.round(sum * 100) / 100;
+
+    document.getElementById('rainReadout').textContent = pr.toFixed(2);
+    document.getElementById('noRainReadout').textContent = pn.toFixed(2);
+    document.getElementById('betAp').textContent = pr.toFixed(2);
+    document.getElementById('betBp').textContent = pn.toFixed(2);
+    document.getElementById('betAprice').textContent = '$' + pr.toFixed(2);
+    document.getElementById('betBprice').textContent = '$' + pn.toFixed(2);
+    document.getElementById('totCost').textContent = '$' + sum.toFixed(2);
+
+    const pill = document.getElementById('sumPill');
+    pill.textContent = 'P(Rain) + P(No Rain) = ' + sum.toFixed(2) +
+      (sumR > 1 ? '  — too much belief!' : (sumR < 1 ? '  — belief missing!' : '  — coherent ✓'));
+    pill.className = 'pill ' + (sumR > 1 ? 'incoh-hi' : (sumR < 1 ? 'incoh-lo' : 'coh'));
+
+    const ledger = document.getElementById('ledger');
+    const verdict = document.getElementById('verdict');
+    const ph = document.getElementById('ledgerPlaceholder');
+
+    if (!accepted) {
+      ledger.classList.remove('shown');
+      verdict.classList.remove('shown');
+      ph.style.display = 'block';
+      return;
+    }
+    ph.style.display = 'none';
+    ledger.classList.add('shown');
+    verdict.classList.add('shown');
+
+    const net = 1 - sum;   // same in both worlds: exactly one bet pays $1
+    document.getElementById('costR').textContent = '$' + sum.toFixed(2);
+    document.getElementById('costN').textContent = '$' + sum.toFixed(2);
+    const netClass = sumR > 1 ? 'net-loss' : (sumR < 1 ? 'net-gain' : 'net-zero');
+    const netR = document.getElementById('netR'), netN = document.getElementById('netN');
+    netR.textContent = money(net); netR.className = netClass;
+    netN.textContent = money(net); netN.className = netClass;
+
+    if (sumR > 1) {
+      verdict.className = 'verdict shown loss';
+      verdict.innerHTML = '<strong>Guaranteed loss of ' + money(net).replace('−', '') + ' in every possible world.</strong> ' +
+        'You paid $' + sum.toFixed(2) + ' for bets that can only ever return $1.00 combined. The loss equals your probability ' +
+        'total minus 1 — that extra ' + (sum - 1).toFixed(2) + ' of &ldquo;belief&rdquo; is pure leak. You have been Dutch-booked.';
+    } else if (sumR < 1) {
+      verdict.className = 'verdict shown gain';
+      verdict.innerHTML = '<strong>Guaranteed profit of ' + money(net) + ' — the tables turn!</strong> ' +
+        'Your probabilities total less than 1, so $1.00 of certain payout costs you only $' + sum.toFixed(2) + '. ' +
+        'This time <em>you</em> pump the bookie. But beware: a sharp bookie facing these rates would simply flip the trade and ' +
+        '<em>buy</em> both bets from you at your own prices — and then the guaranteed loss would be yours again. ' +
+        'Incoherence is exploitable in either direction.';
+    } else {
+      verdict.className = 'verdict shown zero';
+      verdict.innerHTML = '<strong>Net $0.00 in every world.</strong> Your probabilities total exactly 1, so the bets are ' +
+        'priced coherently: no one can build a sure win against you. This is what the probability axioms buy you.';
+    }
+  }
+
+  render();
+</script>
+</body>
+</html>

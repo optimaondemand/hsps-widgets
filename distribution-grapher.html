@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Distribution Grapher — Build Your Own Random Variable</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 8px; justify-content: center; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .preset-btn {
+    padding: 7px 12px; border: 2px solid #0E1C42; border-radius: 8px;
+    background: #fff; color: #0E1C42; font-size: 0.8rem; font-weight: 700; cursor: pointer;
+  }
+  .preset-btn:hover { background: #F8FAFD; }
+  .preset-btn.active { background: #0E1C42; color: #fff; }
+  .btn-reset { padding: 7px 14px; border: none; border-radius: 8px; background: #C0392B; color: #fff; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+  .btn-reset:hover { background: #96281c; }
+
+  .layout { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; max-width: 960px; margin: 0 auto 14px auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; }
+  .edit-panel { flex: 1; min-width: 270px; }
+  .chart-panel { flex: 2; min-width: 320px; }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .rv-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  .rv-table th { font-size: 0.72rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px; text-align: center; }
+  .rv-table td { padding: 3px; text-align: center; }
+  .rv-table input {
+    width: 100%; padding: 6px 6px; border: 2px solid #D0D9E8; border-radius: 6px;
+    font-size: 0.88rem; text-align: center; font-family: inherit;
+  }
+  .rv-table input:focus { outline: none; border-color: #55C8E8; }
+  .rv-table input.bad { border-color: #C0392B; background: #fdf0ee; }
+  .row-del {
+    width: 26px; height: 26px; border: none; border-radius: 6px; background: #EEF1F8;
+    color: #C0392B; font-weight: 900; font-size: 0.9rem; cursor: pointer; line-height: 1;
+  }
+  .row-del:hover { background: #f2c4bf; }
+  .row-del:disabled { color: #c9d2e2; cursor: not-allowed; }
+  .btn-add {
+    width: 100%; padding: 7px; border: 2px dashed #0E1C42; border-radius: 8px; background: #fff;
+    color: #0E1C42; font-size: 0.8rem; font-weight: 700; cursor: pointer; margin-bottom: 10px;
+  }
+  .btn-add:hover { background: #F8FAFD; }
+  .btn-add:disabled { border-color: #c9d2e2; color: #c9d2e2; cursor: not-allowed; }
+
+  .sum-box { border-radius: 8px; padding: 10px 14px; border-left: 5px solid; transition: background 0.2s, border-color 0.2s; }
+  .sum-box .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7a99; }
+  .sum-box .value { font-size: 1.35rem; font-weight: 900; transition: color 0.2s; }
+  .sum-box.ok { background: #EEF1F8; border-color: #0E1C42; }
+  .sum-box.ok .value { color: #0E1C42; }
+  .sum-box.bad { background: #fdf0ee; border-color: #C0392B; }
+  .sum-box.bad .value { color: #C0392B; }
+  .sum-box .msg { font-size: 0.75rem; margin-top: 2px; color: #6b7a99; }
+  .hint { font-size: 0.72rem; color: #6b7a99; margin-top: 8px; line-height: 1.5; }
+
+  .chart-wrap { position: relative; height: 230px; margin: 8px 4px 34px 4px; }
+  .chart-axis { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: #0E1C42; }
+  .sigma-band {
+    position: absolute; bottom: 0; top: 0; background: rgba(85,200,232,0.18);
+    border-left: 2px dashed #55C8E8; border-right: 2px dashed #55C8E8;
+    transition: left 0.2s, width 0.2s, opacity 0.2s; pointer-events: none;
+  }
+  .bar {
+    position: absolute; bottom: 0; width: 34px; transform: translateX(-50%);
+    background: #0E1C42; border-radius: 4px 4px 0 0;
+    transition: height 0.2s, left 0.2s;
+  }
+  .bar .p-lab {
+    position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+    font-size: 0.7rem; font-weight: 700; color: #0E1C42; white-space: nowrap;
+  }
+  .bar .x-lab {
+    position: absolute; bottom: -22px; left: 50%; transform: translateX(-50%);
+    font-size: 0.78rem; font-weight: 700; color: #1a2340; white-space: nowrap;
+  }
+  .ev-marker {
+    position: absolute; bottom: -14px; transform: translateX(-50%);
+    width: 0; height: 0; border-left: 11px solid transparent; border-right: 11px solid transparent;
+    border-bottom: 14px solid #C7922C; transition: left 0.2s, opacity 0.2s;
+  }
+  .ev-marker .ev-lab {
+    position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+    font-size: 0.72rem; font-weight: 900; color: #C7922C; white-space: nowrap;
+  }
+
+  .readout-box { background: #EEF1F8; border-left: 5px solid #C7922C; border-radius: 8px; padding: 10px 14px; margin-top: 26px; }
+  .readout-box .label { font-size: 0.72rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.05em; }
+  .readout-box .formula { font-size: 0.82rem; color: #1a2340; line-height: 1.6; word-break: break-word; }
+  .readout-box .big { font-size: 1.2rem; font-weight: 900; color: #0E1C42; }
+  .spread-row { margin-top: 10px; display: none; }
+  .spread-row.on { display: block; }
+
+  .toggle-btn {
+    padding: 7px 14px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff;
+    color: #0E1C42; font-size: 0.8rem; font-weight: 700; cursor: pointer; margin-top: 10px;
+  }
+  .toggle-btn.active { background: #0E1C42; color: #fff; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px;
+    padding: 12px 16px; font-size: 0.83rem; max-width: 960px; margin: 0 auto; line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#128202; Distribution Grapher</h1>
+<p class="subtitle">Define a discrete random variable, one outcome at a time &mdash; then find where the distribution <em>balances</em>.</p>
+
+<div class="controls">
+  <button class="preset-btn" id="prDie" onclick="setPreset('die')">Fair die</button>
+  <button class="preset-btn" id="prRaffle" onclick="setPreset('raffle')">Raffle ticket</button>
+  <button class="preset-btn" id="prLoaded" onclick="setPreset('loaded')">Loaded die</button>
+  <button class="preset-btn" id="prQuiz" onclick="setPreset('quiz')">Quiz guessing</button>
+  <button class="btn-reset" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="panel edit-panel">
+    <h3>Outcomes &amp; probabilities</h3>
+    <table class="rv-table">
+      <thead><tr><th>Outcome x</th><th>P(X = x)</th><th></th></tr></thead>
+      <tbody id="rowsBody"></tbody>
+    </table>
+    <button class="btn-add" id="addRow" onclick="addRow()">+ Add an outcome</button>
+    <div class="sum-box bad" id="sumBox">
+      <div class="label">Running total of the probabilities</div>
+      <div class="value" id="sumVal">&mdash;</div>
+      <div class="msg" id="sumMsg"></div>
+    </div>
+    <div class="hint">Probabilities can be typed as decimals (<strong>0.25</strong>) or fractions (<strong>1/6</strong>). A legal distribution needs every probability between 0 and 1 &mdash; and a total of exactly 1.</div>
+  </div>
+
+  <div class="panel chart-panel">
+    <h3>The distribution</h3>
+    <div class="chart-wrap" id="chartWrap">
+      <div class="sigma-band" id="sigmaBand" style="opacity:0"></div>
+      <div class="chart-axis"></div>
+      <div class="ev-marker" id="evMarker" style="opacity:0"><div class="ev-lab" id="evLab"></div></div>
+    </div>
+    <div class="readout-box">
+      <div class="label">Expected value (the balance point &#9650;)</div>
+      <div class="formula" id="evFormula">&mdash;</div>
+      <div class="spread-row" id="spreadRow">
+        <div class="label">Standard deviation (how wide it sits)</div>
+        <div class="formula" id="sdFormula">&mdash;</div>
+      </div>
+    </div>
+    <button class="toggle-btn" id="spreadToggle" onclick="toggleSpread()">Show spread (SD and the &mu; &plusmn; 1&sigma; band)</button>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> The gold triangle is the <strong>expected value</strong> &mdash; the point where the
+  distribution would balance if each bar were a weight on a seesaw. Try the <strong>raffle ticket</strong>: almost all the
+  probability piles up at &minus;$1, yet one far-away outcome drags the balance point to about <strong>0</strong>.
+  Then switch on the <strong>spread</strong>: two distributions can balance at the same place while one sits far wider than the other.
+</div>
+
+<script>
+  let rows = [];          // [{x: "3", p: "1/6"}] raw strings
+  let showSpread = false;
+  const MAXR = 8, MINR = 2;
+
+  function parseP(str) {
+    if (typeof str !== 'string') return NaN;
+    const s = str.trim();
+    const m = s.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
+    let v;
+    if (m) {
+      const den = parseFloat(m[2]);
+      if (den === 0) return NaN;
+      v = parseFloat(m[1]) / den;
+    } else {
+      if (!/^-?\d*\.?\d+$/.test(s)) return NaN;
+      v = parseFloat(s);
+    }
+    if (isNaN(v) || v < 0 || v > 1) return NaN;
+    return v;
+  }
+  function parseX(str) {
+    const s = String(str).trim();
+    if (!/^-?\d*\.?\d+$/.test(s)) return NaN;
+    return parseFloat(s);
+  }
+  function fmt(v, d) {
+    const r = v.toFixed(d);
+    return r === '-' + (0).toFixed(d) ? (0).toFixed(d) : r;
+  }
+
+  function setPreset(which) {
+    ['prDie','prRaffle','prLoaded','prQuiz'].forEach(id => document.getElementById(id).classList.remove('active'));
+    if (which === 'die') {
+      rows = [1,2,3,4,5,6].map(x => ({x: String(x), p: '1/6'}));
+      document.getElementById('prDie').classList.add('active');
+    } else if (which === 'raffle') {
+      rows = [{x: '99', p: '0.01'}, {x: '-1', p: '0.99'}];
+      document.getElementById('prRaffle').classList.add('active');
+    } else if (which === 'loaded') {
+      rows = [1,2,3,4,5].map(x => ({x: String(x), p: '0.1'}));
+      rows.push({x: '6', p: '0.5'});
+      document.getElementById('prLoaded').classList.add('active');
+    } else if (which === 'quiz') {
+      rows = [{x: '5', p: '1/4'}, {x: '0', p: '3/4'}];
+      document.getElementById('prQuiz').classList.add('active');
+    }
+    buildTable();
+    render();
+  }
+
+  function resetAll() { showSpread = false; syncSpreadBtn(); setPreset('die'); }
+
+  function toggleSpread() { showSpread = !showSpread; syncSpreadBtn(); render(); }
+  function syncSpreadBtn() {
+    document.getElementById('spreadToggle').classList.toggle('active', showSpread);
+    document.getElementById('spreadRow').classList.toggle('on', showSpread);
+  }
+
+  function clearPresetHighlight() {
+    ['prDie','prRaffle','prLoaded','prQuiz'].forEach(id => document.getElementById(id).classList.remove('active'));
+  }
+
+  function addRow() {
+    if (rows.length >= MAXR) return;
+    rows.push({x: '', p: '0'});
+    clearPresetHighlight();
+    buildTable();
+    render();
+  }
+  function delRow(i) {
+    if (rows.length <= MINR) return;
+    rows.splice(i, 1);
+    clearPresetHighlight();
+    buildTable();
+    render();
+  }
+  function onEdit(i, field, val) {
+    rows[i][field] = val;
+    clearPresetHighlight();
+    render();
+  }
+
+  function buildTable() {
+    const tb = document.getElementById('rowsBody');
+    tb.innerHTML = '';
+    rows.forEach((r, i) => {
+      const tr = document.createElement('tr');
+      const tdX = document.createElement('td');
+      const inX = document.createElement('input');
+      inX.type = 'text'; inX.value = r.x; inX.setAttribute('aria-label', 'outcome value');
+      inX.addEventListener('input', () => onEdit(i, 'x', inX.value));
+      tdX.appendChild(inX);
+      const tdP = document.createElement('td');
+      const inP = document.createElement('input');
+      inP.type = 'text'; inP.value = r.p; inP.setAttribute('aria-label', 'probability');
+      inP.addEventListener('input', () => onEdit(i, 'p', inP.value));
+      tdP.appendChild(inP);
+      const tdD = document.createElement('td');
+      const del = document.createElement('button');
+      del.className = 'row-del'; del.innerHTML = '&times;'; del.title = 'Remove this outcome';
+      del.disabled = rows.length <= MINR;
+      del.addEventListener('click', () => delRow(i));
+      tdD.appendChild(del);
+      tr.appendChild(tdX); tr.appendChild(tdP); tr.appendChild(tdD);
+      tb.appendChild(tr);
+    });
+    document.getElementById('addRow').disabled = rows.length >= MAXR;
+  }
+
+  function render() {
+    // parse
+    const xs = rows.map(r => parseX(r.x));
+    const ps = rows.map(r => parseP(r.p));
+    const inputs = document.querySelectorAll('#rowsBody tr');
+    inputs.forEach((tr, i) => {
+      tr.children[0].firstChild.classList.toggle('bad', isNaN(xs[i]));
+      tr.children[1].firstChild.classList.toggle('bad', isNaN(ps[i]));
+    });
+    const allParsed = xs.every(v => !isNaN(v)) && ps.every(v => !isNaN(v));
+    const sum = ps.reduce((a, b) => a + (isNaN(b) ? 0 : b), 0);
+    const sumOK = allParsed && Math.abs(sum - 1) < 0.0005;
+
+    const sumBox = document.getElementById('sumBox');
+    sumBox.className = 'sum-box ' + (sumOK ? 'ok' : 'bad');
+    document.getElementById('sumVal').textContent = allParsed ? fmt(sum, 3) : fmt(sum, 3) + ' (so far)';
+    document.getElementById('sumMsg').textContent = sumOK
+      ? 'A legal probability distribution — the total is 1. ✓'
+      : (!allParsed ? 'Fix the highlighted entries (numbers only; probabilities from 0 to 1).'
+        : (sum > 1 ? 'Too much probability — trim ' + fmt(sum - 1, 3) + ' somewhere.'
+                   : 'Not enough probability — you still owe ' + fmt(1 - sum, 3) + '.'));
+
+    // chart
+    const wrap = document.getElementById('chartWrap');
+    wrap.querySelectorAll('.bar').forEach(b => b.remove());
+    const band = document.getElementById('sigmaBand');
+    const marker = document.getElementById('evMarker');
+
+    const goodIdx = rows.map((_, i) => i).filter(i => !isNaN(xs[i]) && !isNaN(ps[i]));
+    if (goodIdx.length === 0) { band.style.opacity = 0; marker.style.opacity = 0; return; }
+
+    let xmin = Math.min(...goodIdx.map(i => xs[i]));
+    let xmax = Math.max(...goodIdx.map(i => xs[i]));
+    if (xmax === xmin) { xmin -= 1; xmax += 1; }
+    const pad = (xmax - xmin) * 0.10;
+    xmin -= pad; xmax += pad;
+    const toPct = x => (100 * (x - xmin) / (xmax - xmin));
+    const maxP = Math.max(...goodIdx.map(i => ps[i]), 0.0001);
+
+    goodIdx.forEach(i => {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.left = toPct(xs[i]) + '%';
+      bar.style.height = (ps[i] / maxP * 88) + '%';
+      bar.innerHTML = '<div class="p-lab">' + fmt(ps[i], 3) + '</div><div class="x-lab">' + xs[i] + '</div>';
+      wrap.appendChild(bar);
+    });
+
+    // EV / SD
+    const evF = document.getElementById('evFormula');
+    const sdF = document.getElementById('sdFormula');
+    if (sumOK) {
+      const mu = goodIdx.reduce((a, i) => a + xs[i] * ps[i], 0);
+      const varr = goodIdx.reduce((a, i) => a + (xs[i] - mu) * (xs[i] - mu) * ps[i], 0);
+      const sd = Math.sqrt(Math.max(varr, 0));
+
+      const terms = goodIdx.map(i => '(' + xs[i] + ')(' + fmt(ps[i], 3) + ')').join(' + ');
+      evF.innerHTML = 'EV = &Sigma; x&middot;p = ' + terms + ' = <span class="big">' + fmt(mu, 3) + '</span>';
+
+      marker.style.opacity = 1;
+      marker.style.left = toPct(mu) + '%';
+      document.getElementById('evLab').textContent = 'EV = ' + fmt(mu, 3);
+
+      if (showSpread) {
+        sdF.innerHTML = 'SD = &radic;(&Sigma;(x&minus;&mu;)&sup2;&middot;p) = &radic;(' + fmt(varr, 3) + ') = <span class="big">' + fmt(sd, 3) + '</span>';
+        const lo = Math.max(toPct(mu - sd), 0), hi = Math.min(toPct(mu + sd), 100);
+        band.style.left = lo + '%';
+        band.style.width = Math.max(hi - lo, 0) + '%';
+        band.style.opacity = 1;
+      } else {
+        band.style.opacity = 0;
+      }
+    } else {
+      evF.innerHTML = '<span style="color:#C0392B">Make the probabilities total exactly 1 to unlock the expected value.</span>';
+      sdF.innerHTML = '&mdash;';
+      marker.style.opacity = 0;
+      band.style.opacity = 0;
+    }
+  }
+
+  resetAll();
+</script>
+</body>
+</html>

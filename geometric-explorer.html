@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Geometric Explorer — Flip Until the First Success</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #EEF1F8;
+    color: #1a2340;
+    min-height: 100vh;
+    padding: 14px;
+  }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 14px; }
+
+  .controls { display: flex; gap: 20px; justify-content: center; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
+  .slider-group { text-align: center; }
+  .slider-group label { display: block; font-size: 0.78rem; font-weight: 700; color: #0E1C42; margin-bottom: 4px; }
+  .slider-group input[type=range] { width: 200px; accent-color: #0E1C42; }
+  .slider-group .readout { font-size: 0.95rem; font-weight: 900; color: #C7922C; }
+
+  .action-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .btn { padding: 9px 18px; border: none; border-radius: 8px; font-size: 0.88rem; font-weight: 700; cursor: pointer; }
+  .btn:active { transform: scale(0.97); }
+  .btn-gold { background: #C7922C; color: #fff; }
+  .btn-gold:hover { background: #a87820; }
+  .btn-gold:disabled { background: #cbb98f; cursor: not-allowed; }
+  .btn-navy { background: #0E1C42; color: #fff; }
+  .btn-navy:hover { background: #1a2f63; }
+  .btn-navy:disabled { background: #8a94ad; cursor: not-allowed; }
+  .btn-red { background: #C0392B; color: #fff; }
+  .btn-red:hover { background: #96281c; }
+
+  .layout { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; max-width: 960px; margin: 0 auto 14px auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 14px 16px; }
+  .trial-panel { flex: 1; min-width: 280px; }
+  .hist-panel { flex: 2; min-width: 320px; }
+  .panel h3 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+  .flip-strip {
+    display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start;
+    background: #F8FAFD; border: 2px solid #D0D9E8; border-radius: 10px;
+    min-height: 96px; padding: 10px; margin-bottom: 10px;
+  }
+  .flip {
+    width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; font-weight: 900; color: #fff;
+    animation: pop 0.2s ease-out;
+  }
+  @keyframes pop { from { transform: scale(0.2); } to { transform: scale(1); } }
+  .flip.fail { background: #8a94ad; }
+  .flip.success { background: #C7922C; box-shadow: 0 0 0 4px rgba(199,146,44,0.35); }
+  .trial-report { text-align: center; font-size: 0.95rem; font-weight: 700; color: #0E1C42; min-height: 26px; margin-bottom: 8px; }
+
+  .stats-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .stat-chip { background: #F8FAFD; border: 2px solid #D0D9E8; border-radius: 10px; padding: 8px 12px; text-align: center; min-width: 96px; }
+  .stat-chip .val { font-size: 1.2rem; font-weight: 900; color: #0E1C42; }
+  .stat-chip .lbl { font-size: 0.66rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .chart { display: flex; align-items: flex-end; height: 230px; gap: 1px; border-bottom: 2px solid #0E1C42; padding: 0 2px; }
+  .gcol { flex: 1; height: 100%; position: relative; min-width: 0; }
+  .gcol .fill {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: #0E1C42; border-radius: 3px 3px 0 0; transition: height 0.2s;
+  }
+  .gcol .theo {
+    position: absolute; left: 50%; width: 8px; height: 8px; margin-left: -4px; margin-bottom: -4px;
+    background: #55C8E8; border: 2px solid #fff; border-radius: 50%;
+    transition: bottom 0.2s; z-index: 2;
+  }
+  .xlabels { display: flex; gap: 1px; padding: 2px 2px 0 2px; }
+  .xlabels div { flex: 1; text-align: center; font-size: 0.66rem; color: #6b7a99; font-weight: 700; min-width: 0; overflow: hidden; }
+  .chart-cap { text-align: center; font-size: 0.75rem; color: #6b7a99; margin-top: 6px; }
+  .chart-cap .cyan-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #55C8E8; border: 2px solid #fff; box-shadow: 0 0 0 1px #55C8E8; vertical-align: -1px; }
+
+  .insight {
+    background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px;
+    padding: 12px 16px; font-size: 0.83rem; max-width: 960px; margin: 0 auto; line-height: 1.6;
+  }
+  .insight strong { color: #55C8E8; }
+</style>
+</head>
+<body>
+<h1>&#127921; Geometric Explorer</h1>
+<p class="subtitle">Keep flipping until the first success. How long should you expect to wait &mdash; and how long <em>might</em> you wait?</p>
+
+<div class="controls">
+  <div class="slider-group">
+    <label for="pSlider">p &mdash; probability of success on each flip</label>
+    <input type="range" id="pSlider" min="5" max="90" value="20" oninput="onP()">
+    <div class="readout" id="pReadout">p = 0.20 &nbsp;&middot;&nbsp; EV = 1/p = 5.0 flips</div>
+  </div>
+</div>
+
+<div class="action-row">
+  <button class="btn btn-gold" id="btnOne" onclick="runOne()">Run one trial</button>
+  <button class="btn btn-navy" id="btn1000" onclick="run1000()">Run 1,000 trials</button>
+  <button class="btn btn-red" onclick="resetAll()">Reset</button>
+</div>
+
+<div class="layout">
+  <div class="panel trial-panel">
+    <h3>One trial, flip by flip</h3>
+    <div class="flip-strip" id="flipStrip"></div>
+    <div class="trial-report" id="trialReport">Press <strong>Run one trial</strong>.</div>
+  </div>
+
+  <div class="panel hist-panel">
+    <h3>When did the first success come? (all trials so far)</h3>
+    <div class="stats-row">
+      <div class="stat-chip"><div class="val" id="chipTrials">0</div><div class="lbl">Trials run</div></div>
+      <div class="stat-chip"><div class="val" id="chipEV">5.0</div><div class="lbl">Theoretical EV = 1/p</div></div>
+      <div class="stat-chip"><div class="val" id="chipMean">&mdash;</div><div class="lbl">Observed mean wait</div></div>
+      <div class="stat-chip"><div class="val" id="chipMax">&mdash;</div><div class="lbl">Longest wait seen</div></div>
+    </div>
+    <div class="chart" id="chart"></div>
+    <div class="xlabels" id="xlabels"></div>
+    <div class="chart-cap">Navy bars: simulated counts. <span class="cyan-dot"></span> dots: the theoretical p(1&minus;p)<sup>k&minus;1</sup> prediction.</div>
+  </div>
+</div>
+
+<div class="insight">
+  <strong>What to watch:</strong> The histogram always starts tall at <strong>k = 1</strong> &mdash; the single most likely wait
+  is one flip! &mdash; and then trails off in a long <strong>right tail</strong>. Most waits are short, but a few drag on far past
+  the average, which is why the mean wait (1/p) sits well to the right of the most common wait. Changing p doesn&rsquo;t change
+  the shape of the story; it only stretches or squeezes the tail.
+</div>
+
+<script>
+  let counts = {};        // k -> observed count
+  let totalTrials = 0;
+  let sumWaits = 0;
+  let maxWait = 0;
+  let animTimer = null;
+
+  function getP() { return parseInt(document.getElementById('pSlider').value, 10) / 100; }
+
+  function onP() {
+    // changing p invalidates accumulated data
+    stopAnim();
+    counts = {}; totalTrials = 0; sumWaits = 0; maxWait = 0;
+    document.getElementById('flipStrip').innerHTML = '';
+    document.getElementById('trialReport').innerHTML = 'Press <strong>Run one trial</strong>.';
+    render();
+  }
+
+  function resetAll() {
+    document.getElementById('pSlider').value = 20;
+    onP();
+  }
+
+  function sampleGeometric(p) {
+    let k = 1;
+    while (Math.random() >= p) k++;
+    return k;
+  }
+
+  function record(k) {
+    counts[k] = (counts[k] || 0) + 1;
+    totalTrials++;
+    sumWaits += k;
+    if (k > maxWait) maxWait = k;
+  }
+
+  function stopAnim() {
+    if (animTimer) { clearInterval(animTimer); animTimer = null; }
+    document.getElementById('btnOne').disabled = false;
+    document.getElementById('btn1000').disabled = false;
+  }
+
+  function runOne() {
+    stopAnim();
+    const p = getP();
+    const k = sampleGeometric(p);
+    const strip = document.getElementById('flipStrip');
+    const report = document.getElementById('trialReport');
+    strip.innerHTML = '';
+    report.innerHTML = 'Flipping&hellip;';
+    document.getElementById('btnOne').disabled = true;
+    document.getElementById('btn1000').disabled = true;
+
+    const SHOWMAX = 60;   // cap the animated markers; summarize beyond that
+    let i = 0;
+    animTimer = setInterval(() => {
+      i++;
+      if (i < k) {
+        if (i <= SHOWMAX) {
+          const d = document.createElement('div');
+          d.className = 'flip fail';
+          d.innerHTML = '&times;';
+          strip.appendChild(d);
+        } else if (i === SHOWMAX + 1) {
+          const d = document.createElement('div');
+          d.style.cssText = 'font-size:0.8rem;font-weight:700;color:#6b7a99;align-self:center;';
+          d.textContent = '… (' + (k - 1 - SHOWMAX) + ' more misses) …';
+          strip.appendChild(d);
+        }
+        report.innerHTML = 'Flip ' + i + ': miss&hellip;';
+      } else {
+        const d = document.createElement('div');
+        d.className = 'flip success';
+        d.innerHTML = '&#10003;';
+        strip.appendChild(d);
+        report.innerHTML = 'First success on flip <span style="color:#C7922C;font-size:1.1rem">' + k + '</span>' +
+          (k === 1 ? ' — first try!' : ' (' + (k - 1) + ' miss' + (k - 1 === 1 ? '' : 'es') + ' first).');
+        stopAnim();
+        record(k);
+        render();
+      }
+    }, Math.min(130, Math.max(35, 2200 / k)));
+  }
+
+  function run1000() {
+    stopAnim();
+    const p = getP();
+    for (let t = 0; t < 1000; t++) record(sampleGeometric(p));
+    document.getElementById('trialReport').innerHTML = 'Added 1,000 trials to the histogram &rarr;';
+    render();
+  }
+
+  function render() {
+    const p = getP();
+    const ev = 1 / p;
+    document.getElementById('pReadout').innerHTML = 'p = ' + p.toFixed(2) + ' &nbsp;&middot;&nbsp; EV = 1/p = ' + ev.toFixed(1) + ' flips';
+    document.getElementById('chipEV').textContent = ev.toFixed(1);
+    document.getElementById('chipTrials').textContent = totalTrials.toLocaleString('en-US');
+    document.getElementById('chipMean').textContent = totalTrials > 0 ? (sumWaits / totalTrials).toFixed(2) : '—';
+    document.getElementById('chipMax').textContent = totalTrials > 0 ? maxWait : '—';
+
+    // how many k-columns to show: cover 99.5% of theoretical mass, at least the observed max, cap 60
+    let kTheo = Math.ceil(Math.log(0.005) / Math.log(1 - p));   // (1-p)^k <= 0.005
+    if (!isFinite(kTheo) || kTheo < 1) kTheo = 1;
+    let K = Math.max(kTheo, 10);
+    K = Math.max(K, Math.min(maxWait, 60));
+    K = Math.min(K, 60);
+    const overflow = maxWait > K;
+
+    // bins: 1..K, plus ">K" bucket if needed
+    const bins = [];
+    for (let k = 1; k <= K; k++) bins.push({label: String(k), obs: counts[k] || 0, theo: p * Math.pow(1 - p, k - 1)});
+    if (overflow) {
+      let over = 0;
+      for (const kk in counts) if (parseInt(kk, 10) > K) over += counts[kk];
+      bins.push({label: '>' + K, obs: over, theo: Math.pow(1 - p, K)});
+    }
+
+    const N = Math.max(totalTrials, 1);
+    let maxH = 0;
+    bins.forEach(b => { maxH = Math.max(maxH, b.obs / N, b.theo); });
+    if (maxH === 0) maxH = 1;
+
+    const chart = document.getElementById('chart');
+    const xl = document.getElementById('xlabels');
+    chart.innerHTML = '';
+    xl.innerHTML = '';
+    const labelEvery = bins.length <= 15 ? 1 : (bins.length <= 30 ? 2 : 5);
+    bins.forEach((b, idx) => {
+      const col = document.createElement('div');
+      col.className = 'gcol';
+      col.title = 'k = ' + b.label + ': observed ' + b.obs + ', theoretical ' + (b.theo * totalTrials).toFixed(1);
+      const fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.height = (totalTrials > 0 ? (b.obs / N / maxH * 94) : 0) + '%';
+      col.appendChild(fill);
+      const dot = document.createElement('div');
+      dot.className = 'theo';
+      dot.style.bottom = (b.theo / maxH * 94) + '%';
+      col.appendChild(dot);
+      chart.appendChild(col);
+      const lab = document.createElement('div');
+      lab.textContent = (idx % labelEvery === 0 || idx === bins.length - 1) ? b.label : '';
+      xl.appendChild(lab);
+    });
+  }
+
+  resetAll();
+</script>
+</body>
+</html>
