@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Choose a Display</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; min-height: 100vh; padding: 12px 14px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 8px; }
+  .shell { max-width: 740px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+  button { font-family: inherit; cursor: pointer; }
+  button:focus-visible, [tabindex]:focus-visible { outline: 3px solid #C7922C; outline-offset: 2px; }
+  button:disabled { cursor: default; }
+
+  .topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: #fff; border: 2px solid #D0D9E8; border-radius: 10px; padding: 6px 10px; }
+  .prog-text { font-size: 0.82rem; font-weight: 700; color: #0E1C42; white-space: nowrap; }
+  .dots { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; min-width: 120px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #D0D9E8; background: #fff; }
+  .dot.done { background: #0E1C42; border-color: #0E1C42; }
+  .dot.now { border-color: #C7922C; background: #FDF3E3; }
+  .reset-btn { padding: 5px 12px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; }
+  .reset-btn:hover { background: #0E1C42; color: #fff; }
+
+  .card { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 10px 14px; }
+  .scenario { border-left: 5px solid #0E1C42; }
+  .tag { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #C7922C; margin-bottom: 3px; }
+  .scenario p { font-size: 0.93rem; line-height: 1.5; }
+  .scenario p.goal { margin-top: 3px; }
+  .scenario p.goal strong { color: #0E1C42; }
+
+  .qrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+  .qlabel { font-size: 0.85rem; font-weight: 700; color: #0E1C42; flex: 1 1 210px; }
+  .opt { padding: 6px 12px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.82rem; font-weight: 700; }
+  .opt:hover:not(:disabled) { background: #E8F6FB; }
+  .opt.ok { background: #D8F0DD; border-color: #2A9D5C; color: #1A6B3D; }
+  .opt.bad { background: #FDECEC; border-color: #C0392B; color: #8A1F16; }
+  .msg { font-size: 0.8rem; line-height: 1.4; padding: 4px 8px; border-radius: 6px; margin-bottom: 4px; }
+  .msg.ok { background: #D8F0DD; color: #1A6B3D; }
+  .msg.bad { background: #FDECEC; color: #8A1F16; }
+  .summary-line { font-size: 0.82rem; color: #1A6B3D; line-height: 1.4; }
+
+  .choices-head { font-size: 0.85rem; font-weight: 700; color: #0E1C42; margin-bottom: 5px; }
+  .choices { display: flex; gap: 6px; flex-wrap: wrap; }
+  .choice { padding: 6px 10px; border: 2px solid #D0D9E8; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.8rem; font-weight: 700; text-align: left; line-height: 1.25; }
+  .choice:hover:not(:disabled) { border-color: #0E1C42; background: #E8F6FB; }
+  .choice:disabled { opacity: 0.6; }
+  .choice.picked { border-color: #0E1C42; background: #EEF1F8; }
+  .choice .mini { display: block; font-size: 0.68rem; font-weight: 600; color: #6b7a99; }
+  .note-line { font-size: 0.78rem; color: #6b7a99; margin-top: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .note-line .btn { padding: 6px 14px; font-size: 0.82rem; }
+  .linkbtn { background: none; border: none; color: #0E1C42; text-decoration: underline; font-size: 0.78rem; font-weight: 700; padding: 2px 4px; }
+
+  .previews { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 8px; }
+  .pv { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+  .pv.newest { border-color: #0E1C42; }
+  .pv-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .pv-head h3 { font-size: 0.86rem; color: #0E1C42; }
+  .badge { font-size: 0.72rem; font-weight: 800; padding: 2px 8px; border-radius: 10px; border: 2px solid; white-space: nowrap; }
+  .badge.best { background: #D8F0DD; border-color: #2A9D5C; color: #1A6B3D; }
+  .badge.ok { background: #FDF3E3; border-color: #C7922C; color: #7A5410; }
+  .badge.poor { background: #FDECEC; border-color: #C0392B; color: #8A1F16; }
+  .chart { background: #F8FAFD; border: 1px solid #D0D9E8; border-radius: 8px; padding: 2px; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  svg .ct { font: 700 11px 'Segoe UI', Arial, sans-serif; fill: #0E1C42; }
+  svg .al { font: 600 8.5px 'Segoe UI', Arial, sans-serif; fill: #6b7a99; }
+  svg .tk { font: 8px 'Segoe UI', Arial, sans-serif; fill: #1a2340; }
+  svg .lg { font: 8.5px 'Segoe UI', Arial, sans-serif; fill: #1a2340; }
+  svg .mono { font-family: Consolas, 'Courier New', monospace; fill: #1a2340; }
+  svg .sl { font: 700 8px 'Segoe UI', Arial, sans-serif; fill: #fff; paint-order: stroke; stroke: #0E1C42; stroke-width: 1.5px; }
+  .tbls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; padding: 4px; }
+  .tbls.two table.dt { font-size: 0.64rem; }
+  .tbls.two table.dt td.rh { max-width: 82px; }
+  .tbl-title { font-size: 0.78rem; font-weight: 700; color: #0E1C42; text-align: center; padding: 4px 4px 0; }
+  .tbl-sub { font-size: 0.68rem; color: #6b7a99; text-align: center; padding-bottom: 2px; }
+  table.dt { border-collapse: collapse; font-size: 0.72rem; }
+  table.dt th, table.dt td { border: 1px solid #D0D9E8; padding: 2px 6px; text-align: center; }
+  table.dt th { background: #0E1C42; color: #fff; font-weight: 700; }
+  table.dt td.rh { background: #EEF1F8; font-weight: 700; text-align: left; color: #0E1C42; }
+  table.dt tr.tot td { background: #F8FAFD; font-weight: 800; }
+  .verdict { font-size: 0.8rem; line-height: 1.45; }
+
+  .bottom { display: flex; justify-content: flex-end; }
+  .btn { padding: 8px 18px; border: none; border-radius: 8px; background: #0E1C42; color: #fff; font-size: 0.88rem; font-weight: 700; }
+  .btn:hover { background: #1a2f63; }
+
+  .final h2 { color: #0E1C42; font-size: 1.05rem; margin-bottom: 6px; }
+  .final ul { list-style: none; margin: 6px 0; }
+  .final li { font-size: 0.82rem; line-height: 1.45; padding: 4px 0; border-bottom: 1px solid #EEF1F8; }
+  .final li strong { color: #0E1C42; }
+  .takeaway { background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 8px; padding: 8px 12px; font-size: 0.88rem; line-height: 1.5; margin-top: 6px; }
+  .used { font-size: 0.84rem; line-height: 1.5; }
+  .sr { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+  @media (max-width: 440px) { body { padding: 10px; } .card { padding: 9px 11px; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<h1>Choose a Display</h1>
+<p class="subtitle">Read the story. Say what kind of data it is. Pick a display and see what happens.</p>
+<div class="shell">
+  <div class="topbar" id="topbar"></div>
+  <div id="main"></div>
+</div>
+<div class="sr" id="live" aria-live="polite" role="status"></div>
+
+<script>
+/* ============ PURE LOGIC (tested in node) ============ */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function shuffle(arr,rng){var a=arr.slice();for(var i=a.length-1;i>0;i--){var j=Math.floor(rng()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
+function genNormalish(n,mean,sd,seed,lo,hi,dec){
+  var r=mulberry32(seed),out=[],f=Math.pow(10,dec||0);
+  for(var i=0;i<n;i++){var s=r()+r()+r()+r();var z=(s-2)/0.5774;var v=mean+sd*z;v=Math.min(hi,Math.max(lo,v));out.push(Math.round(v*f)/f);}
+  return out;
+}
+function genLinear(n,seed,xlo,xhi,a,b,noise,xdec){
+  var r=mulberry32(seed),x=[],y=[],f=Math.pow(10,xdec);
+  for(var i=0;i<n;i++){var xv=Math.round((xlo+(xhi-xlo)*r())*f)/f;x.push(xv);y.push(Math.round(a+b*xv+(r()-0.5)*2*noise));}
+  return {x:x,y:y};
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function trunc(s,m){s=String(s);return s.length>m?s.slice(0,m-1)+'…':s;}
+function fmt(v){return String(+(+v).toFixed(2));}
+function niceStep(raw){if(!(raw>0))return 1;var mag=Math.pow(10,Math.floor(Math.log10(raw)));var f=raw/mag;var m=f<=1?1:f<=2?2:f<=5?5:10;return m*mag;}
+function domain(lo,hi,count,intStep){
+  if(hi===lo){lo-=1;hi+=1;}
+  var step=niceStep((hi-lo)/count);if(intStep&&step<1)step=1;
+  var a=Math.floor(lo/step+1e-9)*step,b=Math.ceil(hi/step-1e-9)*step,t=[];
+  for(var v=a;v<=b+1e-9;v+=step)t.push(+v.toFixed(10));
+  return {lo:+a.toFixed(10),hi:+b.toFixed(10),ticks:t,step:step};
+}
+function median(a){var n=a.length,m=Math.floor(n/2);return n%2?a[m]:(a[m-1]+a[m])/2;}
+function fiveNum(values){
+  var a=values.slice().sort(function(x,y){return x-y;}),n=a.length,h=Math.floor(n/2);
+  var q1=median(a.slice(0,h)),q3=median(a.slice(n-h)),med=median(a),iqr=q3-q1;
+  var lf=q1-1.5*iqr,hf=q3+1.5*iqr;
+  var inside=a.filter(function(v){return v>=lf&&v<=hf;});
+  return {min:a[0],q1:q1,med:med,q3:q3,max:a[n-1],iqr:iqr,lowFence:lf,highFence:hf,
+    outliers:a.filter(function(v){return v<lf||v>hf;}),whiskLo:inside[0],whiskHi:inside[inside.length-1]};
+}
+function makeBins(values,spec){
+  var mn=Math.min.apply(null,values),mx=Math.max.apply(null,values);
+  var w=(spec&&spec.width)||niceStep((mx-mn||1)/8);
+  var start=(spec&&spec.start!==undefined)?spec.start:Math.floor(mn/w+1e-9)*w;
+  var bins=[],a=start;
+  while(a<=mx+1e-9){bins.push({lo:+a.toFixed(10),hi:+(a+w).toFixed(10),c:0});a+=w;}
+  values.forEach(function(v){var i=Math.floor((v-start)/w+1e-9);if(i>=bins.length)i=bins.length-1;if(i<0)i=0;bins[i].c++;});
+  return bins;
+}
+function stemLeaf(values,stemUnit){
+  var leafUnit=stemUnit/10;
+  var ints=values.map(function(v){return Math.round(v/leafUnit);}).sort(function(a,b){return a-b;});
+  var lo=Math.floor(ints[0]/10),hi=Math.floor(ints[ints.length-1]/10),rows=[];
+  for(var s=lo;s<=hi;s++)rows.push({stem:s,leaves:[]});
+  ints.forEach(function(i){var s=Math.floor(i/10);rows[s-lo].leaves.push(i-s*10);});
+  var f=rows.filter(function(r){return r.leaves.length;})[0];
+  return {rows:rows,key:f.stem+' | '+f.leaves[0]+' means '+fmt((f.stem*10+f.leaves[0])*leafUnit)};
+}
+function numToCats(values,spec){
+  var d=Array.from(new Set(values)).sort(function(a,b){return a-b;});
+  if(d.length<=12)return d.map(function(v){return {l:fmt(v),c:values.filter(function(x){return x===v;}).length};});
+  return makeBins(values,spec).map(function(b){return {l:fmt(b.lo)+'–'+fmt(b.hi),c:b.c};});
+}
+function sum(a){return a.reduce(function(x,y){return x+y;},0);}
+
+/* ---------- Displays ---------- */
+var DISPLAYS={
+  hist:{name:'Histogram'},stem:{name:'Stem-and-leaf plot'},box:{name:'Box plot'},lineplot:{name:'Line plot'},
+  scatter:{name:'Scatter plot'},linegraph:{name:'Line graph'},
+  bar:{name:'Bar chart'},circle:{name:'Circle graph'},freq:{name:'Frequency table'},relfreq:{name:'Relative frequency table'},
+  seg:{name:'Segmented bar chart'},joint:{name:'Joint frequency table'},jointrel:{name:'Joint relative frequency table'}
+};
+var VALID={
+  num1:['hist','stem','box','lineplot'],
+  num2:['scatter','linegraph'],
+  cat1:['bar','circle','lineplot','freq','relfreq'],
+  cat2:['seg','joint','jointrel']
+};
+var KIND_NAME={num1:'Numerical, one variable',num2:'Numerical, two variables',cat1:'Categorical, one variable',cat2:'Categorical, two variables'};
+var LEVEL={best:{label:'Best fit',sym:'✓'},ok:{label:'Works, with a trade-off',sym:'≈'},poor:{label:'Poor fit',sym:'!'}};
+
+/* ---------- Scenarios (all made-up) ---------- */
+var CLUBS=[['Chess and strategy games',42],['Robotics and coding',38],['Drama and theater',35],['Student newspaper',33],['Environmental action',30],['Art and design',27],['Debate team',24],['Community service',22],['Math puzzles club',18],['Photography',14],['Board game night',10],['Book discussion',7]];
+var S6=genLinear(20,11,0.5,6,50,6,6,1);
+var S8=genLinear(120,23,4,10,10,6.5,9,1);
+var SCENARIOS=[
+ {id:'pets',short:'Pets per home',kind:'num1',
+  text:'A class of {n} students counted how many pets live in each home. (Made-up data.)',
+  goal:'They want to show how many pets homes usually have.',
+  why:{type:'Number of pets is a count, so it is numerical.',vars:'Only one thing was counted for each home, so it is one variable.'},
+  data:{values:[0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,4,4,5,0]},
+  labels:{title:'Pets per home',x:'Number of pets',count:'Number of homes'},stemUnit:10,
+  decoys:['bar','circle'],
+  rate:{
+   lineplot:['best','Each home is one dot on a number line. With only whole numbers 0 to 5 and many repeats, you see every value and the pile-ups at 1 and 2.'],
+   hist:['ok','This works. Each bar covers one whole number, so it looks like the line plot. You lose the one-dot-per-home detail, but you keep the shape.'],
+   box:['ok','This works for the center and spread, but there are only six different values, so the box is squeezed. You cannot see how many homes have each number.'],
+   stem:['poor','All values are 0 to 5, so every leaf sits on the same stem. You get one long row, not a shape.'],
+   bar:['ok','This looks fine here because there are only a few whole numbers. But a bar chart is built for categories. With measured values like times, it would break down.'],
+   circle:['poor','A circle graph splits a whole into category shares. Here each number became a slice, so the order 0 to 5 is lost and the center is hard to find.']}},
+ {id:'run',short:'5 km run times',kind:'num1',
+  text:'A running club timed {n} members on a 5 km run. (Made-up times.)',
+  goal:'They want to show the shape of the times: where most fall and how spread out they are.',
+  why:{type:'A finish time is a measurement in minutes, so it is numerical.',vars:'Each runner has one time, so it is one variable.'},
+  data:{values:[22,24,25,25,26,27,27,28,28,29,29,30,30,30,31,32,32,33,34,34,35,36,37,38,39,40,41,43,45,28]},
+  labels:{title:'5 km finish times',x:'Finish time (minutes)',count:'Number of runners'},stemUnit:10,bin:{start:20,width:5},
+  decoys:['circle','linegraph'],
+  rate:{
+   hist:['best','Bars of width 5 minutes show the shape clearly: most runners finish between 25 and 35 minutes, with a longer tail to the right.'],
+   stem:['ok','This keeps every single time and shows the same shape, turned sideways. The trade-off: it is harder to read the shape quickly, and it gets long with more data.'],
+   box:['ok','This gives the median and spread in one small picture. The trade-off: it hides the shape, so you cannot see where the times bunch up.'],
+   lineplot:['ok','This keeps every time as a dot. With 30 values and many different minutes, the dots spread thin and the overall shape is harder to see.']}},
+ {id:'screen',short:'Screen time, 300 students',kind:'num1',
+  text:'A school survey asked {n} students how many minutes a day they spend on screens. (Made-up survey.)',
+  goal:'They want to show the overall shape of the screen times.',
+  why:{type:'Minutes per day is a measurement, so it is numerical.',vars:'Each student gave one number, so it is one variable.'},
+  data:{values:genNormalish(300,150,45,7,30,290,0)},
+  labels:{title:'Daily screen time',x:'Minutes per day',count:'Number of students'},stemUnit:10,bin:{width:20},
+  decoys:['bar','circle'],
+  rate:{
+   hist:['best','Grouping 300 values into 20-minute bars shows a clear hill shape with the center near 150 minutes. The size of the data does not matter to a histogram.'],
+   box:['ok','This gives a quick summary: median, spread and unusual values. The trade-off: with 300 values, the shape of the hill is hidden.'],
+   stem:['poor','A stem-and-leaf plot writes every one of the 300 values. The rows get packed with leaves, the text shrinks, and nobody can read or count it.'],
+   lineplot:['poor','One dot per student means huge piles. The dots shrink to specks and the picture is hard to read.'],
+   bar:['poor','Values are grouped into ranges here, but a bar chart is meant for categories, with gaps between bars. Gaps would break the number line.'],
+   circle:['poor','Many ranges become many slices. The slices cannot show the shape or the center, and small ones are hard to compare.']}},
+ {id:'bakery',short:'Loaves sold per day',kind:'num1',
+  text:'A bakery counted the loaves sold each day for {n} days. (Made-up counts.)',
+  goal:'They want to show a typical day and spot any unusual day.',
+  why:{type:'Loaves sold is a count, so it is numerical.',vars:'There is one count per day, so it is one variable.'},
+  data:{values:[48,52,50,55,47,49,51,53,50,54,46,52,51,49,48,53,50,52,110,51]},
+  labels:{title:'Loaves sold per day',x:'Loaves sold',count:'Number of days'},stemUnit:10,bin:{start:40,width:10},
+  decoys:['circle','bar'],
+  rate:{
+   box:['best','The box shows the typical days, and the lone dot far to the right is flagged as an unusual day (110 loaves).'],
+   hist:['ok','The far-off bar shows the odd day. The trade-off: it does not mark the day as an outlier or give the median and quartiles.'],
+   stem:['ok','This keeps every value, and the 110 sits alone at the bottom. The trade-off: you must work out the center and spread yourself.'],
+   lineplot:['ok','Each day is a dot, so the outlier is easy to see. The trade-off: no summary numbers, and the axis stretches to fit 110.']}},
+ {id:'sprint',short:'Sprint times, 8 runners',kind:'num1',
+  text:'A coach timed {n} runners in a 100 m sprint. (Made-up times.)',
+  goal:'She wants to show every time and how they are spread out.',
+  why:{type:'A sprint time in seconds is a measurement, so it is numerical.',vars:'Each runner has one time, so it is one variable.'},
+  data:{values:[13.1,13.4,13.4,13.9,14.2,14.5,14.8,16.0]},
+  labels:{title:'100 m sprint times',x:'Time (seconds)',count:'Number of runners'},stemUnit:1,bin:{start:13,width:1},
+  decoys:['bar','scatter'],
+  rate:{
+   stem:['best','With only 8 values, you can list them all. The stem-and-leaf plot keeps every time (13.1, 13.4, 13.4 ...) and still shows the spread.'],
+   lineplot:['ok','Each time is a dot. This works well for small data. The trade-off: dots on a long axis can look far apart.'],
+   hist:['ok','This works, but with 8 values each bar holds only 1 to 3 runners. The shape is shaky, and you lose the exact times.'],
+   box:['ok','This works, but a box plot of 8 values hides the exact times, and the quartiles come from only a few numbers.'],
+   bar:['poor','Each different time became its own bar of height 1 or 2. That is a bar chart of categories, not a picture of the spread.']}},
+ {id:'study',short:'Study hours and quiz score',kind:'num2',
+  text:'A teacher recorded hours studied and quiz score for {n} students. (Made-up data.)',
+  goal:'She wants to see if more study time goes with higher scores.',
+  why:{type:'Hours and scores are both measured numbers, so the data is numerical.',vars:'Each student has two numbers, so it is two variables.'},
+  data:{x:S6.x,y:S6.y},labels:{title:'Hours studied and quiz score',x:'Hours studied',y:'Quiz score (points)',count:'Number of students'},
+  decoys:['hist','box'],
+  rate:{
+   scatter:['best','Each student is one dot (hours, score). You can see the upward trend and how tightly the dots follow it.'],
+   linegraph:['poor','These students are not in a time order. Joining the dots makes a zigzag line that suggests a path between students that does not exist.']}},
+ {id:'tea',short:'Cooling tea',kind:'num2',
+  text:'A student measured the temperature of a cup of tea every 5 minutes for 40 minutes. That gives {n} readings. (Made-up data.)',
+  goal:'She wants to show how the temperature changed over time.',
+  why:{type:'Minutes and temperature are both measured numbers, so the data is numerical.',vars:'Each reading has a time and a temperature, so it is two variables.'},
+  data:{x:[0,5,10,15,20,25,30,35,40],y:[90,78,69,62,56,51,47,44,42]},timeOrdered:true,
+  labels:{title:'Tea temperature over time',x:'Minutes since poured',y:'Temperature (°C)',count:'Number of readings'},
+  decoys:['hist','box'],
+  rate:{
+   linegraph:['best','Time moves left to right, so connecting the readings shows the temperature dropping fast at first, then slowly.'],
+   scatter:['ok','The dots show the same trend. The trade-off: with no line, the step-by-step change over time is harder to follow.']}},
+ {id:'sleep',short:'Sleep and reaction score',kind:'num2',
+  text:'A school nurse collected hours of sleep and a reaction score for {n} students. (Made-up data.)',
+  goal:'She wants to show whether sleep and reaction score are related.',
+  why:{type:'Hours and scores are both measured numbers, so the data is numerical.',vars:'Each student has two numbers, so it is two variables.'},
+  data:{x:S8.x,y:S8.y},labels:{title:'Sleep and reaction score',x:'Hours of sleep',y:'Reaction score (points)',count:'Number of students'},
+  decoys:['box','circle'],
+  rate:{
+   scatter:['best','With 120 students, the dots form a cloud. You can see the upward trend, and even where the data are crowded.'],
+   linegraph:['poor','Students are not in a time order. Joining 120 dots makes a tangle of lines that hides the pattern.']}},
+ {id:'pages',short:'Pages read each month',kind:'num2',
+  text:'A student wrote down how many pages she read in each of {n} months in a row. (Made-up data.)',
+  goal:'She wants to show how her reading changed month to month.',
+  why:{type:'Month number and pages are both numbers, so the data is numerical.',vars:'Each month has a month number and a page count, so it is two variables.'},
+  data:{x:[1,2,3,4,5,6,7,8,9,10,11,12],y:[120,135,110,150,160,90,75,140,170,180,165,200]},timeOrdered:true,
+  labels:{title:'Pages read each month',x:'Month number (1 = first month)',y:'Pages read',count:'Number of months'},
+  decoys:['hist','bar'],
+  rate:{
+   linegraph:['best','The months are in order, so the line shows the ups and downs, like the dip in months 6 and 7 and the climb after.'],
+   scatter:['ok','The dots show where each month landed. The trade-off: no line, so the ups and downs are harder to follow.']}},
+ {id:'season',short:'Favorite season',kind:'cat1',
+  text:'A school club asked {n} members which season they like best. (Made-up answers.)',
+  goal:'The club wants to show what share chose each season.',
+  why:{type:'Seasons are names, not measurements, so the data is categorical.',vars:'Each member gave one answer, so it is one variable.'},
+  data:{cats:[{l:'Spring',c:12},{l:'Summer',c:15},{l:'Fall',c:8},{l:'Winter',c:5}]},
+  labels:{title:'Favorite season',x:'Season',count:'Number of members'},
+  decoys:['hist','box'],
+  rate:{
+   circle:['best','There are only 4 categories, and the goal is shares of a whole. Each slice is a share, and Summer clearly is the biggest.'],
+   bar:['best','Bars make the counts easy to compare, and with 4 categories the labels fit. Shares are shown by bar height instead of slice size.'],
+   relfreq:['best','The question is about share. This table gives each share directly as a percent.'],
+   freq:['ok','This gives the exact counts, which is useful. The trade-off: the share is not shown, so you would have to divide by 40 yourself.'],
+   lineplot:['ok','Each member is a dot above a season. It works with 40 members, but a bar chart shows the same counts more cleanly.']}},
+ {id:'clubs',short:'Club membership (12 clubs)',kind:'cat1',
+  text:'A school counted how many of {n} students joined each of its 12 clubs. (Made-up counts.)',
+  goal:'They want to show which clubs are biggest and which are smallest.',
+  why:{type:'Club names are categories, so the data is categorical.',vars:'Each student has one club, so it is one variable.'},
+  data:{cats:CLUBS.map(function(c){return {l:c[0],c:c[1]};})},
+  labels:{title:'Students in each club',x:'Club',count:'Number of students'},
+  decoys:['hist','box'],
+  rate:{
+   bar:['best','Long bars beside long names are easy to read and compare. You can rank all 12 clubs at a glance.'],
+   freq:['ok','This lists exact counts for all 12 clubs. The trade-off: you have to read numbers to compare, instead of seeing bar lengths.'],
+   relfreq:['ok','This gives each club as a percent of 300. The trade-off: same as a table of counts, so comparing 12 rows takes effort.'],
+   circle:['poor','Twelve slices are too many. Several slices look almost the same size, the labels run into each other, and you must match colors to a legend.'],
+   lineplot:['poor','With 300 students, the dot stacks are very tall. The dots shrink to specks and the long names crowd the axis.']}},
+ {id:'fence',short:'Fence color vote',kind:'cat1',
+  text:'{n} neighbors voted on a color to paint a fence. (Made-up votes.)',
+  goal:'They want to show each vote.',
+  why:{type:'Colors are names, so the data is categorical.',vars:'Each neighbor gave one vote, so it is one variable.'},
+  data:{cats:[{l:'Blue',c:3},{l:'Green',c:2},{l:'Yellow',c:1}]},
+  labels:{title:'Fence color votes',x:'Color',count:'Number of neighbors'},
+  decoys:['hist','box'],
+  rate:{
+   lineplot:['best','One dot per neighbor. With only 6 votes, you can see and count every vote.'],
+   freq:['best','A tiny table of 3 counts says it all: Blue 3, Green 2, Yellow 1.'],
+   bar:['ok','This works, with bars of height 1 to 3. The trade-off: it is a lot of chart for six votes.'],
+   relfreq:['ok','This gives percents, but with 6 votes one changed vote moves a percent by about 17 points. The percents look more exact than they are.'],
+   circle:['ok','Slices of one half, one third and one sixth are easy to see. The trade-off: with 6 votes, a circle looks like a bigger story than it is.']}},
+ {id:'pets2',short:'Pet types',kind:'cat1',
+  text:'A teacher asked {n} students what kind of pet they have. (Made-up answers.)',
+  goal:'She wants to show the exact number of students for each kind of pet.',
+  why:{type:'Kinds of pets are names, so the data is categorical.',vars:'Each student gave one answer, so it is one variable.'},
+  data:{cats:[{l:'Dog',c:14},{l:'Cat',c:10},{l:'Fish',c:5},{l:'Bird',c:4},{l:'Rabbit',c:2}]},
+  labels:{title:'Kinds of pets',x:'Kind of pet',count:'Number of students'},
+  decoys:['hist','box'],
+  rate:{
+   freq:['best','The goal is exact counts. A frequency table lists them directly: 14, 10, 5, 4, 2.'],
+   bar:['best','Bar heights show the counts, and you can read each number off the axis. It is also easy to compare.'],
+   relfreq:['ok','This shows percents, not counts. You can get the counts back, but only by working from the total of 35.'],
+   circle:['ok','Slices show shares, not counts. The small slices (4 and 2 students) are hard to tell apart.'],
+   lineplot:['ok','One dot per student shows the exact counts. It works, but a bar chart or a table is cleaner.']}},
+ {id:'lunch',short:'Grade and lunch choice',kind:'cat2',
+  text:'A school asked {n} students for their grade (9 to 12) and how they get lunch. The grades are different sizes. (Made-up data.)',
+  goal:'They want to compare how the lunch choices differ from grade to grade.',
+  why:{type:'Grade level and lunch choice are both groups, so the data is categorical.',vars:'Each student gave two answers, so it is two variables.'},
+  data:{rowName:'Grade',colName:'Lunch',rows:['Grade 9','Grade 10','Grade 11','Grade 12'],cols:['School lunch','Packed lunch','Off campus'],m:[[22,14,4],[16,15,4],[8,12,5],[3,10,7]]},
+  labels:{title:'Lunch choice by grade',x:'Grade',count:'Number of students'},
+  decoys:['bar','circle'],
+  rate:{
+   seg:['best','Each bar is one grade scaled to 100%, so grades of different sizes can be compared fairly. You can see Grade 12 using off-campus lunch most.'],
+   jointrel:['ok','This shows percents of all 120 students. The trade-off: small grades look small just because they have fewer students, so comparing grades is hard.'],
+   joint:['ok','The exact counts are all here. The trade-off: grades have different sizes, so counts are hard to compare without finding percents.']}},
+ {id:'tip',short:'Tip card and puzzle result',kind:'cat2',
+  text:'A teacher gave a tip card to some of {n} students before a puzzle. She recorded who got the card and who solved it. (Made-up data.)',
+  goal:'She wants to show exactly how many students were in each combination.',
+  why:{type:'Card or no card, and solved or not, are groups, so the data is categorical.',vars:'Each student has two answers, so it is two variables.'},
+  data:{rowName:'Tip card',colName:'Result',rows:['Got card','No card'],cols:['Solved','Not solved'],m:[[21,9],[13,17]]},
+  labels:{title:'Tip card and puzzle result',x:'Tip card',count:'Number of students'},
+  decoys:['bar','circle'],
+  rate:{
+   joint:['best','Exact counts are what she wants. The 2 by 2 table gives every combination with its row and column totals.'],
+   seg:['ok','The bars show the share who solved in each group. The trade-off: it gives percents, and the exact counts are not on the picture.'],
+   jointrel:['ok','This shows each combination as a percent of all 60. The trade-off: she asked for counts, so you have to convert back.']}},
+ {id:'devices',short:'Device and time of day',kind:'cat2',
+  text:'A survey asked {n} students which device they use most and when they use it most. (Made-up data.)',
+  goal:'They want to show what share of ALL students fall in each combination.',
+  why:{type:'Device and time of day are groups, so the data is categorical.',vars:'Each student gave two answers, so it is two variables.'},
+  data:{rowName:'Device',colName:'Time of day',rows:['Phone','Tablet','Laptop'],cols:['Morning','Afternoon','Evening'],m:[[30,50,90],[10,15,25],[20,25,35]]},
+  labels:{title:'Device and time of day',x:'Device',count:'Number of students'},
+  decoys:['bar','circle'],
+  rate:{
+   jointrel:['best','The goal is a share of all 300 students. Each cell is a percent of the whole, so phone in the evening is 30%.'],
+   joint:['ok','The exact counts are there, but the shares are not. You would divide each cell by 300 to answer the question.'],
+   seg:['ok','The bars show shares within each device, not of all students. That is a different question, but it is a useful picture.']}}
+];
+SCENARIOS.forEach(function(s){
+  var d=s.data;
+  s.n=s.kind==='num1'?d.values.length:s.kind==='num2'?d.x.length:s.kind==='cat1'?sum(d.cats.map(function(c){return c.c;})):sum(d.m.map(sum));
+  s.text=s.text.replace('{n}',s.n);
+  s.shown=VALID[s.kind].concat(s.decoys);
+});
+
+var GENERIC={
+ num1:{
+  circle:'A circle graph splits a whole into category shares. Here each value became a slice, so the order of the numbers is lost and it is hard to see the center or spread.',
+  bar:'A bar chart is for categories. Here each value became its own bar, so the number line is lost.',
+  scatter:'A scatter plot needs two numbers for each item. Here there is only one, so it is plotted against its place in the list. That place means nothing, so any pattern is an accident.',
+  linegraph:'A line graph needs two numbers, usually with time on the bottom. Here the bottom is only the order in the list, so the line zigzags and means nothing.'},
+ num2:{
+  hist:'A histogram shows one variable. This one shows only the y values, so the other variable is gone and you cannot see how the two are related.',
+  box:'A box plot shows one variable. This one shows only the y values, so the other variable is gone and you cannot see how the two are related.',
+  circle:'A circle graph shows shares of categories. With numbers, each value becomes a slice, and the link between the two variables is lost.',
+  bar:'A bar chart is for categories. Here each different y value became a bar, and the other variable is gone.'},
+ cat1:{
+  hist:'A histogram is for numbers on a number line. Bars that touch suggest the categories have an order and a size between them. They do not.',
+  box:'A box plot needs numbers. This one only summarizes the category counts, so the names of the categories disappear.'},
+ cat2:{
+  bar:'A bar chart shows one variable. This one adds up the rows, so the second variable disappears and you cannot compare groups.',
+  circle:'A circle graph shows one variable. This one shows only the row totals, so the second variable disappears.'}
+};
+function rating(s,key){
+  if(s.rate[key])return {level:s.rate[key][0],note:s.rate[key][1]};
+  var g=(GENERIC[s.kind]||{})[key];
+  return {level:'poor',note:g||'This display does not fit this kind of data.'};
+}
+function summarize(order,per){
+  var rows=[],used={},tried=0,compared=0,hadPoor=false;
+  order.forEach(function(id){
+    var s=SCENARIOS.filter(function(x){return x.id===id;})[0],p=per[id];
+    if(!p||!p.picks.length)return;
+    var picks=p.picks.map(function(k){var r=rating(s,k);if(r.level==='poor')hadPoor=true;used[k]=true;return {key:k,name:DISPLAYS[k].name,level:r.level};});
+    if(picks.length>1)compared++;
+    tried++;
+    rows.push({id:id,short:s.short,kindName:KIND_NAME[s.kind],picks:picks});
+  });
+  var usedNames=Object.keys(DISPLAYS).filter(function(k){return used[k];}).map(function(k){return DISPLAYS[k].name;});
+  var takeaway='No display is best everywhere. The best choice depends on the kind of data, how much data you have, and what you want to show.';
+  if(compared>0)takeaway+=' Putting two displays side by side showed what each one keeps and what it hides.';
+  else takeaway+=' Next time, try a second display on the same data to see what changes.';
+  return {rows:rows,used:usedNames,takeaway:takeaway,tried:tried,compared:compared,hadPoor:hadPoor};
+}
+
+/* ---------- Chart renderers (return HTML strings) ---------- */
+var W=320,H=176,PL=40,PR=10,PT=24,PB=38,PW=W-PL-PR,PH=H-PT-PB;
+var PAL=['#0E1C42','#C7922C','#55C8E8','#2A9D5C','#C0392B','#7A5CA8','#E39B4B','#4A7FB5','#8A9BB8','#1F8A8A','#B5536E','#6B7A99'];
+function svgO(aria){return '<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+esc(aria)+'" preserveAspectRatio="xMidYMid meet">';}
+function sTitle(t){return '<text class="ct" x="'+W/2+'" y="13" text-anchor="middle">'+esc(trunc(t,50))+'</text>';}
+function sX(t){return t?'<text class="al" x="'+(PL+PW/2)+'" y="'+(H-4)+'" text-anchor="middle">'+esc(trunc(t,55))+'</text>':'';}
+function sY(t){return '<text class="al" transform="translate(9,'+(PT+PH/2)+') rotate(-90)" text-anchor="middle">'+esc(trunc(t,36))+'</text>';}
+function yAxisCount(maxV){
+  var d=domain(0,Math.max(1,maxV),4,true),out='';
+  d.ticks.forEach(function(t){var y=PT+PH-t/d.hi*PH;out+='<line x1="'+PL+'" x2="'+(PL+PW)+'" y1="'+y+'" y2="'+y+'" stroke="#D0D9E8" stroke-width="0.6"/><text class="tk" x="'+(PL-4)+'" y="'+(y+3)+'" text-anchor="end">'+fmt(t)+'</text>';});
+  out+='<line x1="'+PL+'" x2="'+PL+'" y1="'+PT+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+  return {top:d.hi,svg:out,y:function(v){return PT+PH-v/d.hi*PH;}};
+}
+function xAxisNum(lo,hi,cnt){
+  var d=domain(lo,hi,cnt||6),out='';
+  var xs=function(v){return PL+(v-d.lo)/(d.hi-d.lo)*PW;};
+  out+='<line x1="'+PL+'" x2="'+(PL+PW)+'" y1="'+(PT+PH)+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+  d.ticks.forEach(function(t){out+='<line x1="'+xs(t)+'" x2="'+xs(t)+'" y1="'+(PT+PH)+'" y2="'+(PT+PH+3)+'" stroke="#1a2340"/><text class="tk" x="'+xs(t)+'" y="'+(PT+PH+12)+'" text-anchor="middle">'+fmt(t)+'</text>';});
+  return {xs:xs,svg:out,lo:d.lo,hi:d.hi};
+}
+function yAxisNum(lo,hi){
+  var d=domain(lo,hi,5),out='';
+  var ys=function(v){return PT+PH-(v-d.lo)/(d.hi-d.lo)*PH;};
+  d.ticks.forEach(function(t){out+='<line x1="'+PL+'" x2="'+(PL+PW)+'" y1="'+ys(t)+'" y2="'+ys(t)+'" stroke="#D0D9E8" stroke-width="0.6"/><text class="tk" x="'+(PL-4)+'" y="'+(ys(t)+3)+'" text-anchor="end">'+fmt(t)+'</text>';});
+  out+='<line x1="'+PL+'" x2="'+PL+'" y1="'+PT+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+  return {ys:ys,svg:out};
+}
+function dataCats(s){
+  if(s.kind==='cat1')return s.data.cats;
+  if(s.kind==='cat2')return s.data.rows.map(function(r,i){return {l:r,c:sum(s.data.m[i])};});
+  if(s.kind==='num1')return numToCats(s.data.values,s.bin);
+  return numToCats(s.data.y,s.bin);
+}
+function dataNums(s){
+  if(s.kind==='num1')return s.data.values;
+  if(s.kind==='num2')return s.data.y;
+  if(s.kind==='cat1')return s.data.cats.map(function(c){return c.c;});
+  return s.data.m.map(sum);
+}
+function numLabel(s){return s.kind==='num2'?s.labels.y:s.kind==='num1'?s.labels.x:'Count in each category';}
+function aria(s,key,extra){return DISPLAYS[key].name+' of '+s.labels.title+(extra?'. '+extra:'');}
+
+function rHist(s){
+  if(s.kind==='cat1'||s.kind==='cat2')return rBarVert(s,dataCats(s),0,'hist');
+  var vals=dataNums(s),bins=makeBins(vals,s.bin),mx=Math.max.apply(null,bins.map(function(b){return b.c;}));
+  var ya=yAxisCount(mx),lo=bins[0].lo,hi=bins[bins.length-1].hi;
+  var xs=function(v){return PL+(v-lo)/(hi-lo)*PW;};
+  var o=svgO(aria(s,'hist','Bars of '+bins.length+' ranges.'))+sTitle(s.labels.title)+ya.svg;
+  bins.forEach(function(b){var y=ya.y(b.c);o+='<rect x="'+xs(b.lo)+'" y="'+y+'" width="'+(xs(b.hi)-xs(b.lo))+'" height="'+(PT+PH-y)+'" fill="#3B6EA5" stroke="#fff" stroke-width="1"/>';});
+  o+='<line x1="'+PL+'" x2="'+(PL+PW)+'" y1="'+(PT+PH)+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+  var every=Math.ceil((bins.length+1)/9);
+  for(var i=0;i<=bins.length;i+=every){var v=i<bins.length?bins[i].lo:hi;o+='<text class="tk" x="'+xs(v)+'" y="'+(PT+PH+12)+'" text-anchor="middle">'+fmt(v)+'</text>';}
+  return o+sX(numLabel(s))+sY(s.kind==='num2'?'Number of students':s.labels.count)+'</svg>';
+}
+function rBarVert(s,cats,gap,key){
+  var k=cats.length,mx=Math.max.apply(null,cats.map(function(c){return c.c;}));
+  var ya=yAxisCount(mx),slot=PW/k,bw=slot*(1-gap);
+  var o=svgO(aria(s,key,k+' bars.'))+sTitle(s.labels.title)+ya.svg;
+  var fs=k>9?6.5:8,maxc=Math.max(3,Math.floor(slot/(fs*0.55)));
+  cats.forEach(function(c,i){
+    var x=PL+i*slot+(slot-bw)/2,y=ya.y(c.c),cx=PL+i*slot+slot/2;
+    o+='<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+(PT+PH-y)+'" fill="#3B6EA5" stroke="#fff" stroke-width="'+(gap?0:1)+'"/>';
+    if(k>7)o+='<text font-size="'+fs+'" fill="#1a2340" transform="translate('+(cx+2)+','+(PT+PH+8)+') rotate(40)" font-family="Segoe UI, Arial">'+esc(trunc(c.l,9))+'</text>';
+    else o+='<text class="tk" x="'+cx+'" y="'+(PT+PH+11)+'" text-anchor="middle">'+esc(trunc(c.l,maxc))+'</text>';
+  });
+  o+='<line x1="'+PL+'" x2="'+(PL+PW)+'" y1="'+(PT+PH)+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+  var xl=s.kind==='num1'?s.labels.x+' (each value)':s.kind==='num2'?s.labels.y+' (each value)':s.kind==='cat2'?s.data.rowName:s.labels.x;
+  return o+sX(k>7?'':xl)+sY(s.kind==='cat1'?s.labels.count:'Number of items')+'</svg>';
+}
+function rBarHoriz(s,cats){
+  var k=cats.length,mx=Math.max.apply(null,cats.map(function(c){return c.c;}));
+  var L=112,pw=W-L-18,d=domain(0,Math.max(1,mx),4,true),rh=PH/k,bh=Math.min(16,rh*0.75);
+  var o=svgO(aria(s,'bar',k+' bars.'))+sTitle(s.labels.title),xs=function(v){return L+v/d.hi*pw;};
+  d.ticks.forEach(function(t){o+='<line x1="'+xs(t)+'" x2="'+xs(t)+'" y1="'+PT+'" y2="'+(PT+PH)+'" stroke="#D0D9E8" stroke-width="0.6"/><text class="tk" x="'+xs(t)+'" y="'+(PT+PH+12)+'" text-anchor="middle">'+fmt(t)+'</text>';});
+  cats.forEach(function(c,i){
+    var y=PT+i*rh+(rh-bh)/2;
+    o+='<rect x="'+L+'" y="'+y+'" width="'+(xs(c.c)-L)+'" height="'+bh+'" fill="#3B6EA5"/>';
+    o+='<text font-size="'+Math.min(8.5,Math.max(6,rh*0.8))+'" fill="#1a2340" x="'+(L-4)+'" y="'+(y+bh/2+3)+'" text-anchor="end" font-family="Segoe UI, Arial">'+esc(trunc(c.l,24))+'</text>';
+    o+='<text class="tk" x="'+(xs(c.c)+3)+'" y="'+(y+bh/2+3)+'">'+c.c+'</text>';
+  });
+  o+='<line x1="'+L+'" x2="'+L+'" y1="'+PT+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+  var xl=s.kind==='cat1'?s.labels.count:'Number of items';
+  return o+'<text class="al" x="'+(L+pw/2)+'" y="'+(H-4)+'" text-anchor="middle">'+esc(xl)+'</text>'+
+   '<text class="al" transform="translate(9,'+(PT+PH/2)+') rotate(-90)" text-anchor="middle">'+esc(trunc(s.kind==='cat2'?s.data.rowName:(s.kind==='cat1'?s.labels.x:'Each value'),22))+'</text></svg>';
+}
+function rBar(s){
+  var cats=dataCats(s),maxl=Math.max.apply(null,cats.map(function(c){return c.l.length;}));
+  if(cats.length>6||maxl>12)return rBarHoriz(s,cats);
+  return rBarVert(s,cats,0.3,'bar');
+}
+function rCircle(s){
+  var cats=dataCats(s),total=sum(cats.map(function(c){return c.c;})),cx=72,cy=108,r=58,k=cats.length,ang=-Math.PI/2;
+  var o=svgO(aria(s,'circle',k+' slices.'))+sTitle(s.labels.title);
+  cats.forEach(function(c,i){
+    var f=c.c/total,a2=ang+f*2*Math.PI,col=PAL[i%PAL.length];
+    if(f>=0.9999)o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="'+col+'"/>';
+    else{
+      var x1=cx+r*Math.cos(ang),y1=cy+r*Math.sin(ang),x2=cx+r*Math.cos(a2),y2=cy+r*Math.sin(a2);
+      o+='<path d="M'+cx+','+cy+' L'+x1.toFixed(2)+','+y1.toFixed(2)+' A'+r+','+r+' 0 '+(f>0.5?1:0)+' 1 '+x2.toFixed(2)+','+y2.toFixed(2)+' Z" fill="'+col+'" stroke="#fff" stroke-width="1"/>';
+    }
+    var m=ang+f*Math.PI;
+    if(f>=0.03)o+='<text class="sl" x="'+(cx+r*0.68*Math.cos(m))+'" y="'+(cy+r*0.68*Math.sin(m)+3)+'" text-anchor="middle">'+(i+1)+'</text>';
+    ang=a2;
+  });
+  var lh=Math.min(15,(H-PT-14)/k);
+  cats.forEach(function(c,i){
+    var y=PT+4+i*lh;
+    o+='<rect x="140" y="'+y+'" width="8" height="8" fill="'+PAL[i%PAL.length]+'"/><text class="lg" x="152" y="'+(y+7)+'" style="font-size:'+Math.min(8.5,lh*0.8)+'px">'+(i+1)+'. '+esc(trunc(c.l,22))+' '+(c.c/total*100).toFixed(0)+'%</text>';
+  });
+  return o+'<text class="al" x="'+W/2+'" y="'+(H-3)+'" text-anchor="middle">Each slice is a share of all '+total+'</text></svg>';
+}
+function rDots(s,key){
+  var o=svgO(aria(s,key,'Each dot is one value.'))+sTitle(s.labels.title),r,i;
+  if(s.kind==='cat1'){
+    var cats=s.data.cats,mx=Math.max.apply(null,cats.map(function(c){return c.c;})),slot=PW/cats.length;
+    r=Math.max(0.8,Math.min(4,slot/2.5,(PH-4)/(2*mx)));
+    o+='<line x1="'+PL+'" x2="'+(PL+PW)+'" y1="'+(PT+PH)+'" y2="'+(PT+PH)+'" stroke="#1a2340"/>';
+    cats.forEach(function(c,ci){
+      var cx=PL+ci*slot+slot/2;
+      for(i=0;i<c.c;i++)o+='<circle cx="'+cx+'" cy="'+(PT+PH-r-1-i*2*r)+'" r="'+r+'" fill="#3B6EA5"/>';
+      if(cats.length>7)o+='<text font-size="6.5" fill="#1a2340" transform="translate('+(cx+2)+','+(PT+PH+8)+') rotate(40)" font-family="Segoe UI, Arial">'+esc(trunc(c.l,9))+'</text>';
+      else o+='<text class="tk" x="'+cx+'" y="'+(PT+PH+11)+'" text-anchor="middle">'+esc(trunc(c.l,Math.max(3,Math.floor(slot/4.2))))+'</text>';
+    });
+    return o+sX(cats.length>7?'':s.labels.x)+'<text class="al" x="'+(W-8)+'" y="'+(PT+8)+'" text-anchor="end">Each dot = 1 person</text></svg>';
+  }
+  var vals=s.data.values,unit=s.stemUnit/10;
+  if(s.bin&&s.bin.width<=1)unit=Math.min(unit,s.bin.width);
+  var cnt={},keys=[];
+  vals.forEach(function(v){var k=Math.round(v/unit);if(!cnt[k]){cnt[k]=0;keys.push(k);}cnt[k]++;});
+  keys.sort(function(a,b){return a-b;});
+  var mx=0;keys.forEach(function(k){mx=Math.max(mx,cnt[k]);});
+  var ax=xAxisNum(keys[0]*unit-unit,keys[keys.length-1]*unit+unit,7);
+  var spacing=Math.max(unit/(ax.hi-ax.lo)*PW,0.5);
+  r=Math.max(0.7,Math.min(4,spacing/2.2,(PH-6)/(2*mx)));
+  o+=ax.svg;
+  keys.forEach(function(k){for(i=0;i<cnt[k];i++)o+='<circle cx="'+ax.xs(k*unit)+'" cy="'+(PT+PH-r-1-i*2*r)+'" r="'+r+'" fill="#3B6EA5"/>';});
+  return o+sX(s.labels.x)+'<text class="al" x="'+(W-8)+'" y="'+(PT+8)+'" text-anchor="end">Each dot = 1 value</text></svg>';
+}
+function rStem(s){
+  var vals=dataNums(s),st=stemLeaf(vals,s.stemUnit),rows=st.rows,k=rows.length;
+  var rh=Math.min(13,(H-PT-34)/k),fs=Math.max(3,rh*0.85),maxL=0;
+  rows.forEach(function(r){maxL=Math.max(maxL,r.leaves.length);});
+  fs=Math.max(2.5,Math.min(fs,(W-70)/(0.6*(2*maxL+1))));
+  var o=svgO(aria(s,'stem',k+' stems, key: '+st.key))+sTitle(s.labels.title);
+  o+='<line x1="50" x2="50" y1="'+PT+'" y2="'+(PT+k*rh)+'" stroke="#1a2340"/>';
+  rows.forEach(function(r,i){
+    var y=PT+i*rh+rh*0.8;
+    o+='<text class="mono" style="font-size:'+fs+'px" x="46" y="'+y+'" text-anchor="end">'+r.stem+'</text><text class="mono" style="font-size:'+fs+'px" x="54" y="'+y+'">'+r.leaves.join(' ')+'</text>';
+  });
+  o+='<text class="al" x="'+W/2+'" y="'+(H-14)+'" text-anchor="middle">Key: '+esc(st.key)+' ('+esc(s.labels.x)+')</text>';
+  o+='<text class="al" x="'+W/2+'" y="'+(H-4)+'" text-anchor="middle">Stem | Leaf. '+vals.length+' leaves in all.</text>';
+  return o+'</svg>';
+}
+function rBox(s){
+  var vals=dataNums(s),f=fiveNum(vals),ax=xAxisNum(f.min,f.max,7),cy=PT+PH/2-4,bh=34,xs=ax.xs;
+  var o=svgO(aria(s,'box','Median '+fmt(f.med)+'.'))+sTitle(s.labels.title)+ax.svg;
+  o+='<line x1="'+xs(f.whiskLo)+'" x2="'+xs(f.q1)+'" y1="'+cy+'" y2="'+cy+'" stroke="#0E1C42" stroke-width="1.5"/><line x1="'+xs(f.q3)+'" x2="'+xs(f.whiskHi)+'" y1="'+cy+'" y2="'+cy+'" stroke="#0E1C42" stroke-width="1.5"/>';
+  o+='<line x1="'+xs(f.whiskLo)+'" x2="'+xs(f.whiskLo)+'" y1="'+(cy-7)+'" y2="'+(cy+7)+'" stroke="#0E1C42" stroke-width="1.5"/><line x1="'+xs(f.whiskHi)+'" x2="'+xs(f.whiskHi)+'" y1="'+(cy-7)+'" y2="'+(cy+7)+'" stroke="#0E1C42" stroke-width="1.5"/>';
+  o+='<rect x="'+xs(f.q1)+'" y="'+(cy-bh/2)+'" width="'+Math.max(1,xs(f.q3)-xs(f.q1))+'" height="'+bh+'" fill="#E8F6FB" stroke="#0E1C42" stroke-width="1.5"/><line x1="'+xs(f.med)+'" x2="'+xs(f.med)+'" y1="'+(cy-bh/2)+'" y2="'+(cy+bh/2)+'" stroke="#C7922C" stroke-width="2.5"/>';
+  f.outliers.forEach(function(v){o+='<circle cx="'+xs(v)+'" cy="'+cy+'" r="3" fill="#fff" stroke="#C0392B" stroke-width="1.5"/>';});
+  o+='<text class="al" x="'+W/2+'" y="'+(PT+9)+'" text-anchor="middle">Min '+fmt(f.min)+'  Q1 '+fmt(f.q1)+'  Median '+fmt(f.med)+'  Q3 '+fmt(f.q3)+'  Max '+fmt(f.max)+'</text>';
+  return o+sX(numLabel(s))+'</svg>';
+}
+function rXY(s,key){
+  var xs,ys,xl,yl;
+  if(s.kind==='num2'){xs=s.data.x;ys=s.data.y;xl=s.labels.x;yl=s.labels.y;}
+  else{ys=dataNums(s);xs=ys.map(function(_,i){return i+1;});xl='Place in the list (1 to '+ys.length+')';yl=numLabel(s);}
+  var ax=xAxisNum(Math.min.apply(null,xs),Math.max.apply(null,xs),6),ay=yAxisNum(Math.min.apply(null,ys),Math.max.apply(null,ys));
+  var o=svgO(aria(s,key,xs.length+' points.'))+sTitle(s.labels.title)+ay.svg+ax.svg;
+  var pts=xs.map(function(x,i){return [x,ys[i],i];});
+  if(key==='linegraph'){pts.sort(function(a,b){return a[0]-b[0]||a[2]-b[2];});o+='<polyline fill="none" stroke="#3B6EA5" stroke-width="1.3" points="'+pts.map(function(p){return ax.xs(p[0]).toFixed(1)+','+ay.ys(p[1]).toFixed(1);}).join(' ')+'"/>';}
+  var big=pts.length>60;
+  pts.forEach(function(p){o+='<circle cx="'+ax.xs(p[0])+'" cy="'+ay.ys(p[1])+'" r="'+(key==='linegraph'?(big?1:2.5):(big?2.2:3))+'" fill="#0E1C42" fill-opacity="'+(big?0.55:0.85)+'"/>';});
+  return o+sX(xl)+sY(yl)+'</svg>';
+}
+function tbl(head,rows,totalRow){
+  var h='<table class="dt"><tr>'+head.map(function(x){return '<th scope="col">'+esc(x)+'</th>';}).join('')+'</tr>';
+  rows.forEach(function(r){h+='<tr><td class="rh">'+esc(r[0])+'</td>'+r.slice(1).map(function(x){return '<td>'+esc(x)+'</td>';}).join('')+'</tr>';});
+  if(totalRow)h+='<tr class="tot"><td class="rh">'+esc(totalRow[0])+'</td>'+totalRow.slice(1).map(function(x){return '<td>'+esc(x)+'</td>';}).join('')+'</tr>';
+  return h+'</table>';
+}
+function rFreq(s,rel){
+  var cats=s.data.cats,total=sum(cats.map(function(c){return c.c;}));
+  var head=[s.labels.x,rel?'Relative frequency':'Frequency'],cell=function(c){return rel?(c.c/total*100).toFixed(1)+'%':String(c.c);};
+  var half=Math.ceil(cats.length/2),chunks=cats.length>7?[cats.slice(0,half),cats.slice(half)]:[cats];
+  var o='<div class="tbl-title">'+esc(s.labels.title)+'</div><div class="tbl-sub">'+(rel?'Percent of all '+total:s.labels.count)+'</div><div class="tbls'+(chunks.length>1?' two':'')+'" role="img" aria-label="'+esc(aria(s,rel?'relfreq':'freq',cats.length+' rows.'))+'">';
+  chunks.forEach(function(ch,i){o+=tbl(head,ch.map(function(c){return [c.l,cell(c)];}),i===chunks.length-1?['Total',rel?'100%':String(total)]:null);});
+  return o+'</div>';
+}
+function rJoint(s,rel){
+  var d=s.data,total=sum(d.m.map(sum)),cs=d.cols.map(function(_,j){return sum(d.m.map(function(r){return r[j];}));});
+  var cell=function(v){return rel?(v/total*100).toFixed(1)+'%':String(v);};
+  var head=[d.rowName+' / '+d.colName].concat(d.cols,['Total']);
+  var rows=d.rows.map(function(r,i){return [r].concat(d.m[i].map(cell),[cell(sum(d.m[i]))]);});
+  var tot=['Total'].concat(cs.map(cell),[rel?'100%':String(total)]);
+  return '<div class="tbl-title">'+esc(s.labels.title)+'</div><div class="tbl-sub">'+(rel?'Percent of all '+total+' students':'Number of students')+'</div><div class="tbls" role="img" aria-label="'+esc(aria(s,rel?'jointrel':'joint',d.rows.length+' by '+d.cols.length+' table.'))+'">'+tbl(head,rows,tot)+'</div>';
+}
+function rSeg(s){
+  var d=s.data,k=d.rows.length,o=svgO(aria(s,'seg',k+' bars, each scaled to 100 percent.'))+sTitle(s.labels.title);
+  var lx=8,ly=22;
+  d.cols.forEach(function(c,j){var w=16+Math.min(c.length,16)*4.6;if(lx+w>W-6){lx=8;ly+=11;}o+='<rect x="'+lx+'" y="'+(ly-7)+'" width="8" height="8" fill="'+PAL[j%PAL.length]+'"/><text class="lg" x="'+(lx+11)+'" y="'+ly+'">'+(j+1)+'. '+esc(trunc(c,16))+'</text>';lx+=w+10;});
+  var top=ly+8,L=76,pw=W-L-12,ph=H-top-34,rh=ph/k,bh=Math.min(26,rh*0.72);
+  [0,25,50,75,100].forEach(function(t){var x=L+t/100*pw;o+='<line x1="'+x+'" x2="'+x+'" y1="'+top+'" y2="'+(top+ph)+'" stroke="#D0D9E8" stroke-width="0.6"/><text class="tk" x="'+x+'" y="'+(top+ph+11)+'" text-anchor="middle">'+t+'%</text>';});
+  d.rows.forEach(function(r,i){
+    var tot=sum(d.m[i]),y=top+i*rh+(rh-bh)/2,x=L;
+    o+='<text class="lg" x="'+(L-4)+'" y="'+(y+bh/2+3)+'" text-anchor="end">'+esc(trunc(r,12))+'</text>';
+    d.m[i].forEach(function(v,j){var w=v/tot*pw;o+='<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+bh+'" fill="'+PAL[j%PAL.length]+'" stroke="#fff" stroke-width="1"/>';if(w>=17)o+='<text class="sl" x="'+(x+w/2)+'" y="'+(y+bh/2+3)+'" text-anchor="middle">'+Math.round(v/tot*100)+'%</text>';x+=w;});
+  });
+  o+='<text class="al" x="'+(L+pw/2)+'" y="'+(H-3)+'" text-anchor="middle">Percent within each '+esc(d.rowName.toLowerCase())+' (group sizes differ)</text>';
+  return o+'</svg>';
+}
+function renderPreview(s,key){
+  switch(key){
+   case 'hist':return rHist(s);
+   case 'stem':return rStem(s);
+   case 'box':return rBox(s);
+   case 'lineplot':return rDots(s,'lineplot');
+   case 'scatter':return rXY(s,'scatter');
+   case 'linegraph':return rXY(s,'linegraph');
+   case 'bar':return rBar(s);
+   case 'circle':return rCircle(s);
+   case 'freq':return rFreq(s,false);
+   case 'relfreq':return rFreq(s,true);
+   case 'seg':return rSeg(s);
+   case 'joint':return rJoint(s,false);
+   case 'jointrel':return rJoint(s,true);
+  }
+  return '';
+}
+
+/* ============ UI ============ */
+var state=null;
+function newState(){return {order:shuffle(SCENARIOS.map(function(s){return s.id;}),Math.random),idx:0,per:{},done:false};}
+function getS(id){return SCENARIOS.filter(function(s){return s.id===id;})[0];}
+function perOf(s){
+  if(!state.per[s.id])state.per[s.id]={typeOK:false,varsOK:false,typeSel:null,varsSel:null,typeMsg:'',varsMsg:'',picks:[],btn:shuffle(s.shown,Math.random)};
+  return state.per[s.id];
+}
+function el(id){return document.getElementById(id);}
+function say(t){var l=el('live');if(l)l.textContent=t;}
+function focusEl(node){if(node){node.setAttribute('tabindex','-1');node.focus();}}
+
+function renderTop(){
+  var n=SCENARIOS.length,h='';
+  if(state.done)h+='<span class="prog-text">All '+n+' scenarios done</span>';
+  else h+='<span class="prog-text">Scenario '+(state.idx+1)+' of '+n+'</span>';
+  h+='<div class="dots" aria-hidden="true">';
+  for(var i=0;i<n;i++)h+='<span class="dot'+(state.done||i<state.idx?' done':i===state.idx?' now':'')+'"></span>';
+  h+='</div><button type="button" class="reset-btn" data-act="reset" aria-label="Reset and start over with a new order">Reset</button>';
+  el('topbar').innerHTML=h;
+}
+function optBtn(act,val,label,sel,ok){
+  var on=sel===val,c='opt'+(on?(ok?' ok':' bad'):'');
+  return '<button type="button" class="'+c+'" data-act="'+act+'" data-val="'+val+'" aria-pressed="'+on+'" aria-label="'+esc(label)+'">'+(on?(ok?'✓ ':'✗ '):'')+label+'</button>';
+}
+function renderMain(focusSel){
+  renderTop();
+  var m=el('main');
+  if(state.done){renderFinal(m);return;}
+  var s=getS(state.order[state.idx]),p=perOf(s),h='';
+  h+='<div class="card scenario" id="scn"><div class="tag">The story</div><p>'+esc(s.text)+'</p><p class="goal"><strong>'+esc(s.goal)+'</strong></p></div>';
+  h+='<div class="card" id="stepA"><div class="tag">Step A. What kind of data is it?</div>';
+  if(p.typeOK&&p.varsOK){
+    h+='<p class="summary-line"><strong>✓ '+KIND_NAME[s.kind]+'.</strong> '+esc(s.why.type)+' '+esc(s.why.vars)+'</p>';
+  }else{
+    h+='<div class="qrow"><span class="qlabel">Is the data numerical or categorical?</span>'+optBtn('type','num','Numerical',p.typeSel,p.typeOK)+optBtn('type','cat','Categorical',p.typeSel,p.typeOK)+'</div>';
+    if(p.typeMsg)h+='<div class="msg '+(p.typeOK?'ok':'bad')+'">'+(p.typeOK?'Yes. ':'Not quite. ')+esc(p.typeMsg)+'</div>';
+    h+='<div class="qrow"><span class="qlabel">How many variables?</span>'+optBtn('vars','1','One variable',p.varsSel,p.varsOK)+optBtn('vars','2','Two variables',p.varsSel,p.varsOK)+'</div>';
+    if(p.varsMsg)h+='<div class="msg '+(p.varsOK?'ok':'bad')+'">'+(p.varsOK?'Yes. ':'Not quite. ')+esc(p.varsMsg)+'</div>';
+  }
+  h+='</div>';
+  if(p.typeOK&&p.varsOK){
+    var full=p.picks.length>=3;
+    h+='<div class="card"><div class="choices-head">Step B. Pick a display. You will see it drawn with this data.</div><div class="choices" role="group" aria-label="Display choices">';
+    p.btn.forEach(function(k){
+      var picked=p.picks.indexOf(k)>=0,lvl=picked?rating(s,k).level:null;
+      h+='<button type="button" class="choice'+(picked?' picked':'')+'" data-act="pick" data-key="'+k+'"'+((picked||full)?' disabled':'')+' aria-label="'+esc(DISPLAYS[k].name+(picked?', already shown, '+LEVEL[lvl].label:''))+'">'+(picked?LEVEL[lvl].sym+' ':'')+esc(DISPLAYS[k].name)+'</button>';
+    });
+    h+='</div>';
+    var last=state.idx===SCENARIOS.length-1,note;
+    if(p.picks.length===0)note='Try one. You can compare up to 3 on the same story.';
+    else if(full)note='Comparing 3 displays. <button type="button" class="linkbtn" data-act="clear" aria-label="Clear the previews to try other displays">Clear previews</button> to try others.';
+    else note='Try another to compare. ('+p.picks.length+' of 3 shown)';
+    h+='<div class="note-line">'+'<span>'+note+'</span>'+(p.picks.length?'<button type="button" class="btn" data-act="next" aria-label="'+(last?'See your summary':'Go to the next scenario')+'">'+(last?'See summary':'Next scenario →')+'</button>':'')+'</div>';
+    h+='</div>';
+    if(p.picks.length){
+      h+='<div class="previews">';
+      p.picks.forEach(function(k,i){
+        var r=rating(s,k),L=LEVEL[r.level];
+        h+='<div class="pv'+(i===p.picks.length-1?' newest':'')+'"><div class="pv-head"><h3>'+esc(DISPLAYS[k].name)+'</h3><span class="badge '+r.level+'">'+L.sym+' '+L.label+'</span></div><div class="chart">'+renderPreview(s,k)+'</div><p class="verdict">'+esc(r.note)+'</p></div>';
+      });
+      h+='</div>';
+    }
+  }
+  m.innerHTML=h;
+  if(focusSel){var f=m.querySelector(focusSel);if(f)f.focus();}
+}
+function renderFinal(m){
+  var sm=summarize(state.order,state.per),h='<div class="card final" id="fin"><h2>Nice work. Here is what you tried.</h2><ul>';
+  sm.rows.forEach(function(r){h+='<li><strong>'+esc(r.short)+'</strong> ('+esc(r.kindName.toLowerCase())+'): '+r.picks.map(function(x){return esc(x.name)+' ('+LEVEL[x.level].label.toLowerCase()+')';}).join('; ')+'</li>';});
+  h+='</ul><p class="used"><strong>Displays you used:</strong> '+esc(sm.used.join(', '))+'.</p><div class="takeaway"><strong>Takeaway.</strong> '+esc(sm.takeaway)+'</div></div>';
+  h+='<div class="bottom"><button type="button" class="btn" data-act="reset" aria-label="Start again with a new order">Start again</button></div>';
+  m.innerHTML=h;
+}
+function onClick(e){
+  var b=e.target.closest('button[data-act]');if(!b)return;
+  var act=b.getAttribute('data-act');
+  if(act==='reset'){state=newState();renderMain();say('Reset. New order.');window.scrollTo(0,0);focusEl(el('scn'));return;}
+  if(state.done)return;
+  var s=getS(state.order[state.idx]),p=perOf(s),val=b.getAttribute('data-val');
+  if(act==='type'){p.typeSel=val;p.typeOK=(val==='num')===(s.kind.indexOf('num')===0);p.typeMsg=s.why.type;
+    renderMain(p.typeOK&&p.varsOK?'.choice':'[data-act="type"][data-val="'+val+'"]');say(p.typeOK?'Correct.':'Not quite.');}
+  else if(act==='vars'){p.varsSel=val;p.varsOK=(val==='2')===(s.kind.slice(-1)==='2');p.varsMsg=s.why.vars;
+    renderMain(p.typeOK&&p.varsOK?'.choice':'[data-act="vars"][data-val="'+val+'"]');say(p.varsOK?'Correct.':'Not quite.');}
+  else if(act==='pick'){var k=b.getAttribute('data-key');
+    if(p.picks.length<3&&p.picks.indexOf(k)<0){p.picks.push(k);var r=rating(s,k);renderMain();
+      focusEl(el('main').querySelector('.pv.newest .pv-head h3'));
+      say(DISPLAYS[k].name+': '+LEVEL[r.level].label+'. '+r.note);}}
+  else if(act==='clear'){p.picks=[];renderMain('.choice');say('Previews cleared.');}
+  else if(act==='next'){if(state.idx>=SCENARIOS.length-1)state.done=true;else state.idx++;renderMain();
+    focusEl(el(state.done?'fin':'scn'));window.scrollTo(0,0);}
+}
+if(typeof document!=='undefined'){
+  state=newState();
+  document.addEventListener('click',onClick);
+  renderMain();
+}
+if(typeof module!=='undefined')module.exports={SCENARIOS:SCENARIOS,DISPLAYS:DISPLAYS,VALID:VALID,GENERIC:GENERIC,rating:rating,renderPreview:renderPreview,summarize:summarize,shuffle:shuffle,mulberry32:mulberry32,genNormalish:genNormalish,genLinear:genLinear,fiveNum:fiveNum,makeBins:makeBins,stemLeaf:stemLeaf,numToCats:numToCats,median:median,KIND_NAME:KIND_NAME,LEVEL:LEVEL};
+</script>
+</body>
+</html>

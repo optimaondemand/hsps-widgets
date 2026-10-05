@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Catch the Graph in a Lie</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 8px 12px 8px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.8rem; margin-bottom: 6px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  button { font-family: inherit; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #C7922C; outline-offset: 2px; }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 8px; }
+  .tab { padding: 6px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .tab[aria-selected="true"] { background: #0E1C42; color: #fff; }
+  .tab .ck { display: none; }
+  .tab.done .ck { display: inline; }
+
+  .card { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 7px 12px; margin-bottom: 6px; }
+  .claim { position: relative; padding-right: 150px; min-height: 52px; }
+  .tag { display: inline-block; font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #C7922C; margin-bottom: 2px; }
+  .claim .head { font-size: 1.05rem; font-weight: 800; color: #0E1C42; line-height: 1.25; }
+  .claim.struck .head { text-decoration: line-through; text-decoration-thickness: 2px; color: #6b7a99; }
+  .claim .sub { font-size: 0.78rem; color: #6b7a99; margin-top: 2px; }
+  .stamp { display: none; position: absolute; right: 10px; top: 50%; transform: translateY(-50%) rotate(-6deg); border: 3px solid #C0392B; background: #FDECEC; color: #8A1F16; border-radius: 6px; padding: 4px 8px; font-weight: 900; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; text-align: center; line-height: 1.15; max-width: 130px; }
+  .claim.struck .stamp { display: block; }
+
+  .main { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin-bottom: 8px; }
+  .chartcard { flex: 1.6 1 330px; min-width: 0; margin-bottom: 0; padding: 8px; }
+  .side { flex: 1 1 250px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .side .card { margin-bottom: 0; }
+  #chartHost { width: 100%; overflow: hidden; }
+  #svg { display: block; max-width: 100%; }
+  .main > * { min-width: 0; }
+  svg text { font-family: 'Segoe UI', Arial, sans-serif; }
+  .caption { font-size: 0.72rem; color: #6b7a99; margin-top: 2px; }
+
+  h3 { font-size: 0.72rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .ctl { margin-bottom: 6px; }
+  .ctl label, .ctl .lbl { display: flex; justify-content: space-between; gap: 8px; font-size: 0.82rem; font-weight: 700; color: #0E1C42; margin-bottom: 3px; }
+  .ctl .val { color: #C7922C; }
+  input[type=range] { width: 100%; accent-color: #0E1C42; height: 22px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .seg button, .btn { padding: 6px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  .btn.gold { border-color: #C7922C; background: #FDF3E3; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+
+  .meter .row { display: flex; gap: 8px; margin-bottom: 4px; }
+  .meter .cell { flex: 1; border: 2px solid #D0D9E8; border-radius: 8px; padding: 5px 6px; text-align: center; background: #F8FAFD; min-width: 0; }
+  .meter .cell small { display: block; font-size: 0.68rem; font-weight: 700; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.03em; }
+  .meter .cell b { display: block; font-size: 1.05rem; color: #0E1C42; margin-top: 0; overflow-wrap: anywhere; }
+  .meter .cell.data { background: #E8F6FB; }
+  .badge { display: inline-block; font-size: 0.74rem; font-weight: 800; border-radius: 12px; padding: 1px 9px; }
+  .badge.bad { background: #FDECEC; color: #8A1F16; border: 2px solid #C0392B; }
+  .badge.ok { background: #D8F0DD; color: #1A6B3D; border: 2px solid #2A9D5C; }
+  .meter .sentence { font-size: 0.82rem; line-height: 1.4; }
+
+  .status { border-radius: 8px; padding: 6px 10px; font-size: 0.86rem; line-height: 1.45; border-left: 5px solid #0E1C42; background: #EEF1F8; margin-bottom: 8px; }
+  .status.nudge { background: #FDF3E3; border-left-color: #C7922C; }
+  .status.good { background: #D8F0DD; border: 2px solid #2A9D5C; border-left-width: 5px; color: #1A6B3D; }
+  .status.deceive { background: #E8F6FB; border-left-color: #2196D0; }
+  .status b { color: inherit; }
+
+  .quiz { margin-bottom: 8px; }
+  .quiz p.q { font-size: 0.9rem; font-weight: 700; color: #0E1C42; margin-bottom: 6px; }
+  .opts { display: flex; flex-direction: column; gap: 4px; }
+  .lower { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-bottom: 6px; }
+  .lower > .status { flex: 1 1 250px; margin-bottom: 0; }
+  .lower > .quiz { flex: 1.3 1 320px; margin-bottom: 0; }
+  .opt { text-align: left; padding: 3px 10px; border: 2px solid #D0D9E8; border-radius: 8px; background: #fff; color: #1a2340; font-size: 0.8rem; cursor: pointer; }
+  .opt:hover { border-color: #0E1C42; }
+  .opt.right { background: #D8F0DD; border-color: #2A9D5C; color: #1A6B3D; font-weight: 700; }
+  .opt.wrong { background: #FDECEC; border-color: #C0392B; color: #8A1F16; }
+  .fb { margin-top: 6px; font-size: 0.84rem; line-height: 1.4; border-radius: 8px; padding: 6px 10px; }
+  .fb.bad { background: #FDECEC; border: 2px solid #C0392B; color: #8A1F16; }
+  .fb.good { background: #D8F0DD; border: 2px solid #2A9D5C; color: #1A6B3D; }
+
+  .check ul { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+  .check li { font-size: 0.75rem; font-weight: 700; padding: 3px 8px; border: 2px dashed #D0D9E8; border-radius: 16px; color: #6b7a99; background: #fff; }
+  .check li.on { border: 2px solid #C7922C; background: #FDF3E3; color: #0E1C42; }
+  .check li .box::before { content: "\2610 "; }
+  .check li.on .box::before { content: "\2611 "; color: #C7922C; }
+  .check .done-msg { margin-top: 6px; font-size: 0.82rem; font-weight: 700; color: #0E1C42; }
+  .bottom { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .chead { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .chead h3 { margin: 0; }
+  .bottom .btn { padding: 3px 9px; }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 480px) {
+    .claim { padding-right: 14px; padding-bottom: 46px; }
+    .stamp { top: auto; bottom: 6px; transform: rotate(-3deg); max-width: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#128269; Catch the Graph in a Lie</h1>
+  <p class="subtitle">Each graph starts out misleading. Use the controls to fix it. Watch the headline stop being true.</p>
+
+  <div class="tabs" id="tabs" role="tablist" aria-label="Choose a graph"></div>
+
+  <div class="card claim" id="claim">
+    <span class="tag" id="tag"></span>
+    <div class="head" id="head"></div>
+    <div class="stamp" id="stamp" role="status">&#10005; No longer supported</div>
+  </div>
+
+  <div class="main">
+    <div class="card chartcard">
+      <div id="chartHost"><svg id="svg" role="img" aria-label="Chart"></svg></div>
+      <div class="caption" id="caption"></div>
+    </div>
+    <div class="side">
+      <div class="card"><h3>Controls</h3><div id="controls"></div></div>
+      <div class="card meter" aria-live="polite">
+        <div class="chead"><h3>Story meter</h3><div id="badge"></div></div>
+        <div class="row">
+          <div class="cell"><small>Picture suggests</small><b id="mApp"></b></div>
+          <div class="cell data"><small>Data say</small><b id="mAct"></b></div>
+        </div>
+        <div class="sentence" id="mSentence"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="lower">
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+
+  <div class="card quiz" id="quiz" hidden>
+    <h3>Diagnosis check</h3>
+    <p class="q" id="qText"></p>
+    <div class="opts" id="opts"></div>
+    <div id="fb" role="status" aria-live="polite"></div>
+  </div>
+  </div>
+
+  <div class="card check">
+    <div class="chead"><h3>Read graphs defensively</h3><div class="bottom"><button class="btn gold" id="deceiveBtn" aria-pressed="false" hidden>Deceive me mode: off</button><button class="btn" id="resetBtn" aria-label="Reset everything">&#8635; Reset</button></div></div>
+    <ul id="checklist"></ul>
+    <div class="done-msg" id="doneMsg" hidden>All five checks caught. Ask these questions about every graph you see.</div>
+  </div>
+
+</div>
+
+<script id="pure">
+/* ===== Pure functions and data (tested with node) ===== */
+var SCEN_A = { v1: 7200, v2: 7900, ymax: 8000 };
+var SCEN_B = { data: [100,103,106,109,112,115,118,116,111,104,97,95,101,107,112,117,121,125,128,131,133,135,137,140] };
+var SCEN_C = { years: [2016,2017,2018,2019,2022,2025], vals: [30,40,50,60,70,80] };
+var SCEN_D = { v1: 40, v2: 80, unit: 10 };
+function makeHistData() {
+  var seed = 12345;
+  function rnd() { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; }
+  function norm() { return (rnd() + rnd() + rnd() + rnd() - 2) * 1.7; }
+  var out = [], i, v;
+  for (i = 0; i < 30; i++) { v = Math.round(24 + 4.5 * norm()); out.push(Math.max(13, Math.min(33, v))); }
+  for (i = 0; i < 30; i++) { v = Math.round(48 + 4.5 * norm()); out.push(Math.max(41, Math.min(59, v))); }
+  return out.sort(function (a, b) { return a - b; });
+}
+var HIST = makeHistData();
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function pct(a, b) { return (b - a) / a * 100; }
+function visRatio(v1, v2, ymin) { var a = v1 - ymin, b = v2 - ymin; if (a <= 0) return Infinity; return b / a; }
+function valueAt(arr, x) {
+  if (x <= 0) return arr[0];
+  var i = Math.floor(x);
+  if (i >= arr.length - 1) return arr[arr.length - 1];
+  return lerp(arr[i], arr[i + 1], x - i);
+}
+function windowChange(arr, s, e) { return pct(valueAt(arr, s), valueAt(arr, e)); }
+function xPos(years, i, t) {
+  var n = years.length - 1;
+  return lerp(i / n, (years[i] - years[0]) / (years[n] - years[0]), t);
+}
+function slopeRatio(years, vals, t) {
+  var n = years.length - 1;
+  var dx1 = xPos(years, 1, t) - xPos(years, 0, t);
+  var dxn = xPos(years, n, t) - xPos(years, n - 1, t);
+  return ((vals[n] - vals[n - 1]) / dxn) / ((vals[1] - vals[0]) / dx1);
+}
+function pictoRatio(mode, v1, v2, unit) {
+  var k = v2 / v1;
+  if (mode === 'both') return k * k;
+  if (mode === 'height') return k;
+  return Math.ceil(v2 / unit) / Math.ceil(v1 / unit);
+}
+function histCounts(data, w, lo, hi) {
+  var n = Math.ceil((hi - lo) / w - 1e-9), c = [], i, b;
+  for (i = 0; i < n; i++) c.push(0);
+  data.forEach(function (v) { b = Math.floor((v - lo) / w + 1e-9); if (b >= n) b = n - 1; if (b < 0) b = 0; c[b]++; });
+  return c;
+}
+function countPeaks(c) {
+  var mx = Math.max.apply(null, c), thr = Math.max(2, 0.4 * mx);
+  var runs = [];
+  c.forEach(function (v) { if (runs.length && runs[runs.length - 1] === v) return; runs.push(v); });
+  var peaks = 0;
+  for (var i = 0; i < runs.length; i++) {
+    var prev = i > 0 ? runs[i - 1] : 0, next = i < runs.length - 1 ? runs[i + 1] : 0;
+    if (runs[i] > prev && runs[i] > next && runs[i] >= thr) peaks++;
+  }
+  return peaks;
+}
+function countGroups(data, gap) {
+  var s = data.slice().sort(function (a, b) { return a - b; }), g = 1;
+  for (var i = 1; i < s.length; i++) if (s[i] - s[i - 1] > gap) g++;
+  return g;
+}
+function niceTicks(min, max, n) {
+  var raw = (max - min) / n, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), f = raw / mag;
+  var step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * mag, out = [];
+  for (var t = Math.ceil(min / step - 1e-9) * step; t <= max + 1e-9; t += step) out.push(Math.round(t / step) * step);
+  return out;
+}
+function fmtNum(n) { return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function fmtX(x) { return isFinite(x) ? x.toFixed(1) : 'huge'; }
+function fmtPct(p) { return (p > 0 ? '+' : p < 0 ? '−' : '') + Math.abs(p).toFixed(1) + '%'; }
+if (typeof module !== 'undefined') module.exports = { SCEN_A: SCEN_A, SCEN_B: SCEN_B, SCEN_C: SCEN_C, SCEN_D: SCEN_D, HIST: HIST, lerp: lerp, pct: pct, visRatio: visRatio, valueAt: valueAt, windowChange: windowChange, xPos: xPos, slopeRatio: slopeRatio, pictoRatio: pictoRatio, histCounts: histCounts, countPeaks: countPeaks, countGroups: countGroups, niceTicks: niceTicks, fmtNum: fmtNum, fmtX: fmtX, fmtPct: fmtPct };
+</script>
+
+<script id="app">
+(function () {
+  var NAVY = '#0E1C42', GOLD = '#C7922C', MUTED = '#6b7a99', GRID = '#D0D9E8', BLUE = '#2196D0';
+  var $ = function (id) { return document.getElementById(id); };
+  var HH = 250, CW = 400;
+  var A = SCEN_A, B = SCEN_B, C = SCEN_C, D = SCEN_D;
+  var B_LAST = B.data.length - 1;
+  var ACTUAL_GROUPS = countGroups(HIST, 5);
+
+  function txt(x, y, s, o) {
+    o = o || {};
+    return '<text x="' + x + '" y="' + y + '" font-size="' + (o.size || 12) + '" fill="' + (o.fill || NAVY) + '" text-anchor="' + (o.anchor || 'middle') + '"' + (o.weight ? ' font-weight="' + o.weight + '"' : '') + (o.rot ? ' transform="rotate(' + o.rot + ' ' + x + ' ' + y + ')"' : '') + '>' + s + '</text>';
+  }
+  function yAxis(m, pw, ph, ticks, yf, label, fmt) {
+    var s = '';
+    ticks.forEach(function (t) {
+      var y = yf(t);
+      s += '<line x1="' + m.l + '" x2="' + (m.l + pw) + '" y1="' + y + '" y2="' + y + '" stroke="' + GRID + '"/>' + txt(m.l - 6, y + 4, (fmt || fmtNum)(t), { anchor: 'end', size: 11, fill: MUTED });
+    });
+    s += txt(12, m.t + ph / 2, label, { size: 11, fill: MUTED, rot: -90 });
+    return s;
+  }
+  function frame(m, pw, ph) {
+    return '<line x1="' + m.l + '" x2="' + m.l + '" y1="' + m.t + '" y2="' + (m.t + ph) + '" stroke="' + NAVY + '"/><line x1="' + m.l + '" x2="' + (m.l + pw) + '" y1="' + (m.t + ph) + '" y2="' + (m.t + ph) + '" stroke="' + NAVY + '" stroke-width="1.5"/>';
+  }
+
+  /* ===== Scenario definitions ===== */
+  var SC = [
+    { /* A: truncated axis */
+      tab: 'Axis start', org: 'Brightway Phones',
+      head: '“Brightway Phones sales skyrocket this year!”',
+      sub: 'Bar chart: phones sold per month.',
+      caption: 'Made-up example. Data are invented for practice.',
+      defaults: function () { return { ymin: 7000 }; },
+      controls: [{ type: 'range', key: 'ymin', min: 0, max: 7100, step: 100, label: 'Y-axis starts at', fmt: fmtNum }],
+      params: function (c) { return { ymin: c.ymin }; },
+      draw: function (p) {
+        var m = { l: 56, r: 12, t: 26, b: 36 }, pw = CW - m.l - m.r, ph = HH - m.t - m.b, ymax = A.ymax;
+        var yf = function (v) { return m.t + ph - (v - p.ymin) / (ymax - p.ymin) * ph; };
+        var s = '<defs><clipPath id="clip"><rect x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/></clipPath></defs>';
+        s += yAxis(m, pw, ph, niceTicks(p.ymin, ymax, 4), yf, 'Phones sold');
+        var bw = Math.min(110, pw * 0.28), cx = [m.l + pw * 0.28, m.l + pw * 0.72], vals = [A.v1, A.v2], names = ['Last year', 'This year'], cols = [NAVY, GOLD];
+        for (var i = 0; i < 2; i++) {
+          var y = yf(vals[i]);
+          s += '<rect clip-path="url(#clip)" x="' + (cx[i] - bw / 2) + '" y="' + y + '" width="' + bw + '" height="' + Math.max(0, m.t + ph - y) + '" fill="' + cols[i] + '"/>';
+          s += txt(cx[i], Math.max(m.t - 4, y - 5), fmtNum(vals[i]), { weight: 700, size: 13 }) + txt(cx[i], m.t + ph + 18, names[i], { size: 12 });
+        }
+        return s + frame(m, pw, ph);
+      },
+      meter: function (c) {
+        var app = visRatio(A.v1, A.v2, c.ymin), act = A.v2 / A.v1;
+        return {
+          app: app, act: act, appTxt: fmtX(app) + '×', actTxt: fmtX(act) + '×',
+          sentence: isFinite(app) ? 'The picture suggests the second bar is ' + fmtX(app) + ' times as tall. The data say it is ' + fmtX(act) + ' times as large.' : 'The first bar has vanished, so the picture suggests a huge jump. The data say the second value is ' + fmtX(act) + ' times as large.',
+          honest: c.ymin === 0, swing: isFinite(app) ? app / act : 99, swingTxt: function (s) { return fmtX(s) + '× too big'; }
+        };
+      },
+      hint: function (c) { return 'The axis starts at ' + fmtNum(c.ymin) + '. Bars show size by length. Where should a bar begin?'; },
+      why: function () {
+        var g = pct(A.v1, A.v2).toFixed(1);
+        return 'The axis starts at 0, so bar lengths match the values. Sales rose about ' + g + '%. That is not “skyrocketing.” Bar charts need a zero baseline. A line graph may start higher if the axis is clearly labeled, but bars may not.';
+      },
+      quiz: { q: 'What trick made a small rise look huge?', opts: ['The two bars were different colors.', 'There were too many labels on the chart.', 'The y-axis started at 7,000, so the bars were cut off.', 'The data were made up.'], correct: 2, hint: 'Look at the numbers on the left. Where does the scale begin?', explain: 'Correct. A bar’s length stands for its whole value. Cutting off the bottom makes a 10% gap look like a 4-times gap.' }
+    },
+    { /* B: cherry-picked window */
+      tab: 'Time window', org: 'Pinecrest Bus Line',
+      head: '“Pinecrest Bus Line ridership is collapsing!”',
+      sub: 'Line graph: riders per day, in hundreds, by month.',
+      caption: 'Made-up example. Data are invented for practice.',
+      defaults: function () { return { start: 6, end: 11 }; },
+      controls: [
+        { type: 'range', key: 'start', min: 0, max: B_LAST - 1, step: 1, label: 'Window starts at month', fmt: function (v) { return v + 1; } },
+        { type: 'range', key: 'end', min: 1, max: B_LAST, step: 1, label: 'Window ends at month', fmt: function (v) { return v + 1; } },
+        { type: 'button', label: 'Show full range', action: function (c) { c.start = 0; c.end = B_LAST; } }
+      ],
+      normalize: function (c, key) { if (key === 'start' && c.start >= c.end) c.start = c.end - 1; if (key === 'end' && c.end <= c.start) c.end = c.start + 1; },
+      params: function (c) { return { start: c.start, end: c.end }; },
+      draw: function (p) {
+        var m = { l: 50, r: 14, t: 16, b: 38 }, pw = CW - m.l - m.r, ph = HH - m.t - m.b, d = B.data;
+        var lo = Math.min(valueAt(d, p.start), valueAt(d, p.end)), hi = Math.max(valueAt(d, p.start), valueAt(d, p.end)), i;
+        for (i = Math.ceil(p.start); i <= Math.floor(p.end); i++) { lo = Math.min(lo, d[i]); hi = Math.max(hi, d[i]); }
+        var pad = Math.max((hi - lo) * 0.12, 1); lo -= pad; hi += pad;
+        var xf = function (k) { return m.l + (k - p.start) / (p.end - p.start) * pw; };
+        var yf = function (v) { return m.t + ph - (v - lo) / (hi - lo) * ph; };
+        var s = '<defs><clipPath id="clip"><rect x="' + (m.l - 1) + '" y="' + (m.t - 4) + '" width="' + (pw + 2) + '" height="' + (ph + 8) + '"/></clipPath></defs>';
+        s += yAxis(m, pw, ph, niceTicks(lo, hi, 4), yf, 'Riders (hundreds)');
+        var pts = '', dots = '';
+        for (i = 0; i <= B_LAST; i++) { pts += xf(i).toFixed(1) + ',' + yf(d[i]).toFixed(1) + ' '; dots += '<circle cx="' + xf(i).toFixed(1) + '" cy="' + yf(d[i]).toFixed(1) + '" r="3" fill="' + NAVY + '"/>'; }
+        s += '<g clip-path="url(#clip)"><polyline points="' + pts + '" fill="none" stroke="' + NAVY + '" stroke-width="2.5"/>' + dots + '</g>';
+        var span = p.end - p.start, step = Math.max(1, Math.ceil(span / 6));
+        for (i = Math.ceil(p.start); i <= Math.floor(p.end + 1e-6); i++) if ((i - Math.ceil(p.start)) % step === 0) s += txt(xf(i), m.t + ph + 16, i + 1, { size: 11, fill: MUTED });
+        s += txt(m.l + pw / 2, HH - 4, 'Month (of 24)', { size: 11, fill: MUTED });
+        return s + frame(m, pw, ph);
+      },
+      meter: function (c) {
+        var app = windowChange(B.data, c.start, c.end), act = windowChange(B.data, 0, B_LAST);
+        var full = c.start === 0 && c.end === B_LAST;
+        return {
+          app: app, act: act, appTxt: fmtPct(app), actTxt: fmtPct(act),
+          sentence: 'The picture suggests riders ' + (app < 0 ? 'fell ' : 'rose ') + Math.abs(app).toFixed(1) + '%. The data say they ' + (act < 0 ? 'fell ' : 'rose ') + Math.abs(act).toFixed(1) + '% over all 24 months.',
+          honest: full || Math.abs(app - act) <= 5, swing: act - app, swingTxt: function (s) { return Math.round(s) + ' points off'; }, full: full
+        };
+      },
+      hint: function (c) { return 'This window shows only months ' + (c.start + 1) + ' to ' + (c.end + 1) + ' of 24. What happens to the story if you widen it?'; },
+      why: function (c) {
+        var full = c.start === 0 && c.end === B_LAST;
+        return (full ? 'The whole 24 months are showing. ' : 'This window tells the same story as the full range. ') + 'Riders rose about ' + Math.round(windowChange(B.data, 0, B_LAST)) + '% overall. The dip was short. A line graph may use a labeled nonzero axis, but it must show the full time range.';
+      },
+      quiz: { q: 'Why did the first graph show a collapse?', opts: ['It showed only a short window and left out the other months.', 'The line was drawn too thick.', 'It used the wrong units.', 'It had no title.'], correct: 0, hint: 'Compare the months on the x-axis with the full 24. What was left out?', explain: 'Correct. Any rising series has short dips. Picking just the dip is called cherry-picking.' }
+    },
+    { /* C: uneven intervals */
+      tab: 'Spacing', org: 'Cove Cafe',
+      head: '“Cove Cafe visits climb steadily, step after step!”',
+      sub: 'Line graph: visits per day, measured in six different years.',
+      caption: 'Made-up example. Data are invented for practice.',
+      defaults: function () { return { even: false }; },
+      controls: [{ type: 'toggle', key: 'even', label: 'Equal tick spacing (draw year gaps to scale)' }],
+      params: function (c) { return { t: c.even ? 1 : 0 }; },
+      draw: function (p) {
+        var m = { l: 46, r: 18, t: 18, b: 40 }, pw = CW - m.l - m.r, ph = HH - m.t - m.b, i;
+        var xf = function (k) { return m.l + 10 + xPos(C.years, k, p.t) * (pw - 20); };
+        var yf = function (v) { return m.t + ph - v / 90 * ph; };
+        var s = yAxis(m, pw, ph, [0, 30, 60, 90], yf, 'Visits per day');
+        var pts = '', dots = '';
+        for (i = 0; i < C.years.length; i++) {
+          pts += xf(i).toFixed(1) + ',' + yf(C.vals[i]).toFixed(1) + ' ';
+          dots += '<line x1="' + xf(i) + '" x2="' + xf(i) + '" y1="' + (m.t + ph) + '" y2="' + (m.t + ph + 5) + '" stroke="' + NAVY + '"/><circle cx="' + xf(i).toFixed(1) + '" cy="' + yf(C.vals[i]).toFixed(1) + '" r="4" fill="' + NAVY + '"/>' + txt(xf(i), m.t + ph + 18, C.years[i], { size: pw < 260 ? 10 : 11 });
+        }
+        s += '<polyline points="' + pts + '" fill="none" stroke="' + NAVY + '" stroke-width="2.5"/>' + dots;
+        s += txt(m.l + pw / 2, HH - 4, 'Year', { size: 11, fill: MUTED });
+        return s + frame(m, pw, ph);
+      },
+      meter: function (c) {
+        var app = slopeRatio(C.years, C.vals, c.even ? 1 : 0), act = slopeRatio(C.years, C.vals, 1);
+        return {
+          app: app, act: act, appTxt: fmtX(app) + '×', actTxt: fmtX(act) + '×',
+          sentence: 'The picture suggests the last stretch climbs ' + fmtX(app) + ' times as steeply as the first. The data say ' + fmtX(act) + ' times as steeply.',
+          honest: Math.abs(app - act) <= 0.05, swing: app / act, swingTxt: function (s) { return fmtX(s) + '× too steep'; }
+        };
+      },
+      hint: function () { return 'Read the years under the dots. The gaps are 1, 1, 1, 3 and 3 years. Are they drawn that way?'; },
+      why: function () { return 'The gaps are now drawn to scale. The line bends: visits grew fast at first, then slowed down. Equal steps on an axis must mean equal amounts, or the picture misleads.'; },
+      quiz: { q: 'What was wrong with the first axis?', opts: ['The years were in the wrong order.', 'The line was too steep.', 'The y-axis did not start at zero.', 'One-year gaps and three-year gaps were drawn the same width.'], correct: 3, hint: 'Compare the years under the dots with how far apart the dots were.', explain: 'Correct. Evenly spaced dots made a slowdown look like a straight, steady climb.' }
+    },
+    { /* D: pictograph */
+      tab: 'Icon size', org: 'Oakfield Phones',
+      head: '“Oakfield Phones sales quadrupled!”',
+      sub: 'Icon chart: thousands of phones sold.',
+      caption: 'Made-up example. Year 1: 40 thousand. Year 2: 80 thousand.',
+      defaults: function () { return { mode: 'both' }; },
+      controls: [{ type: 'seg', key: 'mode', label: 'Icon style', opts: [['both', 'Scale width and height'], ['height', 'Scale height only'], ['repeat', 'Repeated icons']] }],
+      params: function (c) { return { sw: c.mode === 'both' ? 2 : 1, sh: c.mode === 'repeat' ? 1 : 2, r: c.mode === 'repeat' ? 1 : 0 }; },
+      draw: function (p) {
+        var m = { l: 12, r: 12, t: 22, b: 30 }, pw = CW - m.l - m.r, ph = HH - m.t - m.b, base = m.t + ph;
+        var bw = Math.min(46, pw / 7), bh = bw * 1.6, s = '';
+        function icon(x, y, w, h, fill, op) {
+          var r = Math.max(3, w * 0.14);
+          return '<g opacity="' + op + '"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="' + r + '" fill="' + fill + '"/><rect x="' + (x + w * 0.12) + '" y="' + (y + h * 0.1) + '" width="' + (w * 0.76) + '" height="' + (h * 0.68) + '" rx="2" fill="#fff" opacity="0.85"/><circle cx="' + (x + w / 2) + '" cy="' + (y + h * 0.9) + '" r="' + Math.max(1.5, w * 0.06) + '" fill="#fff"/></g>';
+        }
+        var op1 = 1 - p.r;
+        if (op1 > 0.01) {
+          var x1 = m.l + pw * 0.3 - bw / 2, x2 = m.l + pw * 0.7 - bw * p.sw / 2, w2 = bw * p.sw, h2 = bh * p.sh;
+          s += icon(x1, base - bh, bw, bh, NAVY, op1) + icon(x2, base - h2, w2, h2, GOLD, op1);
+          s += txt(x1 + bw / 2, base - bh - 6, '40', { weight: 700, size: 13 }).replace('<text', '<text opacity="' + op1 + '"');
+          s += txt(x2 + w2 / 2, base - h2 - 6, '80', { weight: 700, size: 13 }).replace('<text', '<text opacity="' + op1 + '"');
+          s += txt(x1 + bw / 2, base + 16, 'Year 1', { size: 12 }).replace('<text', '<text opacity="' + op1 + '"') + txt(x2 + w2 / 2, base + 16, 'Year 2', { size: 12 }).replace('<text', '<text opacity="' + op1 + '"');
+        }
+        if (p.r > 0.01) {
+          var iw = Math.max(14, Math.min(30, (pw - 70) / 8 - 4)), ih = iw * 1.6, gap = 4, labw = 56, rows = [[D.v1, NAVY, 'Year 1'], [D.v2, GOLD, 'Year 2']];
+          rows.forEach(function (r, ri) {
+            var cnt = Math.ceil(r[0] / D.unit), y = m.t + 14 + ri * (ih + 34);
+            s += txt(m.l + labw - 8, y + ih / 2 + 4, r[2], { anchor: 'end', size: 12 }).replace('<text', '<text opacity="' + p.r + '"');
+            for (var k = 0; k < cnt; k++) s += icon(m.l + labw + k * (iw + gap), y, iw, ih, r[1], p.r);
+            s += txt(m.l + labw, y + ih + 14, r[0] + ' thousand', { anchor: 'start', size: 11, fill: MUTED }).replace('<text', '<text opacity="' + p.r + '"');
+          });
+          s += txt(m.l + pw, HH - 6, '1 icon = ' + D.unit + ' thousand phones', { anchor: 'end', size: 11, fill: MUTED }).replace('<text', '<text opacity="' + p.r + '"');
+        }
+        return s;
+      },
+      meter: function (c) {
+        var app = pictoRatio(c.mode, D.v1, D.v2, D.unit), act = D.v2 / D.v1;
+        return {
+          app: app, act: act, appTxt: fmtX(app) + '×', actTxt: fmtX(act) + '×',
+          sentence: 'The picture suggests Year 2 is ' + fmtX(app) + ' times as big. The data say it is ' + fmtX(act) + ' times as big.',
+          honest: Math.abs(app - act) <= 0.1, swing: app / act, swingTxt: function (s) { return fmtX(s) + '× too big'; }
+        };
+      },
+      hint: function (c) { return c.mode === 'both' ? 'The Year 2 icon is twice as wide and twice as tall. How much more area is that?' : 'Check the meter.'; },
+      why: function (c) {
+        return c.mode === 'height' ? 'Only the height doubles, so the area is 2 times as big, matching the data. The icon looks stretched, though. Repeated icons are cleaner, because you count them.' : 'Eight icons next to four icons: exactly 2 times as many. Size now matches value. Never scale an icon in both directions, since area grows as the square.';
+      },
+      quiz: { q: 'How did the first chart exaggerate the change?', opts: ['The icons were the wrong color.', 'Width and height both doubled, so the area grew 4 times.', 'There were too few icons.', 'The labels were too small.'], correct: 1, hint: 'The eye reads area. What happens to area when both sides double?', explain: 'Correct. Doubling both sides makes 2 × 2 = 4 times the area, for a 2-times difference in data.' }
+    },
+    { /* E: histogram bins */
+      tab: 'Bin width', org: 'Riverbend Gym',
+      head: '“Riverbend Gym members all work out about the same time.”',
+      sub: 'Histogram: minutes per workout for 60 members.',
+      caption: 'Made-up example. Data are invented for practice.',
+      defaults: function () { return { w: 25 }; },
+      controls: [{ type: 'range', key: 'w', min: 1, max: 40, step: 1, label: 'Bin width (minutes)', fmt: function (v) { return v; } }],
+      params: function (c) { return { w: c.w }; },
+      draw: function (p) {
+        var m = { l: 46, r: 14, t: 16, b: 38 }, pw = CW - m.l - m.r, ph = HH - m.t - m.b, lo = 0, hi = 80, i;
+        var cnt = histCounts(HIST, p.w, lo, hi), mx = Math.max.apply(null, cnt), ymax = Math.max(4, Math.ceil(mx * 1.15));
+        var xf = function (v) { return m.l + v / (hi - lo) * pw; }, yf = function (v) { return m.t + ph - v / ymax * ph; };
+        var s = '<defs><clipPath id="clip"><rect x="' + m.l + '" y="' + (m.t - 2) + '" width="' + pw + '" height="' + (ph + 2) + '"/></clipPath></defs>';
+        s += yAxis(m, pw, ph, niceTicks(0, ymax, 4), yf, 'Members', function (t) { return t; });
+        s += '<g clip-path="url(#clip)">';
+        cnt.forEach(function (v, b) {
+          var x0 = xf(b * p.w), x1 = xf((b + 1) * p.w), bwid = Math.max(0.5, x1 - x0 - (x1 - x0 > 4 ? 1.5 : 0));
+          if (v > 0) s += '<rect x="' + x0.toFixed(1) + '" y="' + yf(v).toFixed(1) + '" width="' + bwid.toFixed(1) + '" height="' + (yf(0) - yf(v)).toFixed(1) + '" fill="' + NAVY + '"/>';
+        });
+        s += '</g>';
+        for (i = 0; i <= 80; i += 20) s += txt(xf(i), m.t + ph + 16, i, { size: 11, fill: MUTED });
+        s += txt(m.l + pw / 2, HH - 4, 'Minutes per workout', { size: 11, fill: MUTED });
+        return s + frame(m, pw, ph);
+      },
+      meter: function (c) {
+        var pk = countPeaks(histCounts(HIST, c.w, 0, 80));
+        return {
+          app: pk, act: ACTUAL_GROUPS, appTxt: pk + (pk === 1 ? ' hump' : ' humps'), actTxt: ACTUAL_GROUPS + ' groups',
+          sentence: 'The picture shows ' + pk + (pk === 1 ? ' hump' : ' humps') + '. The data show ' + ACTUAL_GROUPS + ' separate groups of members, with a gap between them.',
+          honest: pk === ACTUAL_GROUPS, swing: Math.abs(pk - ACTUAL_GROUPS), swingTxt: function (s) { return s + (s === 1 ? ' hump' : ' humps') + ' off'; }, pk: pk
+        };
+      },
+      hint: function (c) { var pk = countPeaks(histCounts(HIST, c.w, 0, 80)); return pk < ACTUAL_GROUPS ? 'Wide bins can blend groups together. Try narrower bins.' : 'Very narrow bins make random bumps. Try wider bins.'; },
+      why: function (c) { return 'With bins about ' + c.w + ' minutes wide, the two groups show up: a short-workout group and a long-workout group. Too wide hides groups. Too narrow invents bumps. A good graph states its bin width.'; },
+      quiz: { q: 'What did the very wide bins do?', opts: ['They added fake data.', 'They made every bar the same color.', 'They blended two separate groups into one hump.', 'They removed the axis.'], correct: 2, hint: 'Think about what happens when two groups land in the same bin.', explain: 'Correct. Wide bins smoothed away the gap between the groups. Very narrow bins do the opposite and invent bumps. Always ask what bin width was used.' }
+    }
+  ];
+
+  var CHECK = [
+    { s: 0, t: 'Zero start?', full: 'Does the bar chart axis start at zero?' },
+    { s: 2, t: 'Equal gaps?', full: 'Are the intervals equal?' },
+    { s: 1, t: 'Full range?', full: 'Is the whole time range shown?' },
+    { s: 3, t: 'Sizes true?', full: 'Do sizes match values?' },
+    { s: 4, t: 'Labels, source?', full: 'Are labels, units, bin widths and source given?' }
+  ];
+
+  /* ===== State ===== */
+  var st, cur = 0, curP = {}, anim = null;
+  function freshState() {
+    return SC.map(function (s) { return { c: s.defaults(), fixed: false, picked: [], solved: false, deceive: false, best: 0 }; });
+  }
+  function reduced() { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+
+  /* ===== Rendering ===== */
+  function drawChart(p) { $('svg').innerHTML = SC[cur].draw(p); }
+  function animateTo(target, instant) {
+    if (anim) cancelAnimationFrame(anim);
+    if (instant || reduced()) { curP = target; drawChart(curP); return; }
+    var from = {}, k; for (k in target) from[k] = curP[k] !== undefined ? curP[k] : target[k];
+    var t0 = performance.now(), dur = 200;
+    (function step(now) {
+      var f = Math.min(1, (now - t0) / dur), e = f * (2 - f), p = {};
+      for (k in target) p[k] = from[k] + (target[k] - from[k]) * e;
+      curP = p; drawChart(p);
+      if (f < 1) anim = requestAnimationFrame(step); else { curP = target; anim = null; }
+    })(t0);
+  }
+  function sizeChart() {
+    CW = Math.max(250, Math.floor($('chartHost').clientWidth));
+    var svg = $('svg'); svg.setAttribute('width', CW); svg.setAttribute('height', HH); svg.setAttribute('viewBox', '0 0 ' + CW + ' ' + HH);
+  }
+
+  function buildControls() {
+    var box = $('controls'), sc = SC[cur], c = st[cur].c; box.innerHTML = '';
+    sc.controls.forEach(function (ct, i) {
+      var d = document.createElement('div'); d.className = 'ctl';
+      if (ct.type === 'range') {
+        d.innerHTML = '<label for="ctl' + i + '"><span>' + ct.label + '</span><span class="val" id="val' + i + '"></span></label><input type="range" id="ctl' + i + '" min="' + ct.min + '" max="' + ct.max + '" step="' + ct.step + '" aria-label="' + ct.label + '">';
+        var inp = d.querySelector('input'); inp.value = c[ct.key];
+        inp.addEventListener('input', function () { c[ct.key] = +inp.value; if (sc.normalize) sc.normalize(c, ct.key); changed(); });
+      } else if (ct.type === 'seg') {
+        d.innerHTML = '<div class="lbl">' + ct.label + '</div><div class="seg" role="group" aria-label="' + ct.label + '"></div>';
+        ct.opts.forEach(function (o) {
+          var b = document.createElement('button'); b.type = 'button'; b.textContent = o[1]; b.dataset.v = o[0];
+          b.addEventListener('click', function () { c[ct.key] = o[0]; changed(); }); d.querySelector('.seg').appendChild(b);
+        });
+      } else if (ct.type === 'toggle') {
+        d.innerHTML = '<div class="lbl">' + ct.label + '</div>';
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.dataset.toggle = ct.key;
+        b.addEventListener('click', function () { c[ct.key] = !c[ct.key]; changed(); }); d.appendChild(b);
+      } else {
+        var bb = document.createElement('button'); bb.type = 'button'; bb.className = 'btn'; bb.textContent = ct.label;
+        bb.addEventListener('click', function () { ct.action(c); changed(); }); d.appendChild(bb);
+      }
+      box.appendChild(d);
+    });
+    syncControls();
+  }
+  function syncControls() {
+    var sc = SC[cur], c = st[cur].c;
+    sc.controls.forEach(function (ct, i) {
+      if (ct.type === 'range') { $('ctl' + i).value = c[ct.key]; $('val' + i).textContent = ct.fmt(c[ct.key]); }
+    });
+    Array.prototype.forEach.call($('controls').querySelectorAll('.seg button'), function (b) { b.setAttribute('aria-pressed', String(b.dataset.v === c[sc.controls[0].key])); });
+    var tg = $('controls').querySelector('[data-toggle]');
+    if (tg) { var on = c[tg.dataset.toggle]; tg.setAttribute('aria-pressed', String(on)); tg.textContent = on ? 'On: gaps drawn to scale' : 'Off: points spaced evenly'; }
+  }
+
+  function changed() {
+    var S = st[cur], sc = SC[cur], m = sc.meter(S.c);
+    syncControls();
+    animateTo(sc.params(S.c));
+    if (m.honest && !S.fixed) S.fixed = true;
+    if (S.deceive) S.best = Math.max(S.best, m.swing);
+    renderInfo();
+  }
+
+  function renderInfo() {
+    var S = st[cur], sc = SC[cur], m = sc.meter(S.c), q = sc.quiz;
+    $('tag').textContent = 'Made-up example • ' + sc.org;
+    $('head').textContent = sc.head; $('caption').textContent = sc.sub + ' ' + sc.caption;
+    $('claim').classList.toggle('struck', m.honest);
+    $('badge').innerHTML = m.honest ? '<span class="badge ok">✓ Honest picture</span>' : '<span class="badge bad">⚠ Misleading picture</span>';
+    $('mApp').textContent = m.appTxt; $('mAct').textContent = m.actTxt; $('mSentence').textContent = m.sentence;
+    $('svg').setAttribute('aria-label', sc.org + ' chart. ' + m.sentence);
+    var stt = $('status');
+    if (S.deceive) {
+      stt.className = 'status deceive';
+      stt.innerHTML = '<b>Deceive me mode.</b> ' + (m.honest ? 'You are the chart maker now. Move a control the wrong way and watch the story meter swing.' : 'Look at the meter: the picture says one thing and the data say another. It took one control.') + ' Biggest swing so far: <b>' + (S.best > 0 ? sc.meter(S.c).swingTxt(S.best) : 'none yet') + '</b>.';
+    } else if (m.honest) {
+      stt.className = 'status good';
+      stt.innerHTML = '<b>✓ Claim no longer supported.</b> ' + sc.why(S.c);
+    } else {
+      stt.className = 'status nudge';
+      stt.innerHTML = '<b>' + (S.fixed ? 'The picture is misleading again.' : 'Still misleading.') + '</b> ' + sc.hint(S.c);
+    }
+    $('quiz').hidden = !S.fixed;
+    if (S.fixed) buildQuiz();
+    $('deceiveBtn').hidden = !S.fixed;
+    $('deceiveBtn').setAttribute('aria-pressed', String(S.deceive));
+    $('deceiveBtn').textContent = 'Deceive me mode: ' + (S.deceive ? 'on' : 'off');
+    renderTabs(); renderCheck();
+  }
+
+  function buildQuiz() {
+    var S = st[cur], q = SC[cur].quiz, box = $('opts');
+    if ($('qText').dataset.s !== String(cur)) {
+      $('qText').dataset.s = cur; $('qText').textContent = q.q; box.innerHTML = '';
+      q.opts.forEach(function (o, i) {
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'opt'; b.dataset.i = i;
+        b.textContent = String.fromCharCode(65 + i) + '. ' + o;
+        b.addEventListener('click', function () { pick(i); }); box.appendChild(b);
+      });
+    }
+    Array.prototype.forEach.call(box.children, function (b, i) {
+      var wrong = S.picked.indexOf(i) >= 0 && i !== q.correct, right = S.solved && i === q.correct;
+      b.className = 'opt' + (right ? ' right' : wrong ? ' wrong' : '');
+      b.disabled = S.solved && !right ? true : false; b.setAttribute('aria-label', b.textContent + (right ? ' (correct)' : wrong ? ' (not correct)' : ''));
+    });
+    $('fb').innerHTML = S.solved ? '<div class="fb good"><b>✓</b> ' + q.explain + '</div>' : (S.picked.length ? '<div class="fb bad"><b>Not quite.</b> ' + q.hint + '</div>' : '');
+  }
+  function pick(i) {
+    var S = st[cur], q = SC[cur].quiz;
+    if (S.solved) return;
+    if (i === q.correct) S.solved = true; else if (S.picked.indexOf(i) < 0) S.picked.push(i);
+    buildQuiz();
+  }
+
+  function renderTabs() {
+    Array.prototype.forEach.call($('tabs').children, function (b, i) {
+      b.setAttribute('aria-selected', String(i === cur)); b.classList.toggle('done', st[i].fixed);
+      b.setAttribute('aria-label', 'Graph ' + (i + 1) + ': ' + SC[i].tab + (st[i].fixed ? ', fixed' : ''));
+    });
+  }
+  function renderCheck() {
+    var ul = $('checklist'), n = 0;
+    ul.innerHTML = '';
+    CHECK.forEach(function (c) {
+      var on = st[c.s].fixed; if (on) n++;
+      var li = document.createElement('li'); li.className = on ? 'on' : ''; li.title = c.full;
+      li.innerHTML = '<span class="box"></span>' + c.t; li.setAttribute('aria-label', c.full + (on ? ' Caught.' : ' Not caught yet.'));
+      ul.appendChild(li);
+    });
+    $('doneMsg').hidden = n < CHECK.length;
+  }
+
+  function show(i) {
+    cur = i; $('qText').dataset.s = '';
+    buildControls(); sizeChart();
+    animateTo(SC[cur].params(st[cur].c), true);
+    renderInfo();
+  }
+
+  function init() {
+    st = freshState();
+    var tabs = $('tabs'); tabs.innerHTML = '';
+    SC.forEach(function (s, i) {
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'tab'; b.setAttribute('role', 'tab');
+      b.innerHTML = (i + 1) + ' ' + s.tab + ' <span class="ck" aria-hidden="true">✓</span>';
+      b.addEventListener('click', function () { show(i); }); tabs.appendChild(b);
+    });
+    show(0);
+  }
+
+  $('resetBtn').addEventListener('click', init);
+  $('deceiveBtn').addEventListener('click', function () { var S = st[cur]; S.deceive = !S.deceive; S.best = 0; renderInfo(); });
+  var rt; window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { sizeChart(); drawChart(curP); }, 60); });
+  init();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Display Builder: One Dataset, Many Displays</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 10px 12px 12px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 8px; }
+  button, input, textarea { font-family: inherit; }
+  :focus-visible { outline: 3px solid #C7922C; outline-offset: 2px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; align-items: center; margin-bottom: 4px; }
+  .row .lbl { font-size: 0.72rem; color: #6b7a99; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .btn { padding: 5px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; transition: background 0.2s, color 0.2s; }
+  .btn:hover { background: #F8FAFD; }
+  .btn.on { background: #0E1C42; color: #fff; }
+  .btn.on::before { content: "\2713\00a0"; }
+  .btn:disabled { border-color: #c9d2e2; color: #9aa6bf; cursor: not-allowed; }
+  .btn.fam { font-size: 0.88rem; padding: 6px 16px; }
+  .btn.chip { border-color: #6b7a99; color: #1a2340; font-weight: 600; }
+  .btn.chip.on { border-color: #0E1C42; color: #fff; }
+  .btn.small { padding: 2px 9px; font-size: 0.95rem; line-height: 1.2; }
+  .btn.reset { border-color: #C0392B; background: #C0392B; color: #fff; }
+  .btn.reset:hover { background: #96281c; }
+  .card { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 9px 11px; min-width: 0; }
+  .card h3 { font-size: 0.72rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 8px; margin-bottom: 8px; align-items: start; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; margin-bottom: 8px; align-items: start; }
+  @media (max-width: 600px) { .grid, .grid2 { grid-template-columns: minmax(0, 1fr); } }
+  .tag { display: inline-block; font-size: 0.68rem; font-weight: 700; color: #6b7a99; border: 1px dashed #6b7a99; border-radius: 6px; padding: 0 6px; margin-bottom: 4px; }
+  .editor { margin-bottom: 8px; }
+  .erow { display: flex; gap: 5px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
+  .erow input[type=text] { flex: 1 1 110px; min-width: 0; padding: 4px 6px; border: 2px solid #D0D9E8; border-radius: 6px; font-size: 0.82rem; }
+  .cnt { min-width: 26px; text-align: center; font-weight: 800; color: #0E1C42; }
+  textarea { width: 100%; min-height: 54px; padding: 6px; border: 2px solid #D0D9E8; border-radius: 6px; font-size: 0.85rem; resize: vertical; }
+  .msg { font-size: 0.78rem; margin-top: 4px; min-height: 1.1em; color: #6b7a99; }
+  .msg.err { color: #C0392B; font-weight: 700; }
+  .ctitle { text-align: center; font-weight: 800; color: #0E1C42; font-size: 0.95rem; margin: 2px 0 4px; }
+  .missing { color: #C0392B; font-weight: 600; font-style: italic; border-bottom: 1px dashed #C0392B; }
+  .caxis { text-align: center; font-size: 0.8rem; color: #1a2340; margin-top: 4px; }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: 'Segoe UI', Arial, sans-serif; }
+  .anim .bar { transform-box: fill-box; transform-origin: 50% 100%; animation: grow 0.2s ease-out; }
+  .anim { animation: fade 0.2s ease-out; }
+  @keyframes grow { from { transform: scaleY(0.05); } to { transform: scaleY(1); } }
+  @keyframes fade { from { opacity: 0.2; } to { opacity: 1; } }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.76rem; margin-top: 4px; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; border: 1px solid #1a2340; }
+  .note { font-size: 0.74rem; color: #6b7a99; margin-top: 4px; line-height: 1.4; }
+  .tbl-wrap { overflow: auto; max-height: 330px; border: 1px solid #D0D9E8; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #D0D9E8; padding: 3px 6px; text-align: center; font-size: 0.78rem; }
+  th { background: #0E1C42; color: #fff; font-size: 0.72rem; position: sticky; top: 0; }
+  td.nm { text-align: left; font-weight: 600; overflow-wrap: anywhere; min-width: 70px; }
+  tr.tot td { background: #FDF3E3; font-weight: 800; border-top: 2px solid #C7922C; }
+  caption { font-weight: 800; color: #0E1C42; font-size: 0.9rem; padding: 2px 0 6px; }
+  .panel2 { border-radius: 8px; padding: 5px 9px; margin-bottom: 5px; font-size: 0.8rem; line-height: 1.4; }
+  .panel2 b.h { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+  .shows { background: #E8F6FB; border-left: 5px solid #2A9DB8; }
+  .hides { background: #FDF3E3; border-left: 5px solid #C7922C; }
+  .warn { background: #fdf0ee; border-left: 5px solid #C0392B; font-weight: 700; }
+  .warn::before { content: "Heads up: "; }
+  .fld { display: block; font-size: 0.74rem; font-weight: 700; color: #6b7a99; margin-bottom: 4px; }
+  .fld input { display: block; width: 100%; padding: 4px 6px; border: 2px solid #D0D9E8; border-radius: 6px; font-size: 0.82rem; color: #1a2340; margin-top: 1px; }
+  ul.check { list-style: none; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 0 12px; }
+  ul.check li { font-size: 0.8rem; padding: 1px 0; }
+  ul.check li .sym { display: inline-block; width: 1.4em; font-weight: 900; }
+  ul.check li.ok .sym { color: #1b7a3f; }
+  ul.check li.no .sym { color: #C0392B; }
+  ul.check li.na { color: #6b7a99; }
+  .done { color: #1b7a3f; font-weight: 800; font-size: 0.8rem; margin-top: 3px; }
+  .stemhead, .srow { display: flex; font-family: Consolas, 'Courier New', monospace; font-size: 0.95rem; }
+  .stemhead { font-family: 'Segoe UI', Arial, sans-serif; font-size: 0.7rem; color: #6b7a99; font-weight: 700; }
+  .stem { width: 52px; text-align: right; padding-right: 8px; border-right: 3px solid #0E1C42; font-weight: 800; flex: none; }
+  .leaves { padding-left: 8px; letter-spacing: 0.35em; min-height: 1.5em; overflow-wrap: anywhere; }
+  .stemhead .stem { font-weight: 700; border-right-color: transparent; }
+  .srow:nth-child(even) { background: #F8FAFD; }
+  .keyline { margin-top: 6px; font-weight: 800; color: #0E1C42; font-size: 0.86rem; background: #FDF3E3; border-radius: 6px; padding: 3px 8px; display: inline-block; }
+  .empty { padding: 30px 10px; text-align: center; color: #6b7a99; font-size: 0.9rem; }
+  .facts { font-size: 0.82rem; line-height: 1.6; }
+  .foot { text-align: center; margin-top: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Display Builder</h1>
+<p class="subtitle">One dataset, many displays. Switch the display and notice what it shows and what it hides.</p>
+
+<div class="row" id="topRow"><span id="famRow" class="row" style="margin:0" role="group" aria-label="Kind of data"></span><span id="dsRow" class="row" style="margin:0" role="group" aria-label="Choose a dataset"></span></div>
+<div id="editorHost"></div>
+<div class="row" id="dispRow" role="group" aria-label="Choose a display"></div>
+<div class="row" id="ctlRow" role="group" aria-label="Display controls"></div>
+
+<div class="grid">
+  <section class="card" aria-label="Display"><span class="tag" id="madeUp">Made-up example data</span><div id="chartHost"></div><div id="legendHost"></div></section>
+  <section class="card" id="sideCard" aria-label="Data table"></section>
+</div>
+<div class="grid2">
+  <section class="card" id="infoCard" aria-label="What this display shows and hides" aria-live="polite"></section>
+  <section class="card" aria-label="Labels">
+    <h3>Label your display</h3>
+    <label class="fld">Title<input type="text" id="fTitle" maxlength="90" aria-label="Title of the display"></label>
+    <div style="display:flex;gap:6px"><label class="fld" style="flex:1.3;min-width:0">Axis label<input type="text" id="fAxis" maxlength="50" aria-label="Axis label (what is measured)"></label>
+    <label class="fld" style="flex:1;min-width:0">Unit<input type="text" id="fUnit" maxlength="30" aria-label="Unit (what is counted or measured)"></label></div>
+    <b style="font-size:0.74rem;color:#6b7a99">Is it labeled?</b>
+    <ul class="check" id="checkList" aria-label="Labeling checklist"></ul>
+    <div id="doneMsg"></div>
+  </section>
+</div>
+<div class="foot"><button class="btn reset" id="resetBtn" aria-label="Reset everything to the starting state">Reset</button></div>
+</div>
+
+<script>
+/*PURE-START*/
+function countBy(arr){var m=new Map();arr.forEach(function(a){m.set(a,(m.get(a)||0)+1);});return Array.from(m).map(function(e){return {name:e[0],count:e[1]};});}
+function sortCats(c,order){var a=c.map(function(x,i){return {name:x.name,count:x.count,i:i};});if(order==='desc')a.sort(function(p,q){return q.count-p.count||p.i-q.i;});return a;}
+function percentsTenths(counts){
+  var tot=counts.reduce(function(a,b){return a+b;},0);if(!tot)return null;
+  var rem=counts.map(function(c){return (c*1000)%tot;});
+  var fl=counts.map(function(c,i){return (c*1000-rem[i])/tot;});
+  var left=1000-fl.reduce(function(a,b){return a+b;},0);
+  var idx=counts.map(function(_,i){return i;}).sort(function(a,b){return rem[b]-rem[a]||a-b;});
+  var adj=fl.slice();for(var j=0;j<left;j++)adj[idx[j]]++;
+  var plain=counts.map(function(c){return Math.round(c*1000/tot);});
+  return {adj:adj,plain:plain,plainSum:plain.reduce(function(a,b){return a+b;},0),total:tot};
+}
+function fmtTenths(t){return (t/10).toFixed(1);}
+function fmtMilli(m){var neg=m<0,a=Math.abs(m),i=Math.floor(a/1000),f=String(a%1000).padStart(3,'0').replace(/0+$/,'');return (neg&&a>0?'-':'')+i+(f?'.'+f:'');}
+function parseNumbers(text,max){
+  max=max||60;
+  var toks=String(text).replace(/−/g,'-').split(/[\s,;]+/).filter(Boolean);
+  if(!toks.length)return {ok:false,error:'Type at least one number. Separate numbers with spaces or commas.'};
+  var vals=[];
+  for(var i=0;i<toks.length;i++){var t=toks[i];
+    if(!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(t))return {ok:false,error:'I could not read "'+t.slice(0,12)+'" as a number. Use digits, a minus sign, and a decimal point only.'};
+    var dec=(t.split('.')[1]||'').replace(/0+$/,'').length;
+    if(dec>3)return {ok:false,error:'Round "'+t+'" to 3 decimal places or fewer.'};
+    var v=Math.round(parseFloat(t)*1000);
+    if(Math.abs(v)>1e8)return {ok:false,error:'Keep numbers between -100000 and 100000.'};
+    vals.push(v);}
+  if(vals.length>max)return {ok:false,error:'That is '+vals.length+' numbers. This tool can show at most '+max+'.'};
+  return {ok:true,values:vals};
+}
+function finestK(ms){for(var k=3;k>=-3;k--){var s=Math.pow(10,k+3);if(ms.every(function(m){return m%s===0;}))return k;}return -3;}
+function stemLeaf(ms,k,split){
+  var step=Math.pow(10,k+3);
+  var items=ms.map(function(m){var a=Math.abs(Math.trunc(m/step)),neg=m<0,stem=Math.floor(a/10);return {m:m,neg:neg,stem:stem,leaf:a%10,key:neg?-stem-1:stem,exact:m%step===0};});
+  var keys=items.map(function(i){return i.key;}),lo=Math.min.apply(null,keys),hi=Math.max.apply(null,keys),rows=[];
+  for(var key=lo;key<=hi;key++){var neg=key<0,stem=neg?-key-1:key;
+    var lv=items.filter(function(i){return i.key===key;}).map(function(i){return i.leaf;}).sort(function(a,b){return a-b;});
+    var label=(neg?'-':'')+stem;
+    if(!split)rows.push({label:label,leaves:lv});
+    else{rows.push({label:label,leaves:lv.filter(function(l){return l<5;})});rows.push({label:label,leaves:lv.filter(function(l){return l>=5;})});}}
+  var f=items.reduce(function(b,i){return i.m<b.m?i:b;},items[0]);
+  var val=(f.neg?-1:1)*(f.stem*10+f.leaf)*step;
+  return {rows:rows,lossy:items.filter(function(i){return !i.exact;}).length,keyText:(f.neg?'-':'')+f.stem+' | '+f.leaf+' means '+fmtMilli(val)};
+}
+function leafOptions(ms){var k0=Math.min(0,finestK(ms)),o=[k0];for(var k=k0+1;k<=Math.min(3,k0+2);k++){if(stemLeaf(ms,k,false).rows.length>=2)o.push(k);}return o;}
+function defaultK(ms){var o=leafOptions(ms);for(var i=0;i<o.length;i++){if(stemLeaf(ms,o[i],false).rows.length<=15)return o[i];}return o[o.length-1];}
+function niceStep(range,target){if(range<=0)return 1;var raw=range/target,e=Math.pow(10,Math.floor(Math.log10(raw))),c=[1,2,5,10];for(var i=0;i<4;i++)if(c[i]*e>=raw-1e-12)return c[i]*e;return 10*e;}
+function axisDomain(ms){
+  var mn=Math.min.apply(null,ms),mx=Math.max.apply(null,ms);
+  if(mn===mx)return {min:mn-1000,max:mx+1000,step:1000};
+  var step=Math.max(1,Math.round(niceStep(mx-mn,6)));
+  return {min:Math.floor(mn/step)*step,max:Math.ceil(mx/step)*step,step:step};
+}
+function byValue(ms){return countBy(ms.slice().sort(function(a,b){return a-b;})).map(function(e){return {v:e.name,count:e.count};});}
+function binCounts(ms,start,w){var mx=Math.max.apply(null,ms),n=Math.floor((mx-start)/w)+1,b=[];for(var i=0;i<n;i++)b.push({lo:start+i*w,hi:start+(i+1)*w,count:0});ms.forEach(function(m){b[Math.floor((m-start)/w)].count++;});return b;}
+function widthOptions(ms){
+  var mn=Math.min.apply(null,ms),mx=Math.max.apply(null,ms),unit=Math.pow(10,Math.min(0,finestK(ms))+3),out=[];
+  for(var e=0;e<=8;e++)[1,2,5].forEach(function(m){var w=m*Math.pow(10,e);if(w<unit||w%unit!==0)return;var s=Math.floor(mn/w)*w,n=Math.floor((mx-s)/w)+1;if(n>=2&&n<=15)out.push(w);});
+  return out;
+}
+function defaultWidth(ms){var o=widthOptions(ms);for(var i=0;i<o.length;i++){var w=o[i],s=Math.floor(Math.min.apply(null,ms)/w)*w;if(Math.floor((Math.max.apply(null,ms)-s)/w)+1<=8)return w;}return o.length?o[o.length-1]:null;}
+function groupLabel(lo,hi,intData){
+  var w=hi-lo;
+  if(intData&&w%1000===0){return w===1000?fmtMilli(lo):fmtMilli(lo)+'–'+fmtMilli(hi-1000);}
+  return fmtMilli(lo)+' up to '+fmtMilli(hi);
+}
+function gapInfo(ms){var v=byValue(ms).map(function(e){return e.v;});if(v.length<3)return null;var best=null,gs=[],range=v[v.length-1]-v[0];for(var i=1;i<v.length;i++){var g=v[i]-v[i-1];gs.push(g);if(!best||g>best.gap)best={gap:g,from:v[i-1],to:v[i]};}gs.sort(function(x,y){return x-y;});var med=gs[Math.floor(gs.length/2)];return (best.gap>=range*0.2&&best.gap>=2.5*med)?best:null;}
+/*PURE-END*/
+
+/* ---------- datasets (all made up) ---------- */
+function rep(pairs){var a=[];pairs.forEach(function(p){for(var i=0;i<p[1];i++)a.push(p[0]);});return a;}
+var CAT_SETS=[
+  {chip:'Lunch',title:'Favorite lunch (made-up class survey)',axis:'Favorite lunch',unit:'students',raw:rep([['Pizza',9],['Tacos',6],['Salad',3],['Sandwich',5],['Pasta',4]])},
+  {chip:'Pets',title:'Pets at home (made-up class survey)',axis:'Kind of pet',unit:'students',raw:rep([['Dog',11],['Cat',8],['Fish',3],['Bird',2],['Rabbit',2],['Hamster',1],['Lizard',1],['Snake',1]])},
+  {chip:'Getting to school',title:'How students get to school (made-up survey)',axis:'Way to get to school',unit:'students',raw:rep([['Ride in a family car',15],['School bus',6],['Walk',3],['Bike or scooter',2],['Carpool with a neighbor or friend',4]])}
+];
+var NUM_SETS=[
+  {chip:'Homework time',title:'Minutes of homework last night (made-up class survey)',axis:'Time spent on homework',unit:'minutes',who:'students',vals:[10,12,15,15,18,20,20,22,24,25,25,25,28,30,30,32,35,38,40,41,62,65,65,68,70,70,72,75,80,95]},
+  {chip:'Bean plants',title:'Bean plant heights after two weeks (made-up experiment)',axis:'Plant height',unit:'cm',who:'plants',vals:[4.1,4.5,4.8,5.0,5.2,5.2,5.5,5.6,5.8,6.0,6.1,6.1,6.3,6.4,6.4,6.4,6.7,6.8,7.0,7.2,7.3,7.5,7.9,8.2,8.8,9.5]},
+  {chip:'Cold nights',title:'Overnight low temperatures (made-up town)',axis:'Overnight low temperature',unit:'°C',who:'nights',vals:[-8,-6,-5,-5,-3,-2,-2,-1,0,0,1,2,2,3,3,4,4,4,5,6,7,8,9,12]}
+];
+var OWN_CAT_DEFAULT=[{name:'Red',count:4},{name:'Blue',count:6},{name:'Green',count:2}];
+var OWN_NUM_TEXT='4 7 7 8 10 10 10 12 15 15 18 21 21 25';
+var PALETTE=['#0E1C42','#C7922C','#2A9DB8','#8E5BA8','#C0392B','#5B8C3E','#6b7a99','#E3B25B','#55C8E8','#B36B8A','#3E6B8C','#8C7A3E'];
+
+var S;
+function copyCats(a){return a.map(function(c){return {name:c.name,count:c.count};});}
+function initState(){
+  S={fam:'cat',catIdx:0,numIdx:0,catDisp:'bar',numDisp:'dot',sort:'orig',valMode:'count',pieLabels:true,split:false,leafK:null,
+     grp:{mode:'value',w:null},showRel:false,ownCats:copyCats(OWN_CAT_DEFAULT),ownNums:parseNumbers(OWN_NUM_TEXT).values,ownText:OWN_NUM_TEXT,labels:null,msg:'',msgErr:false};
+  resetLabels();resetNumSettings();
+}
+function curSet(){return S.fam==='cat'?(S.catIdx<3?CAT_SETS[S.catIdx]:{title:'My categories (made-up example)',axis:'Category',unit:'responses'}):(S.numIdx<3?NUM_SETS[S.numIdx]:{title:'My numbers (made-up example)',axis:'Value',unit:'units',who:'values'});}
+function resetLabels(){var s=curSet();S.labels={title:s.title,axis:s.axis,unit:s.unit};}
+function getCats(){return S.catIdx<3?countBy(CAT_SETS[S.catIdx].raw):S.ownCats;}
+function getNums(){return S.numIdx<3?NUM_SETS[S.numIdx].vals.map(function(v){return Math.round(v*1000);}):S.ownNums;}
+function who(){return S.fam==='cat'?(S.labels.unit.trim()||'items'):(curSet().who||'values');}
+function resetNumSettings(){
+  var ms=getNums();S.leafK=null;S.split=false;S.showRel=false;
+  var d=byValue(ms).length,w=defaultWidth(ms);
+  S.grp={mode:(d<=10||!w)?'value':'group',w:w};
+}
+function isIntData(ms){return finestK(ms)>=0;}
+
+/* ---------- helpers ---------- */
+var $=function(id){return document.getElementById(id);};
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function joinNames(a){a=a.map(function(x){return '"'+x+'"';});if(a.length<=1)return a[0]||'';if(a.length===2)return a[0]+' and '+a[1];if(a.length===3)return a[0]+', '+a[1]+', and '+a[2];return a.slice(0,2).join(', ')+', and '+(a.length-2)+' more';}
+function wrapLabel(name,maxChars,maxLines){
+  var words=String(name).split(/\s+/),lines=[],cur='',cut=false;
+  words.forEach(function(w){
+    if(w.length>maxChars){w=w.slice(0,maxChars-1)+'…';cut=true;}
+    if((cur+' '+w).trim().length<=maxChars)cur=(cur+' '+w).trim();else{lines.push(cur);cur=w;}});
+  if(cur)lines.push(cur);
+  if(lines.length>maxLines){lines=lines.slice(0,maxLines);lines[maxLines-1]=lines[maxLines-1].replace(/.?$/,'…');cut=true;}
+  return {lines:lines,cut:cut};
+}
+function svgTitle(W){
+  var t=S.labels.title.trim();
+  if(!t)return {h:30,svg:'<text x="'+W/2+'" y="20" text-anchor="middle" font-size="14" font-style="italic" fill="#C0392B">(No title yet. Add one below.)</text>'};
+  var per=Math.max(14,Math.floor(W/8.2)),w=wrapLabel(t,per,2);
+  return {h:10+w.lines.length*18,svg:w.lines.map(function(l,i){return '<text x="'+W/2+'" y="'+(18+i*18)+'" text-anchor="middle" font-size="14.5" font-weight="700" fill="#0E1C42">'+esc(l)+'</text>';}).join('')};
+}
+function axisText(){var a=S.labels.axis.trim();return a;}
+function missingSvg(x,y,msg,anchor,rot){return '<text x="'+x+'" y="'+y+'" text-anchor="'+(anchor||'middle')+'" font-size="12" font-style="italic" fill="#C0392B"'+(rot?' transform="rotate(-90 '+x+' '+y+')"':'')+'>'+msg+'</text>';}
+function labSvg(x,y,txt,rot){return '<text x="'+x+'" y="'+y+'" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a2340"'+(rot?' transform="rotate(-90 '+x+' '+y+')"':'')+'>'+esc(txt)+'</text>';}
+function emptyHTML(msg){return '<div class="empty">'+msg+'</div>';}
+
+/* ---------- categorical stats ---------- */
+function catView(){
+  var cats=sortCats(getCats(),S.sort),counts=cats.map(function(c){return c.count;}),pt=percentsTenths(counts);
+  return {cats:cats,total:counts.reduce(function(a,b){return a+b;},0),pt:pt};
+}
+
+/* ---------- drawing: bar chart ---------- */
+function drawBar(W,anim){
+  var v=catView();
+  if(!v.cats.length||!v.total)return emptyHTML('No data yet. Add a category and give it a count.');
+  var T=svgTitle(W),mt=T.h+16,ml=52,mr=10,pw=W-ml-mr,ph=170,n=v.cats.length,slot0=pw/n,maxL=1;v.cats.forEach(function(c){maxL=Math.max(maxL,wrapLabel(c.name||"(unnamed)",Math.max(4,Math.floor(slot0/6.4)),3).lines.length);});var mb=maxL*13+34,H=mt+ph+mb;
+  var pct=S.valMode==='pct',vals=v.cats.map(function(c){return pct?c.count/v.total*100:c.count;}),maxV=Math.max.apply(null,vals);
+  var step=Math.max(1,niceStep(maxV,5)),yMax=Math.ceil(maxV/step-1e-9)*step,s='',slot=pw/n,bw=Math.min(slot*0.7,72),anyCut=false;
+  for(var t=0;t<=yMax+1e-9;t+=step){var y=mt+ph-t/yMax*ph;
+    s+='<line x1="'+ml+'" x2="'+(W-mr)+'" y1="'+y+'" y2="'+y+'" stroke="'+(t===0?'#0E1C42':'#D0D9E8')+'" stroke-width="'+(t===0?2:1)+'"/>';
+    s+='<text x="'+(ml-6)+'" y="'+(y+4)+'" text-anchor="end" font-size="11" fill="#1a2340">'+(pct?Math.round(t*100)/100+'%':Math.round(t*100)/100)+'</text>';}
+  s+='<line x1="'+ml+'" x2="'+ml+'" y1="'+mt+'" y2="'+(mt+ph)+'" stroke="#0E1C42" stroke-width="2"/>';
+  v.cats.forEach(function(c,i){
+    var cx=ml+slot*(i+.5),h=vals[i]/yMax*ph,y=mt+ph-h,lab=pct?fmtTenths(v.pt.adj[i])+'%':String(c.count);
+    s+='<rect class="bar" x="'+(cx-bw/2)+'" y="'+y+'" width="'+bw+'" height="'+Math.max(h,0)+'" fill="#0E1C42"><title>'+esc(c.name)+': '+c.count+' of '+v.total+'</title></rect>';
+    s+='<text x="'+cx+'" y="'+(y-4)+'" text-anchor="middle" font-size="12" font-weight="800" fill="#0E1C42">'+lab+'</text>';
+    var wl=wrapLabel(c.name||'(unnamed)',Math.max(4,Math.floor(slot/6.4)),3);if(wl.cut)anyCut=true;
+    wl.lines.forEach(function(l,j){s+='<text x="'+cx+'" y="'+(mt+ph+15+j*13)+'" text-anchor="middle" font-size="11" fill="#1a2340">'+esc(l)+'</text>';});});
+  var ax=axisText(),un=S.labels.unit.trim();
+  s+=ax?labSvg(ml+pw/2,H-6,ax):missingSvg(ml+pw/2,H-6,'(add an axis label)');
+  var yl=pct?'Percent of '+un:'Number of '+un;
+  s+=un?labSvg(13,mt+ph/2,yl,true):missingSvg(13,mt+ph/2,'(add a unit)','middle',true);
+  S.cutNote=anyCut;
+  return '<svg class="'+(anim?'anim':'')+'" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Bar chart with '+n+' bars. Total '+v.total+'.">'+T.svg+s+'</svg>'+(anyCut?'<p class="note">Long names are shortened on the chart. The table shows the full names.</p>':'');
+}
+
+/* ---------- drawing: circle graph ---------- */
+function arcPath(cx,cy,R,a0,a1){var x0=cx+R*Math.cos(a0),y0=cy+R*Math.sin(a0),x1=cx+R*Math.cos(a1),y1=cy+R*Math.sin(a1);return 'M'+cx+','+cy+' L'+x0+','+y0+' A'+R+','+R+' 0 '+((a1-a0)>Math.PI?1:0)+' 1 '+x1+','+y1+' Z';}
+function pieSlices(){var v=catView(),sl=[];v.cats.forEach(function(c,i){if(c.count>0)sl.push({name:c.name||'(unnamed)',count:c.count,t:v.pt.adj[i]});});return {v:v,sl:sl};}
+function drawPie(W,anim){
+  var P=pieSlices(),v=P.v,sl=P.sl;
+  if(!sl.length)return emptyHTML('No data yet. Add a category and give it a count.');
+  var H=236,T=svgTitle(W),lab=S.pieLabels,side=lab?100:12,R=Math.max(46,Math.min((W-2*side)/2,(H-T.h-24)/2)),cx=W/2,cy=T.h+(H-T.h)/2+2,s='',a=-Math.PI/2,total=v.total,lbls=[];
+  sl.forEach(function(x,i){
+    var da=x.count/total*2*Math.PI,a1=a+da,col=PALETTE[i%PALETTE.length];
+    s+=sl.length===1?'<circle cx="'+cx+'" cy="'+cy+'" r="'+R+'" fill="'+col+'" stroke="#fff" stroke-width="2"/>':'<path d="'+arcPath(cx,cy,R,a,a1)+'" fill="'+col+'" stroke="#fff" stroke-width="2"><title>'+esc(x.name)+': '+x.count+' of '+total+'</title></path>';
+    var mid=(a+a1)/2;
+    if(!lab){var bx=sl.length===1?cx:cx+R*0.68*Math.cos(mid),by=sl.length===1?cy:cy+R*0.68*Math.sin(mid);
+      s+='<circle cx="'+bx+'" cy="'+by+'" r="9" fill="#fff" stroke="#0E1C42"/><text x="'+bx+'" y="'+(by+4)+'" text-anchor="middle" font-size="11" font-weight="800" fill="#0E1C42">'+(i+1)+'</text>';}
+    else lbls.push({i:i,x:cx+(R+8)*Math.cos(mid),y:cy+(R+8)*Math.sin(mid)+4,right:Math.cos(mid)>=0,txt:wrapLabel(x.name,14,1).lines[0]+' '+(S.valMode==='pct'?fmtTenths(x.t)+'%':x.count)});
+    a=a1;});
+  [true,false].forEach(function(r){var g=lbls.filter(function(l){return l.right===r;}).sort(function(p,q){return p.y-q.y;});
+    for(var j=1;j<g.length;j++)if(g[j].y-g[j-1].y<14)g[j].y=g[j-1].y+14;
+    g.forEach(function(l){s+='<text x="'+(l.x+(r?2:-2))+'" y="'+l.y+'" text-anchor="'+(r?'start':'end')+'" font-size="11.5" font-weight="700" fill="#1a2340">'+esc(l.txt)+'</text>';});});
+  return '<svg class="'+(anim?'anim':'')+'" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Circle graph with '+sl.length+' slices. Total '+total+'.">'+T.svg+s+'</svg>';
+}
+function pieLegend(){
+  var sl=pieSlices().sl;if(!sl.length)return '';
+  return '<div class="legend" aria-label="Key">'+sl.map(function(x,i){return '<span><i style="background:'+PALETTE[i%PALETTE.length]+'"></i>'+(S.pieLabels?'':(i+1)+'. ')+esc(x.name)+'</span>';}).join('')+'</div>';
+}
+
+/* ---------- drawing: line plot ---------- */
+function dotStats(W){
+  var ms=getNums(),vs=byValue(ms),maxS=Math.max.apply(null,vs.map(function(e){return e.count;})),H=250,ph=H-64-60;
+  var rv=Math.max(2,Math.min(8,Math.floor((ph-6)/(2*maxS+0.0001)))),d=axisDomain(ms),ppu=(W-40)/(d.max-d.min),mg=Infinity;
+  for(var i=1;i<vs.length;i++)mg=Math.min(mg,(vs[i].v-vs[i-1].v)*ppu);
+  var r=Math.max(2,Math.min(rv,Math.floor((isFinite(mg)?mg:16)/2)+1));
+  return {ms:ms,vs:vs,maxS:maxS,r:r,rv:rv,d:d,overlap:mg<4,crowded:ms.length>40||rv<4||mg<4};
+}
+function drawDot(W,anim){
+  var D=dotStats(W),T=svgTitle(W),H=250,ml=20,mr=20,axisY=H-62,s='',d=D.d,sx=function(m){return ml+(m-d.min)/(d.max-d.min)*(W-ml-mr);},un=S.labels.unit.trim(),ax=axisText();
+  s+='<line x1="'+ml+'" x2="'+(W-mr)+'" y1="'+axisY+'" y2="'+axisY+'" stroke="#0E1C42" stroke-width="2"/>';
+  for(var t=d.min;t<=d.max;t+=d.step){s+='<line x1="'+sx(t)+'" x2="'+sx(t)+'" y1="'+axisY+'" y2="'+(axisY+6)+'" stroke="#0E1C42" stroke-width="2"/><text x="'+sx(t)+'" y="'+(axisY+20)+'" text-anchor="middle" font-size="11" fill="#1a2340">'+fmtMilli(t)+'</text>';}
+  D.vs.forEach(function(e){for(var j=0;j<e.count;j++)s+='<circle cx="'+sx(e.v)+'" cy="'+(axisY-1-D.r-j*(2*D.r+1))+'" r="'+D.r+'" fill="#0E1C42" stroke="#fff" stroke-width="0.8"><title>'+fmtMilli(e.v)+(un?' '+esc(un):'')+'</title></circle>';});
+  var xl=ax?ax+(un?' ('+un+')':''):'';
+  s+=ax?(un?labSvg(W/2,axisY+40,xl):'<text x="'+W/2+'" y="'+(axisY+40)+'" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a2340">'+esc(ax)+' <tspan font-style="italic" font-weight="400" fill="#C0392B">(add a unit)</tspan></text>'):missingSvg(W/2,axisY+40,'(add an axis label)');
+  s+='<text x="'+W/2+'" y="'+(axisY+56)+'" text-anchor="middle" font-size="11" fill="#6b7a99">Each dot = 1 '+esc(String(who()).replace(/s$/,''))+'</text>';
+  return '<svg class="'+(anim?'anim':'')+'" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Line plot of '+D.ms.length+' values from '+fmtMilli(Math.min.apply(null,D.ms))+' to '+fmtMilli(Math.max.apply(null,D.ms))+'.">'+T.svg+s+'</svg>';
+}
+
+/* ---------- stem and leaf ---------- */
+function stemState(){var ms=getNums(),o=leafOptions(ms),k=(S.leafK!==null&&o.indexOf(S.leafK)>=0)?S.leafK:defaultK(ms);return {ms:ms,opts:o,k:k,sl:stemLeaf(ms,k,S.split)};}
+var PLACE={'-3':'thousandths','-2':'hundredths','-1':'tenths','0':'ones','1':'tens','2':'hundreds','3':'thousands'};
+function titleHTML(){var t=S.labels.title.trim();return '<div class="ctitle">'+(t?esc(t):'<span class="missing">(No title yet. Add one below.)</span>')+'</div>';}
+function drawStem(){
+  var Z=stemState(),sl=Z.sl,un=S.labels.unit.trim(),ax=axisText();
+  if(sl.rows.length>60)return titleHTML()+emptyHTML('These numbers are too spread out for a stem-and-leaf plot at this leaf unit. Try a larger leaf unit.');
+  var h='<div class="'+'anim'+'">'+titleHTML()+'<div class="stemhead"><span class="stem">Stem ('+PLACE[Z.k+1]+')</span><span class="leaves">Leaf ('+PLACE[Z.k]+')</span></div>';
+  sl.rows.forEach(function(r){h+='<div class="srow"><span class="stem">'+r.label+'</span><span class="leaves">'+r.leaves.join(' ')+'</span></div>';});
+  h+='<div class="keyline">Key: '+sl.keyText+(un?' '+esc(un):'')+'</div>';
+  h+='<div class="caxis">'+(ax?esc(ax)+(un?' ('+esc(un)+')':' <span class="missing">(add a unit)</span>'):'<span class="missing">(add an axis label)</span>')+'</div></div>';
+  return h;
+}
+
+/* ---------- tables ---------- */
+function relNote(tenths,names){
+  if(!tenths)return '';
+  var pt=tenths;
+  if(pt.plainSum===1000)return '<p class="note">Each percent is rounded to 1 decimal place. The rounded percents add to exactly 100.0%.</p>';
+  var ch=[];pt.adj.forEach(function(a,i){if(a!==pt.plain[i])ch.push(names[i]);});
+  return '<p class="note">Each percent is rounded to 1 decimal place. Plain rounding adds up to '+fmtTenths(pt.plainSum)+'%, not 100%. So the percent for '+joinNames(ch)+' is changed by 0.1 (the one(s) with the most left over). Now they add to 100.0%.</p>';
+}
+function tableHTML(head,rows,tot,cap){
+  return (cap||'')+'<div class="tbl-wrap"><table>'+(cap?'':'')+'<thead><tr>'+head.map(function(x){return '<th scope="col">'+x+'</th>';}).join('')+'</tr></thead><tbody>'+rows.map(function(r){return '<tr>'+r.map(function(c,i){return i===0?'<td class="nm">'+c+'</td>':'<td>'+c+'</td>';}).join('')+'</tr>';}).join('')+'<tr class="tot">'+tot.map(function(c){return '<td>'+c+'</td>';}).join('')+'</tr></tbody></table></div>';
+}
+function numRows(){
+  var ms=getNums(),g=S.grp,ints=isIntData(ms),rows;
+  var useGroup=g.mode==='group'&&widthOptions(ms).indexOf(g.w)>=0;
+  if(useGroup){var w=g.w,s=Math.floor(Math.min.apply(null,ms)/w)*w;rows=binCounts(ms,s,w).map(function(b){return {label:groupLabel(b.lo,b.hi,ints),count:b.count};});}
+  else rows=byValue(ms).map(function(e){return {label:fmtMilli(e.v),count:e.count};});
+  return {rows:rows,group:useGroup,ints:ints,upTo:useGroup&&rows.some(function(r){return r.label.indexOf(' up to ')>0;})};
+}
+function dataTable(rel,caption){var cmp=!caption;
+  var un=S.labels.unit.trim(),ax=axisText(),h,rows,tot,notes='',head;
+  var capH=caption?'<div class="ctitle">'+(S.labels.title.trim()?esc(S.labels.title.trim()):'<span class="missing">(No title yet. Add one below.)</span>')+'</div>':'<h3>Data table</h3>';
+  if(S.fam==='cat'){
+    var v=catView();
+    if(!v.cats.length||!v.total)return capH+emptyHTML('No data yet.');
+    var c1=ax?esc(ax):'<span style="color:#FDF3E3">(add axis label)</span>',c2='Frequency'+(cmp?'':un?' (number of '+esc(un)+')':' <i>(add a unit)</i>');
+    head=[c1,c2];if(rel)head.push(cmp?'Fraction':'Relative frequency (fraction)','Percent');
+    rows=v.cats.map(function(c,i){var r=[esc(c.name||'(unnamed)'),c.count];if(rel)r.push(c.count+'/'+v.total,fmtTenths(v.pt.adj[i])+'%');return r;});
+    tot=['Total',v.total];if(rel)tot.push(v.total+'/'+v.total,'100.0%');
+    notes=rel?relNote(v.pt,v.cats.map(function(c){return c.name;})):'';
+    return capH+tableHTML(head,rows,tot)+notes;
+  }
+  var N=numRows(),counts=N.rows.map(function(r){return r.count;}),total=counts.reduce(function(a,b){return a+b;},0),pt=percentsTenths(counts);
+  head=[cmp?(N.group?'Group':'Value')+(un?' ('+esc(un)+')':''):(ax?esc(ax):'(add axis label)')+(un?' ('+esc(un)+')':''),'Frequency'];if(rel)head.push(cmp?'Fraction':'Relative frequency (fraction)','Percent');
+  rows=N.rows.map(function(r,i){var x=[esc(r.label),r.count];if(rel)x.push(r.count+'/'+total,fmtTenths(pt.adj[i])+'%');return x;});
+  tot=['Total',total];if(rel)tot.push(total+'/'+total,'100.0%');
+  if(N.upTo)notes+='<p class="note">Each group includes its first number but not its last number.</p>';
+  if(rel)notes+=relNote(pt,N.rows.map(function(r){return r.label;}));
+  return capH+tableHTML(head,rows,tot)+notes;
+}
+
+/* ---------- info (shows / hides) ---------- */
+function topLow(v){
+  var mx=Math.max.apply(null,v.cats.map(function(c){return c.count;})),mn=Math.min.apply(null,v.cats.map(function(c){return c.count;}));
+  return {mx:mx,mn:mn,top:v.cats.filter(function(c){return c.count===mx;}).map(function(c){return c.name||'(unnamed)';}),low:v.cats.filter(function(c){return c.count===mn;}).map(function(c){return c.name||'(unnamed)';})};
+}
+function info(){
+  var sh='',hi='',wn=[],disp=S.fam==='cat'?S.catDisp:S.numDisp,w=who();
+  if(S.fam==='cat'){
+    var v=catView();
+    if(!v.cats.length||!v.total)return {sh:'Nothing yet. Add categories with counts and every display will fill in.',hi:'Nothing yet.',wn:[]};
+    var tl=topLow(v),topPct=fmtTenths(v.pt.adj[v.cats.findIndex(function(c){return c.count===tl.mx;})]),n=v.cats.length;
+    if(disp==='bar'){
+      sh=n===1?'There is only one category, so there is nothing to compare yet.':(tl.mx===tl.mn?'All '+n+' bars are the same height, so the categories tie.':'You can compare sizes fast. '+joinNames(tl.top)+' is tallest ('+tl.mx+') and '+joinNames(tl.low)+' is shortest ('+tl.mn+').');
+      hi=S.valMode==='pct'?'The labels are percents, so the real counts and the total ('+v.total+' '+esc(w)+') are hidden.':'It does not show shares of the whole. '+joinNames([tl.top[0]])+' is '+topPct+'% of '+v.total+' '+esc(w)+', but you have to work that out.';
+    }else if(disp==='pie'){
+      var P=pieSlices(),ns=P.sl.length;
+      sh=ns===1?'One slice fills the whole circle. A circle graph with one slice cannot compare anything.':'Each slice is a share of all '+v.total+' '+esc(w)+'. '+joinNames([tl.top[0]])+' takes the biggest share ('+topPct+'%).';
+      hi=!S.pieLabels?'With labels off, exact counts and percents are hidden. You only compare slices by eye.':(S.valMode==='pct'?'Percent labels hide the actual counts and the total.':'Counts are labeled, but the shares of the whole must be judged by eye.');
+      if(ns>6)wn.push(ns+' slices is too many for a circle graph. Small slices are hard to compare. A bar chart is easier to read.');
+      var small=P.sl.filter(function(x){return x.t<50;}).map(function(x){return x.name;});
+      if(ns>1&&small.length)wn.push('Slices under 5% ('+joinNames(small)+') are very thin and hard to see.');
+    }else if(disp==='freq'){
+      sh='The exact count for every category, and the total ('+v.total+'). Nothing is rounded.';
+      hi='You have to scan the numbers to compare sizes. It does not show shares of the whole or the overall shape.';
+    }else{
+      sh='Each category as a share of the whole. The percents add to 100.0%.';
+      hi='Percents alone hide how big the group is. 50% could be 2 of 4 or 20 of 40. Here the total is '+v.total+', shown in the fractions.';
+    }
+    if(new Set(v.cats.map(function(c){return c.name.trim().toLowerCase();})).size<v.cats.length)wn.push('Two categories share a name. Give each category its own name.');
+  }else{
+    var ms=getNums(),n2=ms.length,vs=byValue(ms),mn=Math.min.apply(null,ms),mx=Math.max.apply(null,ms),mxc=Math.max.apply(null,vs.map(function(e){return e.count;})),modes=vs.filter(function(e){return e.count===mxc;}),un=S.labels.unit.trim(),u=un?' '+esc(un):'',gp=gapInfo(ms);
+    var modeTxt=mxc===1?'No value repeats.':'Most common: '+modes.slice(0,3).map(function(e){return fmtMilli(e.v);}).join(', ')+' ('+mxc+' times'+(modes.length>1?' each':'')+').';
+    if(disp==='dot'){
+      var D=dotStats(Math.max(260,$('chartHost').clientWidth||600));
+      sh=(mn===mx?'All '+n2+' values are '+fmtMilli(mn)+u+', so there is one tall stack. ':'Clusters, gaps, and spread. Values run from '+fmtMilli(mn)+' to '+fmtMilli(mx)+u+' (range '+fmtMilli(mx-mn)+'). ')+modeTxt+(gp?' There is a gap between '+fmtMilli(gp.from)+' and '+fmtMilli(gp.to)+'.':'');
+      hi='You read each value off the axis, so close values can look the same. It does not keep the order the values were collected.';
+      if(D.crowded)wn.push('This line plot is crowded: '+(D.overlap?'dots overlap':(D.rv<4?'the stacks are tall':'there are '+n2+' values'))+'. A stem-and-leaf plot or a table may be easier to read.');
+    }else if(disp==='stem'){
+      var Z=stemState();
+      sh='Every actual value is in the plot ('+n2+' leaves for '+n2+' values), and the rows still show the shape.'+(gp?' Look for the gap between '+fmtMilli(gp.from)+' and '+fmtMilli(gp.to)+'.':'');
+      hi=Z.sl.lossy?'With this leaf unit, '+Z.sl.lossy+' value'+(Z.sl.lossy>1?'s are':' is')+' cut short, so they are no longer exact. Pick a smaller leaf unit to see every digit.':'It needs a key to read, and it does not keep the order the values were collected.';
+      if(Z.k<0)wn.push('These values have decimals. The leaf is the '+PLACE[Z.k]+' digit. Read the key.');
+      if(Z.sl.rows.length>25)wn.push('There are '+Z.sl.rows.length+' rows. Try a larger leaf unit or one line per stem.');
+    }else{
+      var N=numRows();
+      sh=N.group?'How many values fall in each group ('+N.rows.length+' groups, '+n2+' values in total).':'How many times each value happens ('+N.rows.length+' different values, '+n2+' in total).';
+      hi=N.group?'The exact values inside each group. A group of '+Math.max.apply(null,N.rows.map(function(r){return r.count;}))+' could hold many different numbers.':'The shape is hard to see in a column of numbers. A line plot shows clusters faster.';
+    }
+  }
+  return {sh:sh,hi:hi,wn:wn};
+}
+
+/* ---------- checklist ---------- */
+function checklist(){
+  var disp=S.fam==='cat'?S.catDisp:S.numDisp,L=S.labels,items=[];
+  var table=disp==='freq'||disp==='rel'||(S.fam==='num'&&disp==='freq');
+  items.push({t:'Title',ok:!!L.title.trim()});
+  if(S.fam==='cat'&&disp==='pie')items.push({t:'Axis labels',na:'not needed: slices are labeled'});
+  else items.push({t:table?'Column labels':'Axis labels',ok:!!L.axis.trim()});
+  items.push({t:'Units',ok:!!L.unit.trim()});
+  var key=(S.fam==='cat'&&disp==='pie')?'a legend names every slice':(S.fam==='num'&&disp==='stem')?'the key line is shown':(S.fam==='num'&&disp==='dot')?'"Each dot = 1" is shown':null;
+  items.push(key?{t:'Key',ok:true,note:key}:{t:'Key',na:'not needed here'});
+  return items;
+}
+function renderCheck(){
+  var it=checklist(),all=true;
+  $('checkList').innerHTML=it.map(function(i){
+    if(i.na)return '<li class="na" aria-label="'+i.t+': not needed"><span class="sym">&ndash;</span>'+i.t+' ('+(i.na==='not needed here'?i.na:'not needed: '+i.na.replace('not needed: ',''))+')</li>';
+    if(!i.ok)all=false;
+    return '<li class="'+(i.ok?'ok':'no')+'" aria-label="'+i.t+': '+(i.ok?'done':'missing')+'"><span class="sym">'+(i.ok?'&#10003;':'&#10007;')+'</span>'+i.t+(i.ok?' (done'+(i.note?': '+i.note:'')+')':' (missing)')+'</li>';}).join('');
+  $('doneMsg').innerHTML=all?'<div class="done">&#10003; Fully labeled. Nice work.</div>':'';
+}
+
+/* ---------- controls ---------- */
+function btn(fk,act,v,text,on,aria,dis){return '<button class="btn'+(on?' on':'')+'" data-fk="'+fk+'" data-act="'+act+'" data-v="'+v+'" aria-pressed="'+(!!on)+'" aria-label="'+esc(aria||text)+'"'+(dis?' disabled':'')+'>'+text+'</button>';}
+function renderTabs(){
+  $('famRow').innerHTML=btn('f1','fam','cat','Categorical data',S.fam==='cat','Categorical data (words)')+btn('f2','fam','num','Numerical data',S.fam==='num','Numerical data (numbers)');
+  var sets=S.fam==='cat'?CAT_SETS:NUM_SETS,idx=S.fam==='cat'?S.catIdx:S.numIdx;
+  $('dsRow').innerHTML='<span class="lbl">Dataset</span>'+sets.map(function(d,i){return btn('d'+i,'ds',i,d.chip,idx===i,'Dataset: '+d.chip+' (made-up)').replace('class="btn','class="btn chip');}).join('')+btn('d3','ds',3,'Enter your own',idx===3,'Enter your own data').replace('class="btn','class="btn chip');
+  var disp=S.fam==='cat'?[['bar','Bar chart'],['pie','Circle graph'],['freq','Frequency table'],['rel','Relative frequency table']]:[['dot','Line plot'],['stem','Stem-and-leaf plot'],['freq','Frequency table']];
+  var cur=S.fam==='cat'?S.catDisp:S.numDisp;
+  $('dispRow').innerHTML='<span class="lbl">Display</span>'+disp.map(function(d){return btn('p'+d[0],'disp',d[0],d[1],cur===d[0]);}).join('');
+}
+function renderControls(){
+  var h='',disp=S.fam==='cat'?S.catDisp:S.numDisp;
+  function grp(l,x){return '<span class="lbl">'+l+'</span>'+x;}
+  if(S.fam==='cat'){
+    var sortC=grp('Order',btn('s1','sort','orig','Original order',S.sort==='orig')+btn('s2','sort','desc','Largest first',S.sort==='desc'));
+    var valC=grp('Show',btn('v1','val','count','Counts',S.valMode==='count')+btn('v2','val','pct','Percents',S.valMode==='pct'));
+    if(disp==='bar')h=sortC+valC;
+    else if(disp==='pie')h=grp('Slices',btn('l1','plab','1','On',S.pieLabels)+btn('l2','plab','0','Off',!S.pieLabels))+valC+sortC;
+    else h=sortC;
+  }else if(disp==='stem'){
+    var Z=stemState();
+    h=grp('Stems',btn('t1','split','0','One line per stem',!S.split)+btn('t2','split','1','Two lines per stem',S.split))+grp('Leaf unit',Z.opts.map(function(k){return btn('k'+k,'leaf',k,fmtMilli(Math.pow(10,k+3)),Z.k===k,'Leaf unit '+fmtMilli(Math.pow(10,k+3)));}).join(''))+(Z.opts.length===1?'<span class="note">Only one leaf unit fits this data.</span>':'');
+  }else if(disp==='freq'){
+    var ms=getNums(),wo=widthOptions(ms),useG=S.grp.mode==='group'&&wo.indexOf(S.grp.w)>=0;
+    h=grp('Rows',btn('g1','gmode','value','Each value',!useG)+btn('g2','gmode','group','Groups',useG,'Groups',!wo.length));
+    if(useG)h+=grp('Group width',wo.map(function(w){return btn('w'+w,'gw',w,fmtMilli(w),S.grp.w===w,'Group width '+fmtMilli(w));}).join(''));
+    h+=btn('rr','rel','1','Show relative frequency',S.showRel);
+  }
+  $('ctlRow').innerHTML=h;$('ctlRow').style.display=h?'':'none';
+}
+function renderEditor(){
+  var h='';
+  if(S.fam==='cat'&&S.catIdx===3){
+    h='<div class="card editor"><h3>Your categories (made-up example)</h3>'+S.ownCats.map(function(c,i){
+      return '<div class="erow"><input type="text" maxlength="40" value="'+esc(c.name)+'" data-act="cname" data-i="'+i+'" aria-label="Name of category '+(i+1)+'">'+
+      '<button class="btn small" data-act="dec" data-i="'+i+'" data-fk="dec'+i+'" aria-label="Fewer in category '+(i+1)+'">&minus;</button><span class="cnt" id="cnt'+i+'" aria-live="polite">'+c.count+'</span>'+
+      '<button class="btn small" data-act="inc" data-i="'+i+'" data-fk="inc'+i+'" aria-label="More in category '+(i+1)+'">+</button>'+
+      '<button class="btn small" data-act="rm" data-i="'+i+'" data-fk="rm'+i+'" aria-label="Remove category '+(i+1)+'">&times;</button></div>';}).join('')+
+      '<button class="btn" data-act="add" data-fk="add" aria-label="Add a category"'+(S.ownCats.length>=10?' disabled':'')+'>+ Add category</button><div class="msg'+(S.msgErr?' err':'')+'" id="eMsg" role="status">'+esc(S.msg)+'</div></div>';
+  }else if(S.fam==='num'&&S.numIdx===3){
+    h='<div class="card editor"><h3>Your numbers (made-up example)</h3><label class="fld" for="numText">Type up to 60 numbers. Use spaces or commas. Decimals and negatives are fine.</label><textarea id="numText" aria-label="Your numbers">'+esc(S.ownText)+'</textarea><div class="erow" style="margin-top:4px"><button class="btn" data-act="apply" data-fk="apply" aria-label="Show my numbers">Show my numbers</button></div><div class="msg'+(S.msgErr?' err':'')+'" id="eMsg" role="status">'+esc(S.msg)+'</div></div>';
+  }
+  $('editorHost').innerHTML=h;
+}
+function renderLabelInputs(){$('fTitle').value=S.labels.title;$('fAxis').value=S.labels.axis;$('fUnit').value=S.labels.unit;}
+
+/* ---------- main render ---------- */
+function render(anim){
+  var a=document.activeElement,fk=a&&a.dataset?a.dataset.fk:null;
+  renderTabs();renderControls();
+  var disp=S.fam==='cat'?S.catDisp:S.numDisp,W=Math.max(260,Math.floor($('chartHost').clientWidth||600)),tableMain=disp==='freq'||disp==='rel',ch='';
+  $('legendHost').innerHTML='';
+  if(tableMain){
+    ch=dataTable(S.fam==='cat'?disp==='rel':S.showRel,true);
+    var f='';
+    if(S.fam==='cat'){var v=catView();if(v.total){var tl=topLow(v);f='<h3>Quick facts</h3><div class="facts">Total: <b>'+v.total+'</b> '+esc(who())+'<br>Categories: <b>'+v.cats.length+'</b><br>Largest: <b>'+esc(joinNames(tl.top).replace(/"/g,''))+'</b> ('+tl.mx+')<br>Smallest: <b>'+esc(joinNames(tl.low).replace(/"/g,''))+'</b> ('+tl.mn+')</div>';}else f='<h3>Quick facts</h3><div class="facts">No data yet.</div>';}
+    else{var ms=getNums(),vs=byValue(ms);f='<h3>Quick facts</h3><div class="facts">Values: <b>'+ms.length+'</b><br>Different values: <b>'+vs.length+'</b><br>Smallest: <b>'+fmtMilli(Math.min.apply(null,ms))+'</b><br>Largest: <b>'+fmtMilli(Math.max.apply(null,ms))+'</b><br>Range: <b>'+fmtMilli(Math.max.apply(null,ms)-Math.min.apply(null,ms))+'</b></div>';}
+    $('sideCard').innerHTML=f;
+    $('chartHost').innerHTML='<div class="'+(anim?'anim':'')+'">'+ch+'</div>';
+  }else{
+    if(S.fam==='cat')ch=disp==='bar'?drawBar(W,anim):drawPie(W,anim);else ch=disp==='dot'?drawDot(W,anim):drawStem();
+    $('chartHost').innerHTML=ch;
+    if(S.fam==='cat'&&disp==='pie')$('legendHost').innerHTML=pieLegend();
+    $('sideCard').innerHTML=dataTable(true,false);
+  }
+  var I=info();
+  $('infoCard').innerHTML='<div class="panel2 shows"><b class="h">What this display shows</b>'+I.sh+'</div><div class="panel2 hides"><b class="h">What it hides</b>'+I.hi+'</div>'+I.wn.map(function(x){return '<div class="panel2 warn">'+x+'</div>';}).join('');
+  renderCheck();
+  if(fk){var el=document.querySelector('[data-fk="'+fk+'"]');if(el&&el!==document.activeElement&&!el.disabled)el.focus();}
+}
+
+/* ---------- events ---------- */
+function setFam(f){S.fam=f;S.msg='';S.msgErr=false;resetLabels();renderEditor();renderLabelInputs();}
+function setDataset(i){if(S.fam==='cat')S.catIdx=i;else S.numIdx=i;S.msg='';S.msgErr=false;resetLabels();if(S.fam==='num')resetNumSettings();renderEditor();renderLabelInputs();}
+function ownTotal(){return S.ownCats.reduce(function(a,c){return a+c.count;},0);}
+document.addEventListener('click',function(e){
+  var b=e.target.closest('[data-act]');if(!b||b.tagName==='INPUT')return;
+  var act=b.dataset.act,v=b.dataset.v,i=+b.dataset.i,anim=true;
+  if(act==='fam'){if(S.fam!==v)setFam(v);}
+  else if(act==='ds')setDataset(+v);
+  else if(act==='disp'){if(S.fam==='cat')S.catDisp=v;else S.numDisp=v;}
+  else if(act==='sort')S.sort=v;
+  else if(act==='val')S.valMode=v;
+  else if(act==='plab')S.pieLabels=v==='1';
+  else if(act==='split')S.split=v==='1';
+  else if(act==='leaf')S.leafK=+v;
+  else if(act==='gmode'){S.grp.mode=v;if(v==='group'&&!S.grp.w)S.grp.w=defaultWidth(getNums());}
+  else if(act==='gw')S.grp.w=+v;
+  else if(act==='rel')S.showRel=!S.showRel;
+  else if(act==='inc'){if(ownTotal()>=60){S.msg='The total can be at most 60.';S.msgErr=true;}else if(S.ownCats[i].count>=30){S.msg='A category can have at most 30.';S.msgErr=true;}else{S.ownCats[i].count++;S.msg='';S.msgErr=false;}$('cnt'+i).textContent=S.ownCats[i].count;$('eMsg').textContent=S.msg;$('eMsg').className='msg'+(S.msgErr?' err':'');anim=false;}
+  else if(act==='dec'){if(S.ownCats[i].count>0)S.ownCats[i].count--;S.msg='';S.msgErr=false;$('cnt'+i).textContent=S.ownCats[i].count;$('eMsg').textContent='';anim=false;}
+  else if(act==='rm'){S.ownCats.splice(i,1);S.msg='';S.msgErr=false;renderEditor();var f=document.querySelector('[data-fk="add"]');if(f)f.focus();}
+  else if(act==='add'){if(S.ownCats.length<10){S.ownCats.push({name:'Category '+(S.ownCats.length+1),count:1});S.msg='';S.msgErr=false;renderEditor();var inp=document.querySelectorAll('[data-act="cname"]');inp[inp.length-1].focus();inp[inp.length-1].select();}}
+  else if(act==='apply'){
+    var r=parseNumbers($('numText').value);
+    if(!r.ok){S.msg=r.error;S.msgErr=true;$('eMsg').textContent=r.error;$('eMsg').className='msg err';return;}
+    S.ownNums=r.values;S.ownText=$('numText').value;S.msg='Showing '+r.values.length+' number'+(r.values.length>1?'s':'')+'.';S.msgErr=false;resetNumSettings();$('eMsg').textContent=S.msg;$('eMsg').className='msg';}
+  render(anim);
+});
+document.addEventListener('input',function(e){
+  var t=e.target;
+  if(t.dataset&&t.dataset.act==='cname'){S.ownCats[+t.dataset.i].name=t.value;render(false);}
+  else if(t.id==='fTitle'){S.labels.title=t.value;render(false);}
+  else if(t.id==='fAxis'){S.labels.axis=t.value;render(false);}
+  else if(t.id==='fUnit'){S.labels.unit=t.value;render(false);}
+});
+$('resetBtn').addEventListener('click',function(){initState();renderEditor();renderLabelInputs();render(true);});
+if(window.ResizeObserver){var lastW=0;new ResizeObserver(function(){var w=$('chartHost').clientWidth;if(Math.abs(w-lastW)>2){lastW=w;render(false);}}).observe($('chartHost'));}
+initState();renderEditor();renderLabelInputs();render(false);
+</script>
+</body>
+</html>
