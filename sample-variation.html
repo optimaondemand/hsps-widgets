@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sample Variation — Many Samples, Many Estimates</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 12px; font-size: 14px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 3px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .tabs { display: flex; background: #fff; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
+  .tab { flex: 1; padding: 9px 8px; border: none; background: transparent; font: inherit; font-size: 0.82rem; font-weight: 700; color: #0E1C42; cursor: pointer; }
+  .tab[aria-selected=true] { background: #0E1C42; color: #fff; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+  .panel h2 { font-size: 0.74rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 8px; }
+  .field { flex: 1; min-width: 150px; font-size: 0.78rem; font-weight: 700; color: #0E1C42; }
+  .field select, .field input[type=number] { display: block; width: 100%; margin-top: 3px; padding: 6px; border: 2px solid #D0D9E8; border-radius: 8px; font: inherit; font-size: 0.88rem; color: #1a2340; background: #fff; }
+  .field input[type=range] { display: block; width: 100%; margin-top: 3px; accent-color: #0E1C42; }
+  .field .ro { color: #C7922C; font-weight: 900; }
+  button:focus-visible, select:focus-visible, input:focus-visible, .tab:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { padding: 8px 12px; border: none; border-radius: 8px; font: inherit; font-size: 0.82rem; font-weight: 700; cursor: pointer; background: #0E1C42; color: #fff; }
+  .btn:hover { background: #1a2f63; }
+  .btn.gold { background: #C7922C; } .btn.gold:hover { background: #a87820; }
+  .btn.ghost { background: #fff; color: #0E1C42; border: 2px solid #0E1C42; }
+  .btn.red { background: #C0392B; } .btn.red:hover { background: #96281c; }
+  .btn:active { transform: scale(0.97); }
+  svg { display: block; width: 100%; height: auto; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.75rem; color: #6b7a99; margin-top: 4px; align-items: center; }
+  .legend svg { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; margin-right: 3px; }
+  .big { background: #EEF1F8; border-left: 5px solid #C7922C; border-radius: 8px; padding: 8px 12px; margin-top: 8px; font-size: 0.9rem; }
+  .big b { font-size: 1.05rem; color: #0E1C42; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .stat { background: #EEF1F8; border-radius: 8px; padding: 6px 8px; }
+  .stat .l { font-size: 0.68rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat .v { font-size: 1.05rem; font-weight: 900; color: #0E1C42; }
+  .gold { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 10px; padding: 9px 12px; font-size: 0.82rem; line-height: 1.5; margin-bottom: 10px; }
+  .blue { background: #E8F6FB; border-radius: 10px; padding: 9px 12px; font-size: 0.82rem; line-height: 1.5; margin-top: 8px; }
+  .blue ul { margin: 4px 0 0 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.78rem; margin-top: 6px; }
+  th, td { border-bottom: 1px solid #D0D9E8; padding: 4px 5px; text-align: center; }
+  th { color: #6b7a99; font-size: 0.7rem; text-transform: uppercase; }
+  .muted { color: #6b7a99; font-size: 0.78rem; }
+  .hidden { display: none; }
+  .verdict { border-radius: 8px; padding: 9px 12px; border-left: 5px solid; font-size: 0.86rem; line-height: 1.5; margin-top: 8px; }
+  .verdict.unusual { background: #fdf0ee; border-color: #C0392B; }
+  .verdict.common { background: #F8FAFD; border-color: #0E1C42; }
+  .two { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .two > div { flex: 1; min-width: 200px; background: #F8FAFD; border: 1px solid #D0D9E8; border-radius: 8px; padding: 8px 10px; font-size: 0.8rem; line-height: 1.5; }
+  .two b { color: #0E1C42; }
+  @media (max-width: 480px) { .stats { grid-template-columns: repeat(2, 1fr); } .tab { font-size: 0.74rem; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Sample Variation</h1>
+  <p class="subtitle">All scenarios are made up and simulated by your browser. Nothing here is real data.</p>
+
+  <div class="tabs" role="tablist" aria-label="Choose an activity">
+    <button class="tab" role="tab" id="tab1" aria-selected="true" aria-controls="mode1" type="button">Many samples, many estimates</button>
+    <button class="tab" role="tab" id="tab2" aria-selected="false" aria-controls="mode2" type="button">Is the model consistent with the data?</button>
+  </div>
+
+  <!-- ========== MODE 1 ========== -->
+  <div id="mode1" role="tabpanel" aria-labelledby="tab1">
+    <div class="panel">
+      <h2>1. Pick a population and a sample size</h2>
+      <div class="row">
+        <label class="field">Scenario
+          <select id="scen"></select>
+        </label>
+        <label class="field hidden" id="customWrap">My own true percent: <span class="ro" id="customRead">50%</span>
+          <input type="range" id="customP" min="5" max="95" step="1" value="50">
+        </label>
+        <label class="field">Sample size n: <span class="ro" id="nRead">50</span>
+          <input type="range" id="nSlider" min="10" max="400" step="1" value="50">
+        </label>
+      </div>
+      <div class="btns">
+        <button class="btn gold" id="b1" type="button">Draw one sample</button>
+        <button class="btn" id="b10" type="button">Draw 10</button>
+        <button class="btn" id="b100" type="button">Draw 100</button>
+        <button class="btn" id="b1000" type="button">Draw 1000</button>
+        <button class="btn ghost" id="bTruth" type="button" aria-pressed="false">Show the truth</button>
+        <button class="btn red" id="bClear" type="button">Clear</button>
+      </div>
+      <p class="muted" style="margin-top:6px">Changing the scenario or n clears the samples so you never mix different sample sizes.</p>
+    </div>
+
+    <div class="panel">
+      <h2>2. The latest sample</h2>
+      <div id="dotBox"></div>
+      <div class="legend" id="dotLegend">
+        <span><svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="#0E1C42"/></svg>Yes (filled circle)</span>
+        <span><svg viewBox="0 0 14 14" aria-hidden="true"><rect x="2.5" y="2.5" width="9" height="9" fill="#fff" stroke="#C7922C" stroke-width="2"/></svg>No (hollow square)</span>
+      </div>
+      <div class="big" id="oneRead" aria-live="polite">Press &ldquo;Draw one sample&rdquo; to ask n people (or seeds) and see the sample proportion.</div>
+    </div>
+
+    <div class="panel">
+      <h2>3. Every sample proportion so far</h2>
+      <div id="histBox"></div>
+      <div class="legend" id="histLegend"></div>
+      <div class="stats" id="stats" style="margin-top:8px" aria-live="polite"></div>
+      <p class="muted" style="margin-top:6px">Typical swing is the standard deviation of the estimates (sample version, divided by one less than the number of samples).</p>
+    </div>
+
+    <div class="panel">
+      <h2>4. What to notice</h2>
+      <div class="blue" id="notice" aria-live="polite"></div>
+      <div class="gold" style="margin:8px 0 0 0"><b>Honest note.</b> One sample can miss the true value just by chance, even when nobody did anything wrong and the sampling is completely fair. That is not bias. It is sampling variation, and it is exactly what the spread above is showing.</div>
+    </div>
+
+    <div class="panel">
+      <h2>5. Compare sample sizes</h2>
+      <div class="btns"><button class="btn gold" id="bCompare" type="button">Compare sample sizes</button></div>
+      <p class="muted" style="margin-top:6px">Draws 500 samples each at n = 25, 100 and 400 from the current population. This also reveals the truth, because the comparison needs it.</p>
+      <div id="cmpBox"></div>
+    </div>
+  </div>
+
+  <!-- ========== MODE 2 ========== -->
+  <div id="mode2" role="tabpanel" aria-labelledby="tab2" class="hidden">
+    <div class="gold"><b>The question.</b> Someone claims a chance process works a certain way. You have one result. If the claim were true, how often would chance alone give a result this far from what we expect? We simulate 1000 runs to find out. This is a judgment about consistency, not a proof.</div>
+    <div class="panel">
+      <h2>1. The claimed model</h2>
+      <div class="row">
+        <label class="field">Claim
+          <select id="claim"></select>
+        </label>
+        <label class="field hidden" id="claimPWrap">Claimed chance of success (%)
+          <input type="number" id="claimP" min="1" max="99" step="1" value="50">
+        </label>
+        <label class="field">Preset result
+          <select id="preset"></select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="field">Number of trials n (1 to 500)
+          <input type="number" id="m2n" min="1" max="500" step="1" value="50">
+        </label>
+        <label class="field">Observed count of successes
+          <input type="number" id="m2k" min="0" max="500" step="1" value="36">
+        </label>
+        <label class="field">Rule of thumb: unusual if fewer than <span class="ro" id="cutRead">5</span> in 100 runs
+          <input type="range" id="cut" min="1" max="20" step="1" value="5">
+        </label>
+      </div>
+      <div class="btns">
+        <button class="btn gold" id="bSim" type="button">Simulate 1000 runs again</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>2. 1000 simulated runs under the claim</h2>
+      <div id="m2Hist"></div>
+      <div class="legend" id="m2Legend"></div>
+      <div class="big" id="m2Result" aria-live="polite"></div>
+      <div class="verdict" id="m2Verdict" aria-live="polite"></div>
+    </div>
+    <div class="panel">
+      <h2>3. Sticking with the model or doubting it</h2>
+      <div class="two">
+        <div><b>Sticking with the model.</b> If the result is not unusual under the claim, chance alone could easily have produced it. We have no good reason to drop the claim. That does not prove the claim is right, because other models could fit the data too.</div>
+        <div><b>Doubting the model.</b> If the result is unusual under the claim, either we saw a rare stroke of luck or the claim is off. The rarer the result, the more reason to doubt. It still does not prove the claim wrong, since rare things do happen.</div>
+      </div>
+      <p class="muted" style="margin-top:8px">&ldquo;At least this far&rdquo; means: the distance between a run&rsquo;s count and the expected count (n times the claimed chance) is the same as, or bigger than, the distance for your observed count, on either side. The cutoff is a rule of thumb you can change, not a law.</p>
+    </div>
+  </div>
+
+  <div style="text-align:center;margin:4px 0 8px 0"><button class="btn ghost" id="bReset" type="button">Reset everything</button></div>
+</div>
+
+<script>
+/*PURE-START*/
+function binomDraw(n, p) { let k = 0; for (let i = 0; i < n; i++) if (Math.random() < p) k++; return k; }
+function drawProportions(count, n, p) { const a = []; for (let i = 0; i < count; i++) a.push(binomDraw(n, p) / n); return a; }
+function summarize(a) {
+  const m = a.length; if (!m) return null;
+  let s = 0, mn = Infinity, mx = -Infinity;
+  for (const x of a) { s += x; if (x < mn) mn = x; if (x > mx) mx = x; }
+  const mean = s / m; let ss = 0;
+  for (const x of a) ss += (x - mean) * (x - mean);
+  return { count: m, mean: mean, sd: m > 1 ? Math.sqrt(ss / (m - 1)) : 0, min: mn, max: mx };
+}
+function shareWithin(a, p, tol) {
+  if (!a.length) return null; let c = 0;
+  for (const x of a) if (Math.abs(x - p) <= tol + 1e-9) c++;
+  return c / a.length;
+}
+function theorySD(p, n) { return Math.sqrt(p * (1 - p) / n); }
+function isFar(k, obs, n, p) { return Math.abs(k - n * p) >= Math.abs(obs - n * p) - 1e-9; }
+function farCount(results, obs, n, p) { let c = 0; for (const k of results) if (isFar(k, obs, n, p)) c++; return c; }
+function exactFarProb(n, p, obs) {
+  const lf = [0]; for (let i = 1; i <= n; i++) lf.push(lf[i - 1] + Math.log(i));
+  let tot = 0;
+  for (let j = 0; j <= n; j++) {
+    if (!isFar(j, obs, n, p)) continue;
+    tot += Math.exp(lf[n] - lf[j] - lf[n - j] + (j ? j * Math.log(p) : 0) + (n - j ? (n - j) * Math.log(1 - p) : 0));
+  }
+  return tot;
+}
+/*PURE-END*/
+
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const SCEN = [
+  { name: 'Students who walk to school (made up)', p: 0.40, yes: 'walks', unit: 'students' },
+  { name: 'Seeds that sprout (made up)', p: 0.70, yes: 'sprouts', unit: 'seeds' },
+  { name: 'Voters who favor a park (made up)', p: 0.55, yes: 'favors the park', unit: 'voters' },
+  { name: 'My own true percent', p: null, yes: 'yes', unit: 'individuals' }
+];
+let est = [];            // sample proportions
+let lastSample = null;   // {k, n}
+let revealed = false;
+let cmp = null;          // {p, rows:[{n, vals, s, th}]}
+
+function pct(x, d) { return (x * 100).toFixed(d === undefined ? 1 : d) + '%'; }
+function curScen() { return SCEN[$('scen').selectedIndex]; }
+function trueP() { const s = curScen(); return s.p === null ? parseInt($('customP').value, 10) / 100 : s.p; }
+function curN() { return parseInt($('nSlider').value, 10); }
+
+/* ---------- Mode 1 ---------- */
+function resetSamples(keepCmp) {
+  est = []; lastSample = null;
+  revealed = curScen().p === null;
+  $('bTruth').setAttribute('aria-pressed', revealed ? 'true' : 'false');
+  if (!keepCmp) cmp = null;
+  render1();
+}
+function addSamples(c) {
+  const n = curN(), p = trueP();
+  for (let i = 0; i < c; i++) {
+    const k = binomDraw(n, p);
+    est.push(k / n);
+    if (i === c - 1) lastSample = { k: k, n: n };
+  }
+  render1();
+}
+
+function dotsSvg(k, n) {
+  const W = 600, H = 120;
+  let s = Math.min(22, Math.sqrt(W * H / n)), cols = Math.floor(W / s);
+  let rows = Math.ceil(n / cols);
+  while (rows * s > H + 40 && s > 4) { s -= 0.5; cols = Math.floor(W / s); rows = Math.ceil(n / cols); }
+  const h = rows * s + 4;
+  // random placement of yes/no positions in the grid so shapes mix
+  const flags = new Array(n).fill(false);
+  for (let i = 0; i < k; i++) flags[i] = true;
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = flags[i]; flags[i] = flags[j]; flags[j] = t; }
+  let out = '<svg viewBox="0 0 ' + W + ' ' + h + '" role="img" aria-label="Sample of ' + n + ': ' + k + ' yes, ' + (n - k) + ' no">';
+  const r = s * 0.36;
+  for (let i = 0; i < n; i++) {
+    const cx = (i % cols) * s + s / 2, cy = Math.floor(i / cols) * s + s / 2 + 2;
+    out += flags[i]
+      ? '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="' + r.toFixed(1) + '" fill="#0E1C42"/>'
+      : '<rect x="' + (cx - r).toFixed(1) + '" y="' + (cy - r).toFixed(1) + '" width="' + (2 * r).toFixed(1) + '" height="' + (2 * r).toFixed(1) + '" fill="#fff" stroke="#C7922C" stroke-width="' + Math.max(1, s * 0.12).toFixed(1) + '"/>';
+  }
+  return out + '</svg>';
+}
+
+/* generic bar/dot histogram of proportions on a 0-100% axis */
+function histSvg(vals, o) {
+  const W = 600, L = 8, R = 8, B = 24, H = o.h, plotW = W - L - R, plotH = H - B - (o.topPad || 8);
+  const top = o.topPad || 8;
+  const x = pctv => L + pctv / 100 * plotW;
+  let body = '', bw = o.bw, nb = Math.ceil(100 / bw);
+  const bins = new Array(nb + 1).fill(0);
+  for (const v of vals) { let b = Math.floor(v * 100 / bw + 1e-6); if (b > nb) b = nb; bins[b]++; }
+  const maxBin = Math.max(1, ...bins);
+  let mode = 'bars';
+  const dotR = Math.min(5, bw / 100 * plotW / 2);
+  if (o.allowDots && vals.length <= 100 && maxBin * dotR * 2 <= plotH) mode = 'dots';
+  for (let b = 0; b <= nb; b++) {
+    if (!bins[b]) continue;
+    const cx = x(Math.min(100, b * bw + bw / 2));
+    if (mode === 'dots') {
+      for (let j = 0; j < bins[b]; j++) body += '<circle cx="' + cx.toFixed(1) + '" cy="' + (top + plotH - dotR - j * dotR * 2).toFixed(1) + '" r="' + dotR + '" fill="#0E1C42"/>';
+    } else {
+      const hh = bins[b] / maxBin * plotH, wd = bw / 100 * plotW;
+      body += '<rect x="' + (cx - wd / 2 + 0.4).toFixed(1) + '" y="' + (top + plotH - hh).toFixed(1) + '" width="' + Math.max(1, wd - 0.8).toFixed(1) + '" height="' + hh.toFixed(1) + '" fill="#8a94ad" stroke="#0E1C42" stroke-width="0.5"/>';
+    }
+  }
+  let ticks = '<line x1="' + L + '" y1="' + (top + plotH) + '" x2="' + (W - R) + '" y2="' + (top + plotH) + '" stroke="#0E1C42" stroke-width="2"/>';
+  for (let t = 0; t <= 100; t += 20) ticks += '<text x="' + x(t) + '" y="' + (H - 7) + '" font-size="14" fill="#6b7a99" text-anchor="' + (t === 100 ? 'end' : t === 0 ? 'start' : 'middle') + '">' + t + '%</text><line x1="' + x(t) + '" x2="' + x(t) + '" y1="' + (top + plotH) + '" y2="' + (top + plotH + 4) + '" stroke="#0E1C42"/>';
+  let extra = '';
+  if (o.truth !== undefined && o.truth !== null) {
+    const tx = x(o.truth * 100), anchor = o.truth > 0.7 ? 'end' : 'start', lx = anchor === 'end' ? tx - 5 : tx + 5;
+    extra += '<line x1="' + tx + '" x2="' + tx + '" y1="' + top + '" y2="' + (top + plotH) + '" stroke="#C7922C" stroke-width="3" stroke-dasharray="7 4"/>' +
+      '<text x="' + lx + '" y="' + (top + 12) + '" font-size="14" font-weight="700" fill="#8a5d10" stroke="#fff" stroke-width="3" paint-order="stroke" text-anchor="' + anchor + '">true ' + pct(o.truth, 0) + '</text>';
+  }
+  if (o.sd) {
+    const sy = top + plotH - 6;
+    extra += '<line x1="' + x((o.sd.mean - o.sd.sd) * 100) + '" x2="' + x((o.sd.mean + o.sd.sd) * 100) + '" y1="' + sy + '" y2="' + sy + '" stroke="#C0392B" stroke-width="4"/>' +
+      '<polygon points="' + x(o.sd.mean * 100) + ',' + (sy - 8) + ' ' + (x(o.sd.mean * 100) - 5) + ',' + (sy - 16) + ' ' + (x(o.sd.mean * 100) + 5) + ',' + (sy - 16) + '" fill="#C0392B"/>';
+  }
+  const lab = o.label ? '<text x="' + (W - R) + '" y="' + (top + 12) + '" font-size="14" font-weight="700" fill="#0E1C42" text-anchor="end">' + o.label + '</text>' : '';
+  return { svg: '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + o.aria + '">' + body + ticks + extra + lab + '</svg>', mode: mode, maxBin: maxBin };
+}
+
+function render1() {
+  const p = trueP(), n = curN(), sc = curScen();
+  // latest sample
+  if (lastSample) {
+    $('dotBox').innerHTML = dotsSvg(lastSample.k, lastSample.n);
+    $('oneRead').innerHTML = 'Sample proportion: <b>' + (lastSample.k / lastSample.n).toFixed(3) + ' = ' + pct(lastSample.k / lastSample.n) + '</b> (' + lastSample.k + ' yes out of ' + lastSample.n + ' ' + sc.unit + '). ' +
+      (revealed ? 'The true value is ' + pct(p, 0) + ', so this sample is off by ' + (Math.abs(lastSample.k / lastSample.n - p) * 100).toFixed(1) + ' percentage points.' : 'The true value is hidden. How close do you think this is?');
+  } else {
+    $('dotBox').innerHTML = '';
+    $('oneRead').innerHTML = 'Press &ldquo;Draw one sample&rdquo; to ask n ' + sc.unit + ' and see the sample proportion.';
+  }
+  // histogram
+  const s = summarize(est);
+  const small = est.length <= 100;
+  const h = histSvg(est, { h: 210, bw: small ? 2 : 1, allowDots: true, truth: revealed ? p : null, sd: s && s.count > 1 ? s : null, aria: s ? 'Histogram of ' + s.count + ' sample proportions from ' + pct(s.min) + ' to ' + pct(s.max) : 'Empty histogram. Draw samples to fill it.' });
+  $('histBox').innerHTML = h.svg;
+  $('histLegend').innerHTML = '<span><svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="#0E1C42"/></svg>or <svg viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="3" width="10" height="9" fill="#8a94ad" stroke="#0E1C42"/></svg>one sample proportion' + (h.mode === 'bars' ? ' (bars: taller = more samples)' : ' (dots, stacked)') + '</span>' +
+    '<span><svg viewBox="0 0 14 14" aria-hidden="true"><line x1="1" y1="7" x2="13" y2="7" stroke="#C0392B" stroke-width="4"/></svg>mean &plusmn; typical swing (red bar with triangle at the mean)</span>' +
+    (revealed ? '<span><svg viewBox="0 0 14 14" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="14" stroke="#C7922C" stroke-width="3" stroke-dasharray="4 2"/></svg>true value (gold dashed)</span>' : '');
+  // stats
+  const w = revealed ? shareWithin(est, p, 0.05) : null;
+  const cell = (l, v) => '<div class="stat"><div class="l">' + l + '</div><div class="v">' + v + '</div></div>';
+  $('stats').innerHTML = cell('Samples drawn', est.length) +
+    cell('Mean of the estimates', s ? pct(s.mean) : '&ndash;') +
+    cell('Typical swing (SD)', s && s.count > 1 ? (s.sd * 100).toFixed(1) + ' points' : '&ndash;') +
+    cell('Smallest estimate', s ? pct(s.min) : '&ndash;') +
+    cell('Largest estimate', s ? pct(s.max) : '&ndash;') +
+    cell('Within 5 points of the truth', w === null ? (est.length ? 'Show the truth' : '&ndash;') : pct(w, 0) + ' (' + Math.round(w * est.length) + ' of ' + est.length + ')');
+  // notice
+  let t = '';
+  if (est.length < 2) t = 'Draw several samples and look at how different the estimates are, even though every sample comes from the same population.';
+  else {
+    t = '<ul><li>All ' + s.count + ' samples came from the same population with the same n = ' + n + ', yet the estimates run from ' + pct(s.min) + ' to ' + pct(s.max) + ', a spread of ' + ((s.max - s.min) * 100).toFixed(1) + ' points.</li>' +
+      '<li>The typical swing is about ' + (s.sd * 100).toFixed(1) + ' percentage points. Most estimates sit within a swing or two of the mean (' + pct(s.mean) + ').</li>';
+    if (revealed) {
+      t += '<li>' + Math.round(w * est.length) + ' of ' + est.length + ' estimates (' + pct(w, 0) + ') landed within 5 points of the true ' + pct(p, 0) + '. ' +
+        (w < 1 ? Math.round((1 - w) * est.length) + ' missed by more than 5 points by chance alone.' : 'Every one landed within 5 points this time.') + '</li>' +
+        '<li>The mean of the estimates is ' + (Math.abs(s.mean - p) * 100).toFixed(2) + ' points from the truth' + (s.count < 30 ? ' (with only a few samples, that gap can still be large)' : '') + '.</li>';
+    } else t += '<li>The true value is still hidden. Press &ldquo;Show the truth&rdquo; to see how the estimates sit around it.</li>';
+    t += '</ul>';
+    if (cmp) t += '<p style="margin-top:4px">From the comparison below: SD at n = 25 is ' + (cmp.rows[0].s.sd * 100).toFixed(1) + ' points, at n = 100 it is ' + (cmp.rows[1].s.sd * 100).toFixed(1) + ', at n = 400 it is ' + (cmp.rows[2].s.sd * 100).toFixed(1) + '.</p>';
+  }
+  $('notice').innerHTML = t;
+  // compare
+  renderCmp();
+}
+
+function renderCmp() {
+  if (!cmp) { $('cmpBox').innerHTML = ''; return; }
+  let out = '', prev = null;
+  for (const r of cmp.rows) {
+    const h = histSvg(r.vals, { h: 100, bw: 1, allowDots: false, truth: cmp.p, sd: r.s, label: 'n = ' + r.n, aria: 'Strip for n = ' + r.n + ': 500 sample proportions, typical swing ' + (r.s.sd * 100).toFixed(1) + ' points' });
+    out += '<div style="margin-top:6px">' + h.svg + '</div>';
+  }
+  out += '<table><tr><th>n</th><th>Typical swing found (SD of 500 estimates)</th><th>Theory: &radic;(p(1&minus;p)/n)</th><th>Compared with the row above</th></tr>';
+  for (const r of cmp.rows) {
+    out += '<tr><td>' + r.n + '</td><td>' + (r.s.sd * 100).toFixed(2) + ' points</td><td>' + (r.th * 100).toFixed(2) + ' points</td><td>' + (prev ? (r.s.sd / prev).toFixed(2) + ' times as big' : '&ndash;') + '</td></tr>';
+    prev = r.s.sd;
+  }
+  out += '</table><p class="muted" style="margin-top:6px">Each strip is scaled to its own tallest bar so the shapes are comparable; the gold dashed line is the truth, the red bar is mean &plusmn; typical swing. Quadrupling n should cut the swing to about one half, so look at the last column. Simulated numbers wobble a little each run.</p>';
+  $('cmpBox').innerHTML = out;
+}
+
+function doCompare() {
+  const p = trueP(), rows = [];
+  for (const n of [25, 100, 400]) { const vals = drawProportions(500, n, p); rows.push({ n: n, vals: vals, s: summarize(vals), th: theorySD(p, n) }); }
+  cmp = { p: p, rows: rows };
+  revealed = true; $('bTruth').setAttribute('aria-pressed', 'true');
+  render1();
+}
+
+/* ---------- Mode 2 ---------- */
+const CLAIMS = [
+  { name: 'A fair coin (chance of heads 50%)', p: 0.5, noun: 'heads', trial: 'flips',
+    presets: [['We saw 36 heads in 50 flips', 50, 36], ['We saw 28 heads in 50 flips', 50, 28], ['We saw 55 heads in 100 flips', 100, 55], ['We saw 60 heads in 100 flips', 100, 60]] },
+  { name: 'A spinner with 4 equal sections (claim: section A is 25%)', p: 0.25, noun: 'landings on section A', trial: 'spins',
+    presets: [['Section A came up 19 times in 50 spins', 50, 19], ['Section A came up 15 times in 50 spins', 50, 15], ['Section A came up 16 times in 40 spins', 40, 16]] },
+  { name: '30% of seeds sprout', p: 0.30, noun: 'sprouts', trial: 'seeds planted',
+    presets: [['21 of 50 seeds sprouted', 50, 21], ['9 of 50 seeds sprouted', 50, 9], ['32 of 100 seeds sprouted', 100, 32]] },
+  { name: 'Custom claim', p: null, noun: 'successes', trial: 'trials', presets: [['Enter your own below', null, null]] }
+];
+let m2 = null;
+
+function claimP() {
+  const c = CLAIMS[$('claim').selectedIndex];
+  if (c.p !== null) return c.p;
+  let v = parseFloat($('claimP').value); if (isNaN(v)) v = 50;
+  return Math.min(99, Math.max(1, v)) / 100;
+}
+function fillPresets() {
+  const c = CLAIMS[$('claim').selectedIndex];
+  $('preset').innerHTML = c.presets.map((x, i) => '<option value="' + i + '">' + x[0] + '</option>').join('');
+  $('claimPWrap').classList.toggle('hidden', c.p !== null);
+  const pr = c.presets[0];
+  if (pr[1] !== null) { $('m2n').value = pr[1]; $('m2k').value = pr[2]; }
+}
+function simulate2() {
+  const n = Math.max(1, Math.min(500, parseInt($('m2n').value, 10) || 50));
+  let k = parseInt($('m2k').value, 10); if (isNaN(k)) k = 0; k = Math.max(0, Math.min(n, k));
+  $('m2n').value = n; $('m2k').value = k;
+  const p = claimP(), res = [];
+  for (let i = 0; i < 1000; i++) res.push(binomDraw(n, p));
+  m2 = { n: n, k: k, p: p, res: res };
+  render2();
+}
+function render2() {
+  if (!m2) return;
+  const { n, k, p, res } = m2, exp = n * p, c = CLAIMS[$('claim').selectedIndex];
+  const far = farCount(res, k, n, p), cut = parseInt($('cut').value, 10);
+  const dist = Math.abs(k - exp), mirror = 2 * exp - k;
+  const lowFar = [], hiFar = [];
+  // describe the "at least as far" counts
+  let lo = null, hi = null;
+  for (let j = 0; j <= n; j++) { if (isFar(j, k, n, p)) { if (j < exp) lo = j; else if (j > exp && hi === null) hi = j; } }
+  // histogram: group integer counts if range is wide
+  let mn = Math.min(k, Math.floor(mirror), ...res), mx = Math.max(k, Math.ceil(mirror), ...res);
+  mn = Math.max(0, mn); mx = Math.min(n, mx);
+  const range = mx - mn + 1, g = Math.ceil(range / 70), nb = Math.ceil(range / g);
+  const near = new Array(nb).fill(0), farA = new Array(nb).fill(0);
+  for (const v of res) { const b = Math.floor((v - mn) / g); if (isFar(v, k, n, p)) farA[b]++; else near[b]++; }
+  const maxB = Math.max(1, ...near.map((v, i) => v + farA[i]));
+  const W = 600, H = 220, L = 8, R = 8, top = 22, B = 28, pw = W - L - R, ph = H - top - B;
+  const xv = v => L + (v - mn + 0.5) / (nb * g) * pw;
+  const xe = v => L + (v - mn + 0.5) / (nb * g) * pw;
+  let body = '<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fdf0ee"/><line x1="0" y1="0" x2="0" y2="6" stroke="#C0392B" stroke-width="3"/></pattern></defs>';
+  const bwid = pw / nb;
+  for (let b = 0; b < nb; b++) {
+    const x0 = L + b * bwid;
+    const hn = near[b] / maxB * ph, hf = farA[b] / maxB * ph;
+    if (near[b]) body += '<rect x="' + (x0 + 0.5).toFixed(1) + '" y="' + (top + ph - hn).toFixed(1) + '" width="' + Math.max(1, bwid - 1).toFixed(1) + '" height="' + hn.toFixed(1) + '" fill="#8a94ad" stroke="#0E1C42" stroke-width="0.5"/>';
+    if (farA[b]) body += '<rect x="' + (x0 + 0.5).toFixed(1) + '" y="' + (top + ph - hn - hf).toFixed(1) + '" width="' + Math.max(1, bwid - 1).toFixed(1) + '" height="' + hf.toFixed(1) + '" fill="url(#hatch)" stroke="#C0392B" stroke-width="1"/>';
+  }
+  body += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + (top + ph) + '" y2="' + (top + ph) + '" stroke="#0E1C42" stroke-width="2"/>';
+  const step = Math.max(1, Math.ceil(range / 8 / 5) * 5 > range ? 1 : Math.ceil(range / 8));
+  for (let v = Math.ceil(mn / step) * step; v <= mx; v += step) body += '<text x="' + xv(v).toFixed(1) + '" y="' + (H - 8) + '" font-size="14" fill="#6b7a99" text-anchor="middle">' + v + '</text>';
+  body += '<line x1="' + xv(exp) + '" x2="' + xv(exp) + '" y1="' + top + '" y2="' + (top + ph) + '" stroke="#0E1C42" stroke-width="2" stroke-dasharray="2 4"/><text x="' + xv(exp) + '" y="' + (top - 7) + '" font-size="13" fill="#0E1C42" text-anchor="middle">expected ' + (Math.round(exp * 100) / 100) + '</text>';
+  if (mirror >= mn - 0.5 && mirror <= mx + 0.5 && Math.abs(mirror - k) > 0.01) {
+    body += '<line x1="' + xv(mirror) + '" x2="' + xv(mirror) + '" y1="' + top + '" y2="' + (top + ph) + '" stroke="#C7922C" stroke-width="2" stroke-dasharray="6 4"/>';
+  }
+  const ox = xv(k), anc = (k - mn) / range > 0.6 ? 'end' : 'start';
+  body += '<line x1="' + ox + '" x2="' + ox + '" y1="' + top + '" y2="' + (top + ph) + '" stroke="#C7922C" stroke-width="4"/><polygon points="' + ox + ',' + (top + 10) + ' ' + (ox - 7) + ',' + top + ' ' + (ox + 7) + ',' + top + '" fill="#C7922C"/>' +
+    '<text x="' + (anc === 'end' ? ox - 10 : ox + 10) + '" y="' + (top + 14) + '" font-size="14" font-weight="700" fill="#8a5d10" text-anchor="' + anc + '">observed ' + k + '</text>';
+  $('m2Hist').innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Histogram of 1000 simulated counts of ' + c.noun + ' out of ' + n + '. Observed result ' + k + ' is marked. ' + far + ' of 1000 runs were at least as far from the expected count of ' + exp + '.">' + body + '</svg>';
+  $('m2Legend').innerHTML = '<span><svg viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="3" width="10" height="9" fill="#8a94ad" stroke="#0E1C42"/></svg>runs closer to the expected count</span>' +
+    '<span><svg viewBox="0 0 14 14" aria-hidden="true"><rect x="1" y="1" width="12" height="12" fill="url(#hatch)" stroke="#C0392B"/></svg>runs at least as far as yours (hatched)</span>' +
+    '<span><svg viewBox="0 0 14 14" aria-hidden="true"><polygon points="7,12 2,2 12,2" fill="#C7922C"/></svg>your observed count (solid gold); dashed gold = same distance on the other side</span>';
+  $('m2Result').innerHTML = 'Claim: ' + c.name.replace(/ \(.*\)/, '') + ', so we expect ' + (Math.round(exp * 100) / 100) + ' ' + c.noun + ' in ' + n + ' ' + c.trial + '. You observed <b>' + k + '</b>, which is ' + (Math.round(dist * 100) / 100) + ' away from expected.<br>' +
+    'In <b>' + far + ' of 1000</b> simulated runs the result was at least this far from the expected count' + (dist > 0 ? ' (' + (lo !== null ? lo + ' or fewer, or ' : 'on the low side impossible, or ') + (hi !== null ? hi + ' or more' : 'no high-side counts possible') + ')' : ' (every run counts, since your result equals the expected count)') + '.';
+  const unusual = far < cut * 10;
+  const v = $('m2Verdict');
+  v.className = 'verdict ' + (unusual ? 'unusual' : 'common');
+  v.innerHTML = (unusual ? '<b>Unusual under the claimed model.</b> ' : '<b>Not unusual under the claimed model.</b> ') +
+    'That is ' + (far / 10).toFixed(1) + ' in 100 runs, which is ' + (unusual ? 'fewer than' : 'at least') + ' your rule-of-thumb cutoff of ' + cut + ' in 100. ' +
+    (unusual ? 'This result would be uncommon if the claim were true, so there is some reason to doubt the claim.' : 'This result would be common enough if the claim were true, so the claim is consistent with what we saw.') +
+    ' Remember: this is a judgment about consistency, not proof either way. Another simulation run will give a slightly different count.';
+}
+
+/* ---------- wiring ---------- */
+function showTab(i) {
+  $('mode1').classList.toggle('hidden', i !== 1); $('mode2').classList.toggle('hidden', i !== 2);
+  $('tab1').setAttribute('aria-selected', i === 1); $('tab2').setAttribute('aria-selected', i === 2);
+  if (i === 2 && !m2) simulate2();
+}
+$('tab1').onclick = () => showTab(1); $('tab2').onclick = () => showTab(2);
+[$('tab1'), $('tab2')].forEach(t => t.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { const i = t === $('tab1') ? 2 : 1; showTab(i); $('tab' + i).focus(); }
+}));
+$('scen').innerHTML = SCEN.map(s => '<option>' + s.name + '</option>').join('');
+$('scen').onchange = () => { $('customWrap').classList.toggle('hidden', curScen().p !== null); resetSamples(); };
+$('customP').oninput = () => { $('customRead').textContent = $('customP').value + '%'; resetSamples(); };
+$('nSlider').oninput = () => { $('nRead').textContent = $('nSlider').value; resetSamples(true); };
+$('b1').onclick = () => addSamples(1); $('b10').onclick = () => addSamples(10);
+$('b100').onclick = () => addSamples(100); $('b1000').onclick = () => addSamples(1000);
+$('bTruth').onclick = () => { revealed = true; $('bTruth').setAttribute('aria-pressed', 'true'); render1(); };
+$('bClear').onclick = () => resetSamples();
+$('bCompare').onclick = doCompare;
+$('claim').innerHTML = CLAIMS.map(c => '<option>' + c.name + '</option>').join('');
+$('claim').onchange = () => { fillPresets(); simulate2(); };
+$('preset').onchange = () => { const pr = CLAIMS[$('claim').selectedIndex].presets[$('preset').value]; if (pr[1] !== null) { $('m2n').value = pr[1]; $('m2k').value = pr[2]; } simulate2(); };
+['claimP', 'm2n', 'm2k'].forEach(id => $(id).addEventListener('change', simulate2));
+$('cut').oninput = () => { $('cutRead').textContent = $('cut').value; render2(); };
+$('bSim').onclick = simulate2;
+$('bReset').onclick = () => {
+  $('scen').selectedIndex = 0; $('customP').value = 50; $('customRead').textContent = '50%'; $('customWrap').classList.add('hidden');
+  $('nSlider').value = 50; $('nRead').textContent = '50'; resetSamples();
+  $('claim').selectedIndex = 0; fillPresets(); $('cut').value = 5; $('cutRead').textContent = '5'; m2 = null; simulate2();
+  showTab(1);
+};
+fillPresets(); resetSamples(); addSamples(1);
+</script>
+</body>
+</html>

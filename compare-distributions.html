@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compare Two Distributions — Center, Spread, Shape</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 8px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 700px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 5px; }
+  .row:last-child { margin-bottom: 0; }
+  .lab { font-size: 0.72rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px; }
+  h2 { font-size: 0.78rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
+  button { font-family: inherit; }
+  .btn { padding: 5px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .btn:hover { background: #F8FAFD; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  .btn.reset { border-color: #C0392B; color: #C0392B; margin-left: auto; }
+  .btn.reset:hover { background: #fdf0ee; }
+  .seg { display: flex; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .seg .btn { border: none; border-radius: 0; }
+  .seg .btn + .btn { border-left: 2px solid #0E1C42; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, tr:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .sl { flex: 1 1 200px; min-width: 0; }
+  .sl label { font-size: 0.78rem; font-weight: 700; color: #0E1C42; display: flex; justify-content: space-between; }
+  .sl input[type=range] { width: 100%; accent-color: #0E1C42; }
+  .sl.off { opacity: 0.45; }
+  .ctx { font-size: 0.78rem; color: #6b7a99; margin-bottom: 4px; }
+  .ctx strong { color: #0E1C42; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.76rem; font-weight: 700; margin-bottom: 4px; }
+  .legend .a { color: #00588a; } .legend .b { color: #a84300; }
+  .legend svg { display: inline-block; vertical-align: -3px; width: 14px; height: 14px; margin-right: 3px; overflow: visible; }
+  #chartHost { width: 100%; }
+  #chartHost > svg { display: block; width: 100%; height: auto; overflow: hidden; }
+  svg text { font-family: 'Segoe UI', Arial, sans-serif; fill: #1a2340; }
+  .small { font-size: 0.74rem; color: #6b7a99; line-height: 1.45; margin-top: 3px; }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; }
+  th, td { border: 1px solid #D0D9E8; padding: 3px 6px; text-align: center; }
+  th { background: #0E1C42; color: #fff; font-size: 0.74rem; }
+  th.diff { background: #8a5f12; }
+  td.k { text-align: left; font-weight: 700; color: #0E1C42; background: #F8FAFD; }
+  tbody tr { cursor: pointer; }
+  tbody tr.rob td.k { background: #E8F6FB; }
+  tbody tr.rob td.v { background: #F3FAFD; }
+  td.d { background: #FDF3E3; font-weight: 700; }
+  tbody tr:hover td, tbody tr.hl td { background: #FDF3E3; box-shadow: inset 0 0 0 0 #C7922C; }
+  tbody tr.hl td { border-top: 2px solid #C7922C; border-bottom: 2px solid #C7922C; }
+  .frame { background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 8px; padding: 5px 10px; font-size: 0.84rem; line-height: 1.45; margin-bottom: 6px; }
+  .frame .t { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #0E1C42; }
+  .frame .basis { font-size: 0.7rem; color: #6b7a99; margin-left: 6px; }
+  .frame p + p { margin-top: 2px; color: #3b4766; font-size: 0.8rem; }
+  .note { background: #E8F6FB; border-radius: 8px; padding: 4px 10px; font-size: 0.76rem; line-height: 1.4; margin-top: 6px; }
+  .hide { background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 8px; padding: 5px 10px; font-size: 0.8rem; line-height: 1.4; }
+  .hide b { color: #8a5f12; }
+  .edit { display: flex; flex-wrap: wrap; gap: 8px; }
+  .edit .col { flex: 1 1 250px; min-width: 0; }
+  .edit label { font-size: 0.78rem; font-weight: 700; display: block; margin-bottom: 2px; }
+  .edit label.a { color: #00588a; } .edit label.b { color: #a84300; }
+  textarea { width: 100%; height: 56px; resize: vertical; padding: 5px 8px; border: 2px solid #D0D9E8; border-radius: 8px; font-size: 0.8rem; font-family: inherit; color: #1a2340; }
+  .err { color: #C0392B; font-size: 0.76rem; font-weight: 700; min-height: 0; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Compare Two Distributions</h1>
+<p class="subtitle">Every dataset here is made up. Both groups share one number line, so you can compare them fairly.</p>
+
+<div class="panel">
+  <div class="row" role="group" aria-label="Choose a made-up example" id="presetRow">
+    <span class="lab">Example</span>
+  </div>
+  <div class="row">
+    <span class="lab" id="dispLab">Show</span>
+    <div class="seg" role="group" aria-labelledby="dispLab">
+      <button class="btn" id="modeDots" aria-pressed="false">Dot plot</button>
+      <button class="btn" id="modeHist" aria-pressed="true">Histogram</button>
+    </div>
+    <span class="lab" id="convLab">Quartiles</span>
+    <div class="seg" role="group" aria-labelledby="convLab">
+      <button class="btn" id="convHalves" aria-pressed="true">Median of each half</button>
+      <button class="btn" id="convInc" aria-pressed="false">Spreadsheet QUARTILE.INC</button>
+    </div>
+    <button class="btn reset" id="resetBtn" aria-label="Reset everything to the starting state">Reset</button>
+  </div>
+  <div class="row">
+    <div class="sl" id="slWrap"><label for="wSl"><span>Bin width (histogram only)</span><span id="wVal"></span></label><input type="range" id="wSl" aria-label="Bin width, shared by both histograms"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="ctx" id="ctx"></div>
+  <div class="legend" aria-hidden="true">
+    <span class="a"><svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="#0072B2"/></svg>Group A (blue, circles, solid)</span>
+    <span class="b"><svg viewBox="0 0 14 14"><rect x="1" y="1" width="12" height="12" fill="#D55E00"/></svg>Group B (orange, squares, striped)</span>
+    <span style="color:#1a2340"><svg viewBox="0 0 14 14"><path d="M7 1L13 7L7 13L1 7Z" fill="#fff" stroke="#0E1C42" stroke-width="1.6"/></svg>mean</span>
+  </div>
+  <div id="chartHost"></div>
+  <div class="small" id="axisNote"></div>
+  <div class="small">Histogram bins are left-closed: [a, b) includes a but not b, so a value exactly on an edge goes in the bin that starts there. Box plot dots are outliers: values strictly beyond 1.5 &times; IQR past the box.</div>
+</div>
+
+<div class="panel">
+  <h2>Summary table</h2>
+  <div class="tablewrap">
+  <table id="tbl" aria-label="Summary statistics for Group A, Group B, and B minus A">
+    <thead><tr><th scope="col" style="text-align:left">Statistic</th><th scope="col">&#9679; Group A</th><th scope="col">&#9632; Group B</th><th scope="col" class="diff">B minus A</th></tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  </div>
+  <div class="small">Hover, tap, or tab to a row to see that statistic marked on both graphs. Blue-shaded rows (median, Q1, Q3, IQR) barely move when one value is extreme. Sample SD divides by n &minus; 1.</div>
+  <div class="note" id="convNote" style="display:none"></div>
+</div>
+
+<div class="panel" aria-live="polite">
+  <h2>Say it in words</h2>
+  <div id="words"></div>
+  <div class="hide" id="trust"></div>
+</div>
+
+<div class="panel">
+  <h2>Edit your own data</h2>
+  <div class="edit">
+    <div class="col"><label class="a" for="inA">Group A values (commas, spaces, or new lines)</label><textarea id="inA" aria-describedby="errA"></textarea><div class="err" id="errA" role="alert"></div></div>
+    <div class="col"><label class="b" for="inB">Group B values (commas, spaces, or new lines)</label><textarea id="inB" aria-describedby="errB"></textarea><div class="err" id="errB" role="alert"></div></div>
+  </div>
+  <div class="row" style="margin-top:6px"><button class="btn" id="applyBtn">Apply</button><span class="small" style="margin:0">Up to 60 numbers per group. Decimals and negatives are fine.</span></div>
+</div>
+</div>
+
+<script>
+/*PURE*/
+function sortNum(a){return a.slice().sort(function(x,y){return x-y;});}
+function medianSorted(s){var n=s.length;if(!n)return NaN;var m=n>>1;return n%2?s[m]:(s[m-1]+s[m])/2;}
+function quartilesHalves(s){
+  var n=s.length,med=medianSorted(s);
+  if(n<2)return{q1:med,med:med,q3:med};
+  var h=n>>1;
+  return{q1:medianSorted(s.slice(0,h)),med:med,q3:medianSorted(s.slice(n-h))};
+}
+function percInc(s,p){
+  var n=s.length;if(n===1)return s[0];
+  var pos=p*(n-1),i=Math.floor(pos+1e-12);
+  if(i>=n-1)return s[n-1];
+  return s[i]+(pos-i)*(s[i+1]-s[i]);
+}
+function quartilesInc(s){return{q1:percInc(s,0.25),med:percInc(s,0.5),q3:percInc(s,0.75)};}
+function sampleSD(vals){
+  var n=vals.length;if(n<2)return NaN;
+  var m=0,i,ss=0;for(i=0;i<n;i++)m+=vals[i];m/=n;
+  for(i=0;i<n;i++)ss+=(vals[i]-m)*(vals[i]-m);
+  return Math.sqrt(ss/(n-1));
+}
+function summarize(vals,conv){
+  var s=sortNum(vals),n=s.length;
+  if(!n)return{n:0,outliers:[],sorted:s};
+  var q=conv==='inc'?quartilesInc(s):quartilesHalves(s);
+  var iqr=q.q3-q.q1,lf=q.q1-1.5*iqr,uf=q.q3+1.5*iqr;
+  var eps=1e-9*Math.max(1,Math.abs(lf),Math.abs(uf));
+  var inside=[],outliers=[],sum=0;
+  for(var i=0;i<n;i++){
+    sum+=s[i];
+    if(s[i]<lf-eps||s[i]>uf+eps)outliers.push(s[i]);else inside.push(s[i]);
+  }
+  return{n:n,min:s[0],q1:q.q1,med:q.med,q3:q.q3,max:s[n-1],iqr:iqr,range:s[n-1]-s[0],lf:lf,uf:uf,
+    loW:inside[0],hiW:inside[inside.length-1],outliers:outliers,mean:sum/n,sd:sampleSD(s),sorted:s};
+}
+function binIndex(v,start,width){return Math.floor((v-start)/width+1e-9);}
+function rnd(x){return Math.round(x*1e9)/1e9;}
+function binCount(allVals,start,width){return Math.max(1,binIndex(Math.max.apply(null,allVals),start,width)+1);}
+function makeBins(vals,start,width,nb){
+  var bins=[],i;
+  for(i=0;i<nb;i++)bins.push({lo:rnd(start+i*width),hi:rnd(start+(i+1)*width),count:0});
+  for(i=0;i<vals.length;i++){
+    var k=binIndex(vals[i],start,width);
+    if(k>=0&&k<nb)bins[k].count++;
+  }
+  return bins;
+}
+function niceWidth(x){
+  var p=Math.pow(10,Math.floor(Math.log10(x))),m=x/p,c=[1,2,2.5,5,10],i;
+  for(i=0;i<c.length;i++)if(m<=c[i]+1e-9)return c[i]*p;
+  return 10*p;
+}
+function fmt2(x){var s=parseFloat(Number(x).toFixed(2));return String(s===0?0:s);}
+function gapRatio(s){
+  var g=s.mean-s.med;
+  if(Math.abs(g)<1e-9)return 0;
+  if(s.iqr>1e-12)return g/s.iqr;
+  return g>0?Infinity:-Infinity;
+}
+function listVals(a){
+  var t=a.slice(0,3).map(fmt2).join(', ');
+  return a.length>3?t+', ...':t;
+}
+function describeGroup(s,name){
+  if(!s.n)return name+' has no values yet.';
+  if(s.n<5)return name+' has only '+s.n+(s.n===1?' value':' values')+', which is too few to say much about its shape.';
+  var r=gapRatio(s),hiO=0,loO=0,i,txt;
+  for(i=0;i<s.outliers.length;i++){if(s.outliers[i]>s.med)hiO++;else loO++;}
+  var k=s.outliers.length;
+  if(Math.abs(r)<=0.25){
+    txt=name+' looks roughly symmetric (mean '+fmt2(s.mean)+' and median '+fmt2(s.med)+' are close)';
+  }else{
+    var up=r>0,sameSide=up?hiO>0:loO>0;
+    txt=name+(sameSide?' looks pulled toward '+(up?'high':'low')+' values by the '+(up?'high':'low')+' outlier'+((up?hiO:loO)>1?'s':'')
+      :' may be pulled toward '+(up?'high':'low')+' values')+' (mean '+fmt2(s.mean)+' is '+(up?'above':'below')+' median '+fmt2(s.med)+')';
+  }
+  if(k>0)txt+='; it has '+k+' outlier'+(k>1?'s':'')+' ('+listVals(s.outliers)+') beyond the 1.5 × IQR fences';
+  else txt+='; it has no outliers by the 1.5 × IQR rule';
+  return txt+'.';
+}
+function buildWords(a,b){
+  var w={center:'',centerNote:'',spread:'',spreadNote:'',shapeA:'',shapeB:'',trust:'',ready:false};
+  if(!a.n||!b.n){
+    w.center='Add numbers to both groups to compare their centers.';
+    w.spread='Add numbers to both groups to compare their spread.';
+    w.shapeA=describeGroup(a,'Group A');w.shapeB=describeGroup(b,'Group B');
+    w.trust='Rule of thumb: once both groups have values, look for outliers or a mean-median gap larger than about 0.25 × IQR. If you see either one, median and IQR are usually the safer summaries.';
+    return w;
+  }
+  w.ready=true;
+  var mx=Math.max(a.iqr,b.iqr),d=b.med-a.med,dm=b.mean-a.mean;
+  if(Math.abs(d)<1e-9)w.center='Group A\'s and Group B\'s medians are equal ('+fmt2(a.med)+').';
+  else{
+    w.center='Group B\'s median ('+fmt2(b.med)+') is '+fmt2(Math.abs(d))+(d>0?' higher':' lower')+' than Group A\'s ('+fmt2(a.med)+').';
+    if(mx>0&&Math.abs(d)<0.25*mx)w.center+=' That gap is small next to how spread out the data are.';
+  }
+  w.centerNote='Means: A is '+fmt2(a.mean)+', B is '+fmt2(b.mean)+' (B minus A = '+fmt2(dm)+').';
+  if(mx>0&&Math.abs(d)<0.25*mx&&Math.abs(dm)>=0.25*mx)
+    w.centerNote+=' The medians are nearly equal but the means are not, so check for outliers or skew before reporting one center.';
+  var ia=a.iqr,ib=b.iqr;
+  if(ia<1e-12&&ib<1e-12)w.spread='Both groups have an IQR of 0, so the middle half of each group is a single value.';
+  else if(Math.abs(ia-ib)<=0.1*Math.max(ia,ib))
+    w.spread='Group A\'s IQR ('+fmt2(ia)+') and Group B\'s ('+fmt2(ib)+') are about the same, so the groups are about equally consistent.';
+  else{
+    var sm=ia<ib?'A':'B';
+    w.spread='Group '+sm+'\'s IQR ('+fmt2(Math.min(ia,ib))+') is smaller than Group '+(sm==='A'?'B':'A')+'\'s ('+fmt2(Math.max(ia,ib))+'), so '+sm+' is more consistent (its middle half is packed more tightly).';
+  }
+  w.spreadNote=(a.n<2||b.n<2)?'Sample SD needs at least 2 values in a group.':'Sample SDs: A is '+fmt2(a.sd)+', B is '+fmt2(b.sd)+'.';
+  w.shapeA=describeGroup(a,'Group A');w.shapeB=describeGroup(b,'Group B');
+  var flags=[];
+  [['A',a],['B',b]].forEach(function(p){
+    var s=p[1],why=[];
+    if(s.outliers.length)why.push('outliers');
+    if(s.n>=2&&Math.abs(gapRatio(s))>0.25)why.push('a mean-median gap larger than 0.25 × IQR');
+    if(why.length)flags.push('Group '+p[0]+' has '+why.join(' and '));
+  });
+  if(flags.length)w.trust=flags.join('; ')+'. As a rule of thumb, median and IQR are the safer summaries here, because they barely move when a value is extreme. This is a rule of thumb, not a law.';
+  else w.trust='Neither group has outliers or a large mean-median gap, so mean and SD are reasonable here (median and IQR would tell a similar story). This is a rule of thumb, not a law.';
+  return w;
+}
+function parseGroup(text,name){
+  var parts=text.split(/[\s,;]+/).filter(function(t){return t.length>0;});
+  var out=[];
+  for(var i=0;i<parts.length;i++){
+    if(!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(parts[i]))return{error:name+': "'+parts[i]+'" is not a number. Use digits, a minus sign, and a decimal point only.'};
+    var v=parseFloat(parts[i]);
+    if(Math.abs(v)>1e9)return{error:name+': "'+parts[i]+'" is too large. Keep values under a billion.'};
+    out.push(v);
+  }
+  if(out.length>60)return{error:name+' has '+out.length+' numbers. The limit is 60.'};
+  return{values:out};
+}
+/*ENDPURE*/
+
+function fmt(x){var s=parseFloat(Number(x).toFixed(4));return String(s===0?0:s);}
+
+/* ---------- Presets (all made up) ---------- */
+var PRESETS=[
+ {id:'spread',label:'Same center, different spread',ctx:'Made-up example: quiz scores, Class A (Group A) vs Class B (Group B).',
+  A:[69,71,72,72,73,74,74,75,75,75,75,76,76,77,78,78,79,80,81,82],
+  B:[44,52,58,61,65,68,70,72,74,75,75,76,78,80,83,86,89,92,96,99]},
+ {id:'center',label:'Same spread, different center',ctx:'Made-up example: minutes to finish a puzzle, Team Red (Group A) vs Team Blue (Group B).',
+  A:[22,24,25,27,28,29,30,31,32,33,34,36,37,39,41,43,45,48],
+  B:[36,38,39,41,42,43,44,45,46,47,48,50,51,53,55,57,59,62]},
+ {id:'skew',label:'One skewed, one symmetric',ctx:'Made-up example: minutes waiting in line, Cafe A (Group A) vs Cafe B (Group B).',
+  A:[2,2,3,3,3,4,4,4,5,5,6,6,7,8,9,11,14,18,24,30],
+  B:[4,5,6,7,8,8,9,9,10,10,10,11,11,12,12,13,14,15,16,17]},
+ {id:'outlier',w:10,label:'One outlier changes the story',ctx:'Made-up example: seconds to solve a riddle, Table 1 (Group A) vs Table 2 (Group B).',
+  A:[41,44,46,48,50,51,52,53,54,55,56,58,60,62,64],
+  B:[42,45,47,48,50,52,53,54,55,56,57,58,60,63,190]},
+ {id:'overlap',label:'Overlapping but not identical',ctx:'Made-up example: points scored in a game, Section 1 (Group A) vs Section 2 (Group B).',
+  A:[48,52,55,57,58,60,61,62,63,64,65,66,67,68,70,71,73,75,78,82],
+  B:[51,54,57,59,61,62,64,65,66,67,68,69,70,72,73,74,76,78,81,86]}
+];
+var DEFAULT_PRESET='spread';
+function presetById(id){for(var i=0;i<PRESETS.length;i++)if(PRESETS[i].id===id)return PRESETS[i];}
+
+/* ---------- State ---------- */
+var S={},NS='http://www.w3.org/2000/svg',svg,gBack,gDisp,gBox,gHl,W=700,animId=0;
+var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function $(id){return document.getElementById(id);}
+var G={L:34,R:12,A:{top:24,h:78},B:{top:124,h:78},boxA:240,boxB:276,axisY:300,H:338};
+var GS={A:{col:'#0072B2',fill:'#9CC8E6',name:'Group A',tag:'A'},B:{col:'#D55E00',fill:'url(#pB)',name:'Group B',tag:'B'}};
+var KEYS=[['n','n (count)'],['mean','Mean'],['med','Median',1],['sd','SD (sample)'],['q1','Q1',1],['q3','Q3',1],['iqr','IQR',1],['min','Min'],['max','Max'],['range','Range'],['out','Outliers (1.5 × IQR rule)']];
+
+function el(name,attrs,parent){var e=document.createElementNS(NS,name);for(var k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
+function txt(p,x,y,s,attrs){var a={x:x,y:y,'font-size':attrs&&attrs.size||11};if(attrs){for(var k in attrs)if(k!=='size')a[k]=attrs[k];}var t=el('text',a,p);t.textContent=s;return t;}
+function clear(g){while(g.firstChild)g.removeChild(g.firstChild);}
+function X(v,dom){return G.L+(v-dom.lo)/(dom.hi-dom.lo)*(W-G.R-G.L);}
+function lerp(a,b,f){return a+(b-a)*f;}
+
+function resetState(){
+  S.conv='halves';S.mode='hist';S.hl=null;S.hov=null;S.foc=null;S.pin=null;S.custom=false;S.presetId=DEFAULT_PRESET;
+  var p=presetById(DEFAULT_PRESET);setData(p.A,p.B,p.w);
+}
+function setData(A,B,w0){
+  S.A=A.slice();S.B=B.slice();
+  var all=S.A.concat(S.B);
+  var dmin=all.length?Math.min.apply(null,all):0,dmax=all.length?Math.max.apply(null,all):10;
+  var R=dmax-dmin;if(!(R>0))R=1;
+  S.dmin=dmin;S.dmax=dmax;S.R=R;
+  S.step=Math.pow(10,Math.floor(Math.log10(R/100)));
+  S.wMin=Math.max(S.step,Math.ceil(R/50/S.step-1e-9)*S.step);
+  S.wMax=Math.max(S.wMin+S.step,Math.ceil(R*1.5/S.step-1e-9)*S.step);
+  S.w=rnd(Math.min(Math.max(w0||niceWidth(R/12),S.wMin),S.wMax));
+}
+
+/* ---------- Build the target view from state ---------- */
+function binsInfo(){
+  var all=S.A.concat(S.B),w=S.w;
+  var start=rnd(Math.floor(S.dmin/w+1e-9)*w);
+  var nb=all.length?binCount(all,start,w):1;
+  return{start:start,nb:nb};
+}
+function boxOf(s){
+  if(!s.n)return null;
+  return{min:s.min,q1:s.q1,med:s.med,q3:s.q3,max:s.max,loW:s.loW,hiW:s.hiW,mean:s.mean,sd:s.sd,outliers:s.outliers.slice()};
+}
+function niceTicks(lo,hi,target){
+  var raw=(hi-lo)/target,p=Math.pow(10,Math.floor(Math.log10(raw))),m=raw/p;
+  var step=(m<=1?1:m<=2?2:m<=5?5:10)*p,out=[];
+  for(var t=Math.ceil(lo/step-1e-9)*step;t<=hi+1e-9;t+=step)out.push(rnd(t));
+  return out;
+}
+function layoutDots(vals,dom){
+  var s=sortNum(vals),r=4.4,lv,items;
+  function run(){
+    var last=[];items=[];lv=0;
+    for(var i=0;i<s.length;i++){
+      var x=X(s[i],dom),L=0;
+      while(last[L]!==undefined&&x-last[L]<2*r+0.8)L++;
+      last[L]=x;items.push({v:s[i],lvl:L});if(L+1>lv)lv=L+1;
+    }
+  }
+  run();
+  while(lv*(2*r+1)>G.A.h-4&&r>1.8){r-=0.4;run();}
+  return{items:items,r:r};
+}
+function buildTarget(){
+  var cv=S.conv;
+  S.sA=summarize(S.A,cv);S.sB=summarize(S.B,cv);
+  S.oA=summarize(S.A,cv==='inc'?'halves':'inc');S.oB=summarize(S.B,cv==='inc'?'halves':'inc');
+  var bi=binsInfo(),all=S.A.concat(S.B);
+  var lo=Math.min(S.dmin,bi.start),hi=Math.max(S.dmax,rnd(bi.start+bi.nb*S.w));
+  if(!(hi>lo)){lo-=1;hi+=1;}
+  var pad=(hi-lo)*0.03,dom={lo:lo-pad,hi:hi+pad};
+  var bA=makeBins(S.A,bi.start,S.w,bi.nb),bB=makeBins(S.B,bi.start,S.w,bi.nb),mx=1,i;
+  for(i=0;i<bi.nb;i++)mx=Math.max(mx,bA[i].count,bB[i].count);
+  var ymax=mx+Math.max(0.7,mx*0.08);if(ymax<=4)ymax=Math.ceil(ymax);else{var st=ymax<=10?2:ymax<=25?5:10;ymax=Math.ceil(ymax/st)*st;}
+  return{mode:S.mode,dom:dom,ymax:ymax,bars:{A:bA,B:bB},box:{A:boxOf(S.sA),B:boxOf(S.sB)},
+    dots:{A:layoutDots(S.A,dom),B:layoutDots(S.B,dom)}};
+}
+function mixBars(a,b,f){
+  var n=Math.max(a.length,b.length),out=[];
+  for(var i=0;i<n;i++){
+    var pa=a[i],pb=b[i];
+    if(!pa)pa={lo:pb.lo,hi:pb.lo,count:0};
+    if(!pb)pb={lo:pa.lo,hi:pa.lo,count:0};
+    out.push({lo:lerp(pa.lo,pb.lo,f),hi:lerp(pa.hi,pb.hi,f),count:lerp(pa.count,pb.count,f)});
+  }
+  return out;
+}
+function mixBox(a,b,f){
+  if(!a||!b)return b;
+  var o={outliers:b.outliers,sd:b.sd};
+  ['min','q1','med','q3','max','loW','hiW','mean'].forEach(function(k){o[k]=lerp(a[k],b[k],f);});
+  return o;
+}
+function mixView(a,b,f){
+  return{mode:b.mode,dom:{lo:lerp(a.dom.lo,b.dom.lo,f),hi:lerp(a.dom.hi,b.dom.hi,f)},ymax:lerp(a.ymax,b.ymax,f),
+    bars:{A:mixBars(a.bars.A,b.bars.A,f),B:mixBars(a.bars.B,b.bars.B,f)},
+    box:{A:mixBox(a.box.A,b.box.A,f),B:mixBox(a.box.B,b.box.B,f)},dots:b.dots};
+}
+function go(target,animate,fade){
+  var from=S.view;
+  S.target=target;
+  var token=++animId;
+  if(!from||!animate||reduceMotion||from.mode!==target.mode){
+    S.view=target;draw(target);
+    if(fade&&!reduceMotion&&gDisp){gDisp.style.opacity=0;requestAnimationFrame(function(){gDisp.style.transition='opacity 200ms';gDisp.style.opacity=1;});}
+    return;
+  }
+  var t0=null;
+  function frame(ts){
+    if(token!==animId)return;
+    if(t0===null)t0=ts;
+    var p=Math.min(1,(ts-t0)/200),e=p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
+    S.view=p<1?mixView(from,target,e):target;
+    draw(S.view);
+    if(p<1)requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ---------- Drawing ---------- */
+function buildSvg(){
+  var host=$('chartHost');
+  host.innerHTML='';
+  W=Math.max(280,host.clientWidth||700);
+  svg=el('svg',{viewBox:'0 0 '+W+' '+G.H,role:'img'},host);
+  var defs=el('defs',{},svg);
+  var pat=el('pattern',{id:'pB',width:6,height:6,patternUnits:'userSpaceOnUse',patternTransform:'rotate(45)'},defs);
+  el('rect',{width:6,height:6,fill:'#FBE3D2'},pat);
+  el('line',{x1:0,y1:0,x2:0,y2:6,stroke:'#D55E00','stroke-width':2.5},pat);
+  ['A','B'].forEach(function(g){
+    var cp=el('clipPath',{id:'clip'+g},defs);
+    el('rect',{x:G.L,y:G[g].top-2,width:W-G.R-G.L,height:G[g].h+4},cp);
+  });
+  gBack=el('g',{},svg);gDisp=el('g',{},svg);gBox=el('g',{},svg);gHl=el('g',{'pointer-events':'none'},svg);
+}
+function marker(g,cx,cy,r,open,parent){
+  var st=GS[g],a={fill:open?'#fff':st.col,stroke:st.col,'stroke-width':open?2:1};
+  if(g==='A'){a.cx=cx;a.cy=cy;a.r=r;return el('circle',a,parent);}
+  a.x=cx-r*0.9;a.y=cy-r*0.9;a.width=r*1.8;a.height=r*1.8;return el('rect',a,parent);
+}
+function badge(g,cx,cy,parent){
+  var st=GS[g];
+  if(g==='A')el('circle',{cx:cx,cy:cy,r:7,fill:st.col},parent);
+  else el('rect',{x:cx-7,y:cy-7,width:14,height:14,fill:st.col},parent);
+  txt(parent,cx,cy+3.6,st.tag,{'text-anchor':'middle',size:10,'font-weight':900,fill:'#fff'});
+}
+function draw(v){
+  if(!svg)return;
+  var dom=v.dom,x=function(t){return X(t,dom);},R=W-G.R,i;
+  clear(gBack);clear(gDisp);clear(gBox);clear(gHl);
+  // grid + axis
+  var ticks=niceTicks(dom.lo,dom.hi,Math.max(3,Math.floor((R-G.L)/70)));
+  for(i=0;i<ticks.length;i++){
+    var tx=x(ticks[i]);
+    el('line',{x1:tx,x2:tx,y1:G.A.top,y2:G.axisY,stroke:'#E3E9F3','stroke-width':1,'stroke-dasharray':'2 3'},gBack);
+    el('line',{x1:tx,x2:tx,y1:G.axisY,y2:G.axisY+5,stroke:'#0E1C42','stroke-width':1.5},gBack);
+    txt(gBack,tx,G.axisY+17,fmt(ticks[i]),{'text-anchor':'middle',size:11});
+  }
+  el('line',{x1:G.L,x2:R,y1:G.axisY,y2:G.axisY,stroke:'#0E1C42','stroke-width':1.5},gBack);
+  txt(gBack,(G.L+R)/2,G.axisY+32,'Shared number line (same scale for both groups)',{'text-anchor':'middle',size:10,fill:'#6b7a99'});
+  ['A','B'].forEach(function(g){
+    var row=G[g],st=GS[g],base=row.top+row.h,n=g==='A'?S.sA.n:S.sB.n;
+    el('line',{x1:G.L,x2:R,y1:base,y2:base,stroke:'#9aa7c2','stroke-width':1},gBack);
+    badge(g,12,row.top+row.h/2,gBack);
+    txt(gBack,G.L+4,row.top-6,st.name+(n?' (n = '+n+')':' (no values)'),{size:11,'font-weight':700,fill:g==='A'?'#00588a':'#a84300'});
+    if(v.mode==='hist'){
+      var yt=v.ymax<=5?1:v.ymax<=10?2:v.ymax<=25?5:10;
+      for(var c=0;c<=v.ymax+1e-9;c+=yt){
+        var yy=base-c/v.ymax*row.h;
+        if(c>0)el('line',{x1:G.L,x2:R,y1:yy,y2:yy,stroke:'#E3E9F3','stroke-width':1},gBack);
+        txt(gBack,G.L-4,yy+3.5,c,{'text-anchor':'end',size:9,fill:'#6b7a99'});
+      }
+    }
+    var d=el('g',{'clip-path':'url(#clip'+g+')'},gDisp);
+    if(!n){txt(d,(G.L+R)/2,row.top+row.h/2,'Add numbers in the box at the bottom',{'text-anchor':'middle',size:11,fill:'#6b7a99'});return;}
+    if(v.mode==='hist'){
+      v.bars[g].forEach(function(b){
+        var h=b.count/v.ymax*row.h;
+        if(h<=0.01)return;
+        var x0=x(b.lo),x1=x(b.hi);
+        el('rect',{x:x0,y:base-h,width:Math.max(0,x1-x0),height:h,fill:st.fill,stroke:st.col,'stroke-width':1.5},d);
+        if(x1-x0>=13&&h>0.5)txt(d,(x0+x1)/2,base-h-3,Math.round(b.count),{'text-anchor':'middle',size:10,'font-weight':700});
+      });
+    }else{
+      var L=v.dots[g];
+      L.items.forEach(function(it){marker(g,x(it.v),base-L.r-1-it.lvl*(2*L.r+1),L.r,false,d);});
+    }
+  });
+  // box plots
+  [['A',G.boxA,S.sA],['B',G.boxB,S.sB]].forEach(function(p){
+    var g=p[0],cy=p[1],bx=v.box[g],st=GS[g];
+    badge(g,12,cy,gBox);
+    if(!bx){txt(gBox,G.L+4,cy+4,'No box plot (no values)',{size:10,fill:'#6b7a99'});return;}
+    var y0=cy-9,y1=cy+9;
+    el('line',{x1:x(bx.loW),x2:x(bx.q1),y1:cy,y2:cy,stroke:st.col,'stroke-width':2},gBox);
+    el('line',{x1:x(bx.q3),x2:x(bx.hiW),y1:cy,y2:cy,stroke:st.col,'stroke-width':2},gBox);
+    [bx.loW,bx.hiW].forEach(function(t){el('line',{x1:x(t),x2:x(t),y1:cy-6,y2:cy+6,stroke:st.col,'stroke-width':2},gBox);});
+    el('rect',{x:x(bx.q1),y:y0,width:Math.max(1,x(bx.q3)-x(bx.q1)),height:18,fill:st.fill,stroke:st.col,'stroke-width':2},gBox);
+    el('line',{x1:x(bx.med),x2:x(bx.med),y1:y0,y2:y1,stroke:'#0E1C42','stroke-width':3.5},gBox);
+    bx.outliers.forEach(function(o){marker(g,x(o),cy,4.2,true,gBox);});
+    var mx=x(bx.mean);
+    el('path',{d:'M'+mx+' '+(cy-6)+'L'+(mx+6)+' '+cy+'L'+mx+' '+(cy+6)+'L'+(mx-6)+' '+cy+'Z',fill:'#fff',stroke:'#0E1C42','stroke-width':1.8},gBox);
+  });
+  drawHl(v,x);
+}
+function hlSpec(key,b){
+  switch(key){
+    case 'mean':return{lines:[[b.mean,'mean '+fmt2(b.mean)]]};
+    case 'med':return{lines:[[b.med,'median '+fmt2(b.med)]]};
+    case 'q1':return{lines:[[b.q1,'Q1 '+fmt2(b.q1)]]};
+    case 'q3':return{lines:[[b.q3,'Q3 '+fmt2(b.q3)]]};
+    case 'min':return{lines:[[b.min,'min '+fmt2(b.min)]]};
+    case 'max':return{lines:[[b.max,'max '+fmt2(b.max)]]};
+    case 'iqr':return{band:[b.q1,b.q3,'IQR '+fmt2(b.q3-b.q1)]};
+    case 'range':return{band:[b.min,b.max,'range '+fmt2(b.max-b.min)]};
+    case 'sd':return isFinite(b.sd)?{band:[b.mean-b.sd,b.mean+b.sd,'mean ± SD ('+fmt2(b.sd)+')']}:null;
+    case 'out':return b.outliers.length?{lines:b.outliers.map(function(o){return[o,'']})}:null;
+  }
+  return null;
+}
+function drawHl(v,x){
+  var key=S.hl;
+  if(!key)return;
+  var R=W-G.R;
+  ['A','B'].forEach(function(g){
+    var b=v.box[g];if(!b)return;
+    var sp=hlSpec(key,b);if(!sp)return;
+    var row=G[g],cy=g==='A'?G.boxA:G.boxB,spans=[[row.top,row.top+row.h],[cy-13,cy+13]];
+    spans.forEach(function(sv,idx){
+      if(sp.band){
+        var x0=x(sp.band[0]),x1=x(sp.band[1]);
+        el('rect',{x:x0,y:sv[0],width:Math.max(2,x1-x0),height:sv[1]-sv[0],fill:'#C7922C',opacity:0.2},gHl);
+        el('line',{x1:x0,x2:x0,y1:sv[0],y2:sv[1],stroke:'#8a5f12','stroke-width':1.5},gHl);
+        el('line',{x1:x1,x2:x1,y1:sv[0],y2:sv[1],stroke:'#8a5f12','stroke-width':1.5},gHl);
+        if(idx===1){var cx=Math.min(Math.max((x0+x1)/2,G.L+50),R-50);txt(gHl,cx,cy-15,sp.band[2],{'text-anchor':'middle',size:10,'font-weight':700,fill:'#8a5f12'});}
+      }else{
+        sp.lines.forEach(function(ln){
+          var lx=x(ln[0]);
+          el('line',{x1:lx,x2:lx,y1:sv[0],y2:sv[1],stroke:'#C7922C','stroke-width':6,opacity:0.5},gHl);
+          el('line',{x1:lx,x2:lx,y1:sv[0],y2:sv[1],stroke:'#0E1C42','stroke-width':1.6},gHl);
+          if(idx===1&&ln[1]){var cx=Math.min(Math.max(lx,G.L+34),R-34);txt(gHl,cx,cy-15,ln[1],{'text-anchor':'middle',size:10,'font-weight':700,fill:'#8a5f12'});}
+        });
+      }
+    });
+  });
+  var lab=null;KEYS.forEach(function(k){if(k[0]===key)lab=k[1];});
+  txt(gHl,R,G.A.top-8,'Highlighting: '+lab,{'text-anchor':'end',size:10,'font-weight':700,fill:'#8a5f12'});
+}
+
+/* ---------- Text panels ---------- */
+function cellVal(s,k){
+  if(!s.n)return null;
+  if(k==='out')return s.outliers.length;
+  var v=s[k];
+  return (v===undefined||!isFinite(v))?null:v;
+}
+function drawTable(){
+  var h='';
+  KEYS.forEach(function(k){
+    var a=cellVal(S.sA,k[0]),b=cellVal(S.sB,k[0]);
+    var da='—',db='—',dd='—';
+    if(a!==null)da=fmt2(a);if(b!==null)db=fmt2(b);
+    if(a!==null&&b!==null){var d=b-a;dd=Math.abs(d)<1e-9?'0':(d>0?'+':'−')+fmt2(Math.abs(d));}
+    h+='<tr data-key="'+k[0]+'" tabindex="0" class="'+(k[2]?'rob':'')+(S.hl===k[0]?' hl':'')+'" aria-label="'+k[1]+': Group A '+da+', Group B '+db+', B minus A '+dd+'. Press Enter to keep it highlighted."><td class="k">'+k[1]+'</td><td class="v">'+da+'</td><td class="v">'+db+'</td><td class="d">'+dd+'</td></tr>';
+  });
+  $('tbody').innerHTML=h;
+}
+function drawWords(){
+  var w=buildWords(S.sA,S.sB);
+  function fr(t,basis,p1,p2){return '<div class="frame"><span class="t">'+t+'</span><span class="basis">'+basis+'</span><p>'+p1+'</p>'+(p2?'<p>'+p2+'</p>':'')+'</div>';}
+  var ident=S.sA.n&&S.sB.n&&S.sA.sorted.join()===S.sB.sorted.join();
+  var h=(ident?'<div class="note" style="margin:0 0 6px">The two groups contain exactly the same values, so every difference is 0.</div>':'')+
+    fr('Center','basis: medians (means shown below)',w.center,w.centerNote)+
+    fr('Spread','basis: IQR (sample SD shown below)',w.spread,w.spreadNote)+
+    fr('Shape and outliers','basis: mean vs median gap, and the 1.5 × IQR rule',w.shapeA,w.shapeB);
+  $('words').innerHTML=h;
+  $('trust').innerHTML='<b>Which summary should I trust here?</b><br>'+w.trust;
+}
+function updateNotes(){
+  var dis=false,i,pairs=[[S.sA,S.oA],[S.sB,S.oB]];
+  for(i=0;i<2;i++){var a=pairs[i][0],o=pairs[i][1];
+    if(a.n&&(Math.abs(a.q1-o.q1)>1e-9||Math.abs(a.q3-o.q3)>1e-9||Math.abs(a.med-o.med)>1e-9))dis=true;}
+  var cn=$('convNote');
+  if(!dis){cn.style.display='none';return;}
+  cn.style.display='';
+  var other=S.conv==='inc'?'Median of each half':'QUARTILE.INC';
+  cn.textContent='The two quartile methods disagree for at least one group here ('+other+' gives A: Q1 '+fmt2(S.oA.q1===undefined?NaN:S.oA.q1)+', Q3 '+fmt2(S.oA.q3===undefined?NaN:S.oA.q3)+'; B: Q1 '+fmt2(S.oB.q1===undefined?NaN:S.oB.q1)+', Q3 '+fmt2(S.oB.q3===undefined?NaN:S.oB.q3)+'). Neither is wrong. They are different rules.';
+}
+function updateMeta(){
+  $('ctx').innerHTML=S.custom?'<strong>Your numbers</strong> (not real data, just what you typed in).':'<strong>'+presetById(S.presetId).ctx+'</strong>';
+  PRESETS.forEach(function(p){$('p_'+p.id).setAttribute('aria-pressed',(!S.custom&&S.presetId===p.id)?'true':'false');});
+  $('modeDots').setAttribute('aria-pressed',S.mode==='dots'?'true':'false');
+  $('modeHist').setAttribute('aria-pressed',S.mode==='hist'?'true':'false');
+  $('convHalves').setAttribute('aria-pressed',S.conv==='halves'?'true':'false');
+  $('convInc').setAttribute('aria-pressed',S.conv==='inc'?'true':'false');
+  var sl=$('wSl');
+  sl.min=S.wMin;sl.max=S.wMax;sl.step=S.step;sl.value=S.w;sl.disabled=(S.mode!=='hist');
+  $('slWrap').className='sl'+(S.mode!=='hist'?' off':'');
+  $('wVal').textContent=S.mode==='hist'?fmt(S.w):'(switch to Histogram)';
+  var t=S.target?S.target.dom:null;
+  var all=S.A.concat(S.B),tk=t?niceTicks(t.lo,t.hi,5):[];
+  $('axisNote').textContent=all.length?'Both groups use one axis, labeled from '+fmt(tk[0])+' to '+fmt(tk[tk.length-1])+'. The data run from '+fmt(S.dmin)+' to '+fmt(S.dmax)+'.':'No data yet, so the axis is a placeholder.';
+  var a=S.sA,b=S.sB;
+  svg.setAttribute('aria-label','Two groups on one number line. '+(a.n?'Group A: n '+a.n+', median '+fmt2(a.med)+', mean '+fmt2(a.mean)+'. ':'Group A is empty. ')+(b.n?'Group B: n '+b.n+', median '+fmt2(b.med)+', mean '+fmt2(b.mean)+'.':'Group B is empty.'));
+}
+function setHl(){
+  S.hl=S.hov||S.foc||S.pin;
+  var rows=$('tbody').children;
+  for(var i=0;i<rows.length;i++)rows[i].classList.toggle('hl',rows[i].getAttribute('data-key')===S.hl);
+  draw(S.view);
+}
+function fillInputs(){$('inA').value=S.A.join(', ');$('inB').value=S.B.join(', ');$('errA').textContent='';$('errB').textContent='';}
+
+function fullRender(animate,fade){
+  if(!svg)buildSvg();
+  var t=buildTarget();
+  drawTable();drawWords();updateNotes();
+  go(t,animate,fade);
+  updateMeta();
+}
+function rebuild(){buildSvg();S.view=null;fullRender(false);}
+
+/* ---------- Controls ---------- */
+function pickPreset(id){
+  var p=presetById(id);S.presetId=id;S.custom=false;S.pin=null;S.hov=null;S.foc=null;S.hl=null;
+  setData(p.A,p.B,p.w);fillInputs();fullRender(true);
+}
+function applyOwn(){
+  var ra=parseGroup($('inA').value,'Group A'),rb=parseGroup($('inB').value,'Group B');
+  $('errA').textContent=ra.error||'';$('errB').textContent=rb.error||'';
+  if(ra.error||rb.error)return;
+  S.custom=true;S.pin=null;S.hov=null;S.foc=null;S.hl=null;
+  setData(ra.values,rb.values);fullRender(true);
+  if(!ra.values.length)$('errA').textContent='Group A is empty. Add numbers to compare.';
+  if(!rb.values.length)$('errB').textContent='Group B is empty. Add numbers to compare.';
+}
+function init(){
+  var pr=$('presetRow');
+  PRESETS.forEach(function(p){
+    var b=document.createElement('button');
+    b.className='btn';b.id='p_'+p.id;b.textContent=p.label;b.setAttribute('aria-pressed','false');
+    b.addEventListener('click',function(){pickPreset(p.id);});
+    pr.appendChild(b);
+  });
+  $('modeDots').addEventListener('click',function(){S.mode='dots';fullRender(false,true);});
+  $('modeHist').addEventListener('click',function(){S.mode='hist';fullRender(false,true);});
+  $('convHalves').addEventListener('click',function(){S.conv='halves';fullRender(true);});
+  $('convInc').addEventListener('click',function(){S.conv='inc';fullRender(true);});
+  $('wSl').addEventListener('input',function(){S.w=rnd(parseFloat(this.value));fullRender(true);});
+  $('applyBtn').addEventListener('click',applyOwn);
+  $('resetBtn').addEventListener('click',function(){resetState();fillInputs();fullRender(true);});
+  var tb=$('tbody');
+  function keyOf(e){var r=e.target.closest?e.target.closest('tr'):null;return r?r.getAttribute('data-key'):null;}
+  tb.addEventListener('mouseover',function(e){var k=keyOf(e);if(k&&k!==S.hov){S.hov=k;setHl();}});
+  tb.addEventListener('mouseleave',function(){if(S.hov){S.hov=null;setHl();}});
+  tb.addEventListener('focusin',function(e){var k=keyOf(e);if(k){S.foc=k;setHl();}});
+  tb.addEventListener('focusout',function(){S.foc=null;setHl();});
+  tb.addEventListener('click',function(e){var k=keyOf(e);if(k){S.pin=(S.pin===k)?null:k;setHl();}});
+  tb.addEventListener('keydown',function(e){
+    var k=keyOf(e);
+    if(e.key==='Enter'||e.key===' '){if(k){e.preventDefault();S.pin=(S.pin===k)?null:k;setHl();}}
+    else if(e.key==='Escape'){S.pin=null;setHl();}
+  });
+  resetState();fillInputs();rebuild();
+  if(window.ResizeObserver){
+    var last=$('chartHost').clientWidth;
+    new ResizeObserver(function(){var w=$('chartHost').clientWidth;if(w!==last){last=w;rebuild();}}).observe($('chartHost'));
+  }else window.addEventListener('resize',rebuild);
+}
+if(typeof document!=='undefined'&&document.getElementById('chartHost'))init();
+</script>
+</body>
+</html>

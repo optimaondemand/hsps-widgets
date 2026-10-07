@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Galton Board — Order Out of Randomness</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 8px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 700px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  .lab { font-size: 0.72rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.05em; }
+  .btn { font-family: inherit; padding: 6px 11px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+  .btn:hover { background: #F8FAFD; }
+  .btn.go { background: #0E1C42; color: #fff; }
+  .btn.go:hover { background: #1b2f66; }
+  .btn.reset { border-color: #C0392B; color: #C0392B; margin-left: auto; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .sl { display: flex; align-items: center; gap: 8px; flex: 1 1 260px; font-size: 0.82rem; font-weight: 700; color: #0E1C42; }
+  .sl input[type=range] { flex: 1; min-width: 110px; }
+  .sl .val { min-width: 54px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 700; color: #0E1C42; cursor: pointer; }
+  .chk input { width: 18px; height: 18px; }
+  canvas { width: 100%; height: auto; display: block; background: #fff; border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  th, td { border: 1px solid #D0D9E8; padding: 4px 6px; text-align: center; }
+  th { background: #E8F6FB; color: #0E1C42; }
+  .note { font-size: 0.78rem; color: #6b7a99; line-height: 1.45; }
+  .hint { background: #E8F6FB; border-left: 4px solid #55C8E8; border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; line-height: 1.5; margin-top: 6px; }
+  .big { font-size: 1.05rem; font-weight: 800; color: #0E1C42; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Galton Board</h1>
+  <div class="subtitle">Each ball bounces left or right at every peg. Watch what the pile does as more balls fall.</div>
+
+  <div class="panel">
+    <canvas id="cv" width="700" height="520" role="img" aria-label="Galton board animation with histogram of where balls land"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <button class="btn go" id="d1">Drop 1</button>
+      <button class="btn go" id="d10">Drop 10</button>
+      <button class="btn go" id="d100">Drop 100</button>
+      <button class="btn" id="auto" aria-pressed="false">Keep dropping</button>
+      <button class="btn" id="burst">Skip ahead: +1000</button>
+      <button class="btn reset" id="reset">Clear board</button>
+    </div>
+    <div class="row">
+      <label class="sl" for="rows">Rows of pegs <input type="range" id="rows" min="2" max="20" step="1" value="10"> <span class="val" id="rowsV"></span></label>
+      <label class="sl" for="p">Chance of going right <input type="range" id="p" min="10" max="90" step="5" value="50"> <span class="val" id="pV"></span></label>
+    </div>
+    <div class="row">
+      <label class="sl" for="spd">Speed <input type="range" id="spd" min="1" max="10" step="1" value="6"> <span class="val" id="spdV"></span></label>
+      <label class="chk"><input type="checkbox" id="oBin"> Show what the binomial predicts</label>
+      <label class="chk"><input type="checkbox" id="oNorm"> Show a normal curve</label>
+    </div>
+    <div class="note">Changing rows or the chance of going right clears the board, because the rules of the experiment changed.</div>
+  </div>
+
+  <div class="panel" id="stats" aria-live="polite"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var cv = $('cv'), ctx = cv.getContext('2d');
+  var W = 700, H = 520;
+  var dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  var S = { n: 10, p: 0.5, counts: [], total: 0, balls: [], auto: false, spd: 6, last: 0, carry: 0, queue: 0 };
+
+  function reset() {
+    S.counts = []; for (var i = 0; i <= S.n; i++) S.counts.push(0);
+    S.total = 0; S.balls = []; S.queue = 0;
+    updateStats();
+  }
+
+  // ---------- geometry ----------
+  var CX = W / 2, Y0 = 52, BOT = 500;
+  function geo() {
+    var n = S.n;
+    var dx = Math.min(44, 620 / (n + 1));
+    var pegArea = Math.min(300, 15 * n + 90);   // vertical room used by pegs
+    var dy = pegArea / n;
+    var binTop = Y0 + n * dy + 4;
+    return { dx: dx, dy: dy, binTop: binTop, histH: BOT - binTop - 18 };
+  }
+  function pegX(g, r, j) { return CX + (j - r / 2) * g.dx; }
+  function binX(g, k) { return CX + (k - S.n / 2) * g.dx; }
+
+  // ---------- math ----------
+  function binomPmf(n, k, p) {
+    var c = 1, i;
+    for (i = 1; i <= k; i++) c = c * (n - k + i) / i;
+    return c * Math.pow(p, k) * Math.pow(1 - p, n - k);
+  }
+  function phi(z) { return Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI); }
+
+  // ---------- balls ----------
+  function newBall() {
+    var path = [0], r = 0, i;
+    for (i = 0; i < S.n; i++) { r += Math.random() < S.p ? 1 : 0; path.push(r); }
+    return { path: path, t: 0 };
+  }
+  function segTime() { return 520 - S.spd * 48; }   // ms per row, 472 .. 40
+  function dropMany(k) {
+    if (S.spd >= 10 && k >= 100) { instant(k); return; }
+    S.queue += k;
+  }
+  function instant(k) {
+    for (var i = 0; i < k; i++) {
+      var r = 0, j;
+      for (j = 0; j < S.n; j++) r += Math.random() < S.p ? 1 : 0;
+      S.counts[r]++; S.total++;
+    }
+    updateStats();
+  }
+
+  function step(now) {
+    var dt = Math.min(60, now - S.last); S.last = now;
+    var T = segTime();
+    // release balls from the queue / auto mode at a pace that keeps the stream readable
+    var perSec = S.spd * S.spd * 0.9 + 1.5;
+    if (S.auto || S.queue > 0) {
+      S.carry += dt / 1000 * perSec;
+      while (S.carry >= 1) {
+        S.carry -= 1;
+        if (S.balls.length < 140) { S.balls.push(newBall()); if (S.queue > 0) S.queue--; }
+        else break;
+      }
+    }
+    var landed = false, i;
+    for (i = S.balls.length - 1; i >= 0; i--) {
+      var b = S.balls[i];
+      b.t += dt / T;
+      if (b.t >= S.n + 1) {
+        S.counts[b.path[S.n]]++; S.total++; landed = true;
+        S.balls.splice(i, 1);
+      }
+    }
+    if (landed) updateStats();
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  // ---------- drawing ----------
+  function draw() {
+    var g = geo(), n = S.n, k, r, j;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    // funnel hint
+    ctx.fillStyle = '#C7922C';
+    ctx.beginPath(); ctx.moveTo(CX - 14, 14); ctx.lineTo(CX + 14, 14); ctx.lineTo(CX + 4, 30); ctx.lineTo(CX - 4, 30); ctx.closePath(); ctx.fill();
+    // pegs
+    ctx.fillStyle = '#0E1C42';
+    for (r = 0; r < n; r++) for (j = 0; j <= r; j++) {
+      ctx.beginPath(); ctx.arc(pegX(g, r, j), Y0 + r * g.dy, 3.2, 0, 6.2832); ctx.fill();
+    }
+    // bins: dividers
+    ctx.strokeStyle = '#D0D9E8'; ctx.lineWidth = 1;
+    for (k = 0; k <= n + 1; k++) {
+      var x = binX(g, k) - g.dx / 2;
+      ctx.beginPath(); ctx.moveTo(x, g.binTop); ctx.lineTo(x, BOT); ctx.stroke();
+    }
+    ctx.strokeStyle = '#0E1C42'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(binX(g, 0) - g.dx / 2, BOT); ctx.lineTo(binX(g, n) + g.dx / 2, BOT); ctx.stroke();
+    // bar scale
+    var maxC = 0, exp = [];
+    for (k = 0; k <= n; k++) {
+      maxC = Math.max(maxC, S.counts[k]);
+      exp.push(S.total * binomPmf(n, k, S.p));
+      if ($('oBin').checked || $('oNorm').checked) maxC = Math.max(maxC, exp[k]);
+    }
+    var unit = Math.min(14, g.histH / Math.max(1, maxC));
+    // bars
+    for (k = 0; k <= n; k++) {
+      var c = S.counts[k], h = c * unit, bx = binX(g, k) - g.dx / 2 + 2, bw = g.dx - 4;
+      if (c > 0) {
+        ctx.fillStyle = '#55C8E8'; ctx.fillRect(bx, BOT - h, bw, h);
+        ctx.strokeStyle = '#2a8fb0'; ctx.lineWidth = 1; ctx.strokeRect(bx + 0.5, BOT - h + 0.5, bw - 1, h - 1);
+        ctx.fillStyle = '#0E1C42'; ctx.font = '11px Segoe UI, Arial'; ctx.textAlign = 'center';
+        if (g.dx >= 22 || n <= 12) ctx.fillText(String(c), binX(g, k), BOT - h - 4);
+      }
+      ctx.fillStyle = '#6b7a99'; ctx.font = '10px Segoe UI, Arial'; ctx.textAlign = 'center';
+      if (g.dx >= 20 || k % 2 === 0) ctx.fillText(String(k), binX(g, k), BOT + 12);
+    }
+    ctx.fillStyle = '#6b7a99'; ctx.font = '10px Segoe UI, Arial'; ctx.textAlign = 'left';
+    ctx.fillText('bin number = number of times the ball went right', 8, 14);
+    // overlays
+    if ($('oBin').checked && S.total > 0) {
+      ctx.strokeStyle = '#C7922C'; ctx.lineWidth = 2;
+      for (k = 0; k <= n; k++) {
+        var bx2 = binX(g, k) - g.dx / 2 + 2, by = BOT - exp[k] * unit;
+        ctx.beginPath(); ctx.moveTo(bx2, by); ctx.lineTo(bx2 + g.dx - 4, by); ctx.stroke();
+      }
+    }
+    if ($('oNorm').checked && S.total > 0) {
+      var mu = n * S.p, sd = Math.sqrt(n * S.p * (1 - S.p));
+      ctx.strokeStyle = '#C0392B'; ctx.lineWidth = 2.5; ctx.beginPath();
+      for (var s = 0; s <= 200; s++) {
+        var kk = -0.5 + (n + 1) * s / 200;
+        var yv = S.total * phi((kk - mu) / sd) / sd * unit;
+        var px = CX + (kk - n / 2) * g.dx, py = BOT - yv;
+        if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+    // falling balls
+    ctx.fillStyle = '#C7922C'; ctx.strokeStyle = '#8a5f12'; ctx.lineWidth = 1;
+    S.balls.forEach(function (b) {
+      var seg = Math.min(n, Math.floor(b.t)), f = b.t - Math.floor(b.t);
+      var bx3, by3;
+      if (b.t >= n) {
+        // final drop into the bin
+        var kx = binX(g, b.path[n]);
+        var ff = Math.min(1, b.t - n);
+        var sxp = pegX(g, n - 1, b.path[n - 1]) , sxx = sxp + ((b.path[n] > b.path[n - 1]) ? 1 : -1) * 0;
+        bx3 = (1 - ff) * pegX(g, n - 1, b.path[n - 1]) + ff * kx;
+        by3 = (1 - ff) * (Y0 + (n - 1) * g.dy) + ff * (g.binTop + 6);
+      } else {
+        var x0 = seg === 0 ? CX : pegX(g, seg - 1, b.path[seg - 1]);
+        var y0 = seg === 0 ? 30 : Y0 + (seg - 1) * g.dy;
+        var x1 = pegX(g, seg, b.path[seg]);
+        var y1 = Y0 + seg * g.dy;
+        bx3 = x0 + (x1 - x0) * f;
+        by3 = y0 + (y1 - y0) * f * f * 0.5 + (y1 - y0) * f * 0.5;
+      }
+      ctx.beginPath(); ctx.arc(bx3, by3 - 4, 4.2, 0, 6.2832); ctx.fill(); ctx.stroke();
+    });
+  }
+
+  // ---------- stats ----------
+  function updateStats() {
+    var n = S.n, p = S.p, N = S.total, k;
+    var mu = n * p, sd = Math.sqrt(n * p * (1 - p));
+    var q = 1 - p, html = '';
+    var om = '—', os = '—', within = '—';
+    if (N > 0) {
+      var m = 0, v = 0;
+      for (k = 0; k <= n; k++) m += k * S.counts[k];
+      m /= N;
+      for (k = 0; k <= n; k++) v += S.counts[k] * (k - m) * (k - m);
+      var osd = Math.sqrt(v / N);
+      om = m.toFixed(2); os = osd.toFixed(2);
+      var c = 0;
+      for (k = 0; k <= n; k++) if (Math.abs(k - m) <= osd) c += S.counts[k];
+      within = (c / N * 100).toFixed(1) + '%';
+    }
+    var okNP = (n * p >= 10 && n * q >= 10);
+    html += '<div class="row"><span class="big">Balls dropped: ' + N + '</span></div>';
+    html += '<table><tr><th></th><th>What you observed</th><th>What the binomial formulas say</th></tr>' +
+      '<tr><td>Mean bin</td><td>' + om + '</td><td>n·p = ' + n + '·' + p.toFixed(2) + ' = ' + mu.toFixed(2) + '</td></tr>' +
+      '<tr><td>Spread (SD of bins)</td><td>' + os + '</td><td>√(n·p·(1−p)) = ' + sd.toFixed(2) + '</td></tr>' +
+      '<tr><td>Share within 1 SD of the observed mean</td><td>' + within + '</td><td>normal rule: about 68% (bins are whole numbers, so only roughly)</td></tr></table>';
+    html += '<div class="hint">n·p = ' + mu.toFixed(1) + ' and n·(1−p) = ' + (n * q).toFixed(1) + '. A common rule of thumb says the normal curve is a good stand-in for the binomial when both are at least 10 (some sources use 5). ' +
+      (okNP ? 'Here, both are at least 10.' : 'Here, at least one is below 10, so expect the pile to look lumpy or lopsided compared with a bell.') + '</div>';
+    $('stats').innerHTML = html;
+  }
+
+  // ---------- wiring ----------
+  function syncLabels() {
+    $('rowsV').textContent = S.n;
+    $('pV').textContent = Math.round(S.p * 100) + '%';
+    $('spdV').textContent = S.spd;
+  }
+  $('d1').onclick = function () { dropMany(1); };
+  $('d10').onclick = function () { dropMany(10); };
+  $('d100').onclick = function () { dropMany(100); };
+  $('burst').onclick = function () { instant(1000); };
+  $('auto').onclick = function () {
+    S.auto = !S.auto; this.setAttribute('aria-pressed', S.auto ? 'true' : 'false');
+    this.textContent = S.auto ? 'Stop dropping' : 'Keep dropping';
+  };
+  $('reset').onclick = function () { reset(); };
+  $('rows').oninput = function () { S.n = parseInt(this.value, 10); syncLabels(); reset(); };
+  $('p').oninput = function () { S.p = parseInt(this.value, 10) / 100; syncLabels(); reset(); };
+  $('spd').oninput = function () { S.spd = parseInt(this.value, 10); syncLabels(); };
+
+  syncLabels();
+  reset();
+  // pre-load a meaningful picture: 300 balls already landed
+  instant(300);
+  requestAnimationFrame(function (t) { S.last = t; step(t); });
+})();
+</script>
+</body>
+</html>

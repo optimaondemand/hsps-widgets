@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guess the Correlation</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 8px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 700px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  .lab { font-size: 0.72rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.05em; }
+  .btn { font-family: inherit; padding: 5px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .btn:hover:not(:disabled) { background: #F8FAFD; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  .btn.primary { background: #0E1C42; color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: #1b2f66; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .seg { display: flex; flex-wrap: wrap; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .seg .btn { border: none; border-radius: 0; }
+  .seg .btn + .btn { border-left: 2px solid #0E1C42; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .field { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 700; color: #0E1C42; }
+  .sl { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 0.82rem; font-weight: 700; color: #0E1C42; flex-wrap: wrap; }
+  .sl input[type=range] { flex: 1; min-width: 150px; accent-color: #0E1C42; height: 28px; }
+  .sl .val { min-width: 64px; text-align: right; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+  .ticks { display: flex; justify-content: space-between; font-size: 0.7rem; color: #6b7a99; font-variant-numeric: tabular-nums; padding: 0 2px; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { font-family: 'Segoe UI', Arial, sans-serif; }
+  .pl { touch-action: pan-y; }
+  .build { touch-action: none; cursor: crosshair; }
+  .readout { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+  .readout .big { font-size: 1.5rem; font-weight: 800; color: #0E1C42; font-variant-numeric: tabular-nums; }
+  .readout .small { font-size: 0.84rem; color: #1a2340; line-height: 1.5; }
+  .note { font-size: 0.78rem; color: #6b7a99; line-height: 1.45; }
+  .hide { display: none !important; }
+  .warn { background: #FDF3E3; border-left: 4px solid #C7922C; border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; line-height: 1.5; font-weight: 600; }
+  .score { display: flex; flex-wrap: wrap; gap: 6px; }
+  .score .cell { flex: 1 1 100px; background: #E8F6FB; border-radius: 8px; padding: 4px 8px; text-align: center; }
+  .score .cell b { display: block; font-size: 1.05rem; color: #0E1C42; font-variant-numeric: tabular-nums; }
+  .score .cell span { font-size: 0.7rem; color: #6b7a99; }
+  .therm { position: relative; padding-top: 18px; margin: 4px 8px 0; }
+  .track { position: relative; height: 16px; background: #fff; border: 2px solid #0E1C42; border-radius: 10px; }
+  .zone { position: absolute; top: -2px; height: 16px; background: #FDF3E3; border: 2px solid #C7922C; border-radius: 4px; transform: translateX(-50%); width: 5%; transition: left 200ms; }
+  .band { position: absolute; top: 4px; height: 4px; background: #55C8E8; transition: left 200ms, width 200ms; }
+  .mk { position: absolute; transition: left 200ms; transform: translateX(-50%); }
+  .mk.cur { top: -1px; width: 16px; height: 16px; border-radius: 50%; background: #0E1C42; border: 2px solid #fff; box-shadow: 0 0 0 1px #0E1C42; }
+  .mk.tgt { top: 0; font-size: 0.68rem; font-weight: 700; color: #8a5f12; white-space: nowrap; }
+  .pt { cursor: grab; fill: #55C8E8; stroke: #0E1C42; stroke-width: 1.5; }
+  .pt:focus { outline: none; stroke: #C7922C; stroke-width: 4; }
+  .fitline { transition: opacity 200ms; }
+  .ok { background: #E8F6FB; border: 2px solid #55C8E8; border-radius: 10px; padding: 6px 10px; font-weight: 700; color: #0E1C42; font-size: 0.88rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Guess the Correlation</h1>
+  <div class="subtitle">Train your eye for r. Every point here is simulated or constructed (made up) for practice.</div>
+
+  <div class="panel">
+    <div class="row">
+      <span class="lab">Mode</span>
+      <div class="seg" role="group" aria-label="Mode">
+        <button class="btn" id="m-guess" aria-pressed="true">Guess r</button>
+        <button class="btn" id="m-hit" aria-pressed="false">Hit the target</button>
+        <button class="btn" id="m-mis" aria-pressed="false">When r misleads</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ GUESS ============ -->
+  <section id="p-guess">
+    <div class="panel">
+      <div class="row"><span class="lab" id="gRound">Round 1</span><span class="note">Simulated scatter plot, <span id="gN">35</span> points.</span></div>
+      <svg id="gSvg" class="pl" viewBox="0 0 600 300" role="img" aria-label="Scatter plot of simulated points. Estimate the correlation r."></svg>
+    </div>
+    <div class="panel">
+      <div class="sl"><label for="gSlider">Your guess for r</label>
+        <input type="range" id="gSlider" min="-1" max="1" step="0.05" value="0" aria-valuetext="0.00">
+        <span class="val" id="gVal">0.00</span></div>
+      <div class="ticks" aria-hidden="true"><span>-1.00</span><span>0</span><span>+1.00</span></div>
+      <div class="row" style="margin-top:6px">
+        <button class="btn primary" id="gCheck">Check</button>
+        <button class="btn" id="gNext" disabled>Next plot</button>
+        <label class="field"><input type="checkbox" id="gFit" disabled> Show the best-fit line</label>
+      </div>
+    </div>
+    <div class="readout" id="gOut" aria-live="polite"><div class="small">Move the slider to your best estimate of r, then press Check. The arrow keys work on the slider too.</div></div>
+    <div class="panel"><div class="score" aria-live="polite">
+      <div class="cell"><b id="sPlayed">0</b><span>Rounds played</span></div>
+      <div class="cell"><b id="sMae">&mdash;</b><span>Mean absolute error</span></div>
+      <div class="cell"><b id="sBest">0</b><span>Best streak within 0.10</span></div>
+    </div></div>
+  </section>
+
+  <!-- ============ HIT THE TARGET ============ -->
+  <section id="p-hit" class="hide">
+    <div class="panel">
+      <div class="row"><span class="lab">Target</span><b id="hTarget" style="font-size:1.3rem;color:#0E1C42">r = +0.50</b>
+        <span class="note">Build a scatter plot whose r matches it.</span></div>
+      <svg id="hSvg" class="build" viewBox="0 0 600 300" role="group" aria-label="Plot area. Click to add a point. Drag a point to move it."></svg>
+      <div class="note" style="margin-top:4px">Click to add a point. Drag to move one. Double-click or long-press a point to remove it. Focus a point and use the arrow keys to nudge it (Shift for bigger steps); Delete removes it.</div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <button class="btn" id="hAdd">Add a point</button>
+        <button class="btn" id="hUndo">Remove last</button>
+        <button class="btn" id="hClear">Clear</button>
+        <button class="btn" id="hFill">Auto-fill 20 random points</button>
+        <span class="note" id="hCount" aria-live="polite">20 / 40 points</span>
+      </div>
+    </div>
+    <div class="readout" aria-live="polite">
+      <div class="big" id="hR">r = &mdash;</div>
+      <div class="therm" aria-hidden="true">
+        <div class="track"><div class="zone" id="hZone"></div><div class="band" id="hBand"></div><div class="mk cur" id="hCur"></div></div>
+      </div>
+      <div class="ticks" aria-hidden="true"><span>-1</span><span>0</span><span>+1</span></div>
+      <div class="small" id="hMsg" style="margin-top:4px"></div>
+      <div class="row" style="margin-top:6px"><button class="btn primary" id="hNew">New target</button></div>
+    </div>
+    <div class="panel note">r is computed from the points in the plot, all of them, every time you change one. The gold zone on the bar marks within 0.05 of the target; the navy dot is your current r. All points are ones you placed (nothing here is real data).</div>
+  </section>
+
+  <!-- ============ WHEN r MISLEADS ============ -->
+  <section id="p-mis" class="hide">
+    <div class="panel">
+      <div class="row">
+        <span class="lab">Point set</span>
+        <div class="seg" role="group" aria-label="Point set">
+          <button class="btn" id="x-curve" aria-pressed="true">A. A curve</button>
+          <button class="btn" id="x-outlier" aria-pressed="false">B. An outlier</button>
+          <button class="btn" id="x-clusters" aria-pressed="false">C. Two clusters</button>
+          <button class="btn" id="x-line" aria-pressed="false">D. A straight line</button>
+        </div>
+      </div>
+      <div class="note" id="xWhat"></div>
+      <svg id="xSvg" class="pl" viewBox="0 0 600 300" role="img" aria-label="Constructed scatter plot"></svg>
+      <div class="row" style="margin-top:6px">
+        <button class="btn" id="xToggle" aria-pressed="false">Remove the outlier</button>
+        <label class="field"><input type="checkbox" id="xFit"> Show the best-fit line</label>
+      </div>
+    </div>
+    <div class="readout" aria-live="polite">
+      <div class="big" id="xR">r = &mdash;</div>
+      <div class="small" id="xExtra"></div>
+      <div class="small" id="xTake" style="margin-top:4px;font-weight:600"></div>
+    </div>
+    <div class="warn">r measures straight-line association only. A high r does not show that x causes y.</div>
+    <div class="note" style="margin-top:8px">Each point set was constructed for this exercise (made up, not measured). r is computed from the points shown.</div>
+  </section>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ==================== CORE START (pure functions, no DOM) ====================
+  // mulberry32: small seeded generator, so round i always looks the same.
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function gauss(rand) { // Box-Muller
+    var u = 0;
+    while (u === 0) u = rand();
+    var v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+  // Pearson r = Sxy / sqrt(Sxx * Syy). Returns null if fewer than 3 points or no spread in x or y.
+  function pearson(xs, ys) {
+    var n = xs.length, i;
+    if (n < 3 || ys.length !== n) return null;
+    var mx = 0, my = 0;
+    for (i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+    mx /= n; my /= n;
+    var sxx = 0, syy = 0, sxy = 0;
+    for (i = 0; i < n; i++) {
+      var dx = xs[i] - mx, dy = ys[i] - my;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    if (!(sxx > 1e-12) || !(syy > 1e-12)) return null;
+    var r = sxy / Math.sqrt(sxx * syy);
+    return Math.max(-1, Math.min(1, r));
+  }
+  function pearsonPts(pts) {
+    return pearson(pts.map(function (p) { return p[0]; }), pts.map(function (p) { return p[1]; }));
+  }
+  // Least-squares line y = a + b x (null if no spread in x).
+  function fitLine(pts) {
+    var n = pts.length, i, mx = 0, my = 0;
+    if (n < 2) return null;
+    for (i = 0; i < n; i++) { mx += pts[i][0]; my += pts[i][1]; }
+    mx /= n; my /= n;
+    var sxx = 0, sxy = 0;
+    for (i = 0; i < n; i++) { sxx += (pts[i][0] - mx) * (pts[i][0] - mx); sxy += (pts[i][0] - mx) * (pts[i][1] - my); }
+    if (!(sxx > 1e-12)) return null;
+    var b = sxy / sxx;
+    return { a: my - b * mx, b: b };
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function q4(v) { return Math.floor(v * 10000 + 0.5) / 10000; }
+
+  // How a scatter hits a target r:
+  //   x ~ normal, noise ~ normal, y = target*x + sqrt(1 - target^2)*noise,
+  //   then both are mapped into the 0..1 plot square (0.5 + z/6.4, clamped to 0.03..0.97, 4 decimals).
+  //   Sampling makes the sample r wander, so up to 30 candidate samples are drawn from the same
+  //   seeded stream and the first whose r (computed from the rounded plotted points) is within 0.03
+  //   of the target is kept (if none is, the closest one is kept).
+  function makeScatter(seed, target, n) {
+    var rand = mulberry32(seed), best = null, bestErr = Infinity, k = Math.sqrt(1 - target * target);
+    for (var att = 0; att < 30; att++) {
+      var pts = [], i;
+      for (i = 0; i < n; i++) {
+        var x = gauss(rand), e = gauss(rand), y = target * x + k * e;
+        pts.push([q4(clamp(0.5 + x / 6.4, 0.03, 0.97)), q4(clamp(0.5 + y / 6.4, 0.03, 0.97))]);
+      }
+      var r = pearsonPts(pts), err = r === null ? Infinity : Math.abs(r - target);
+      if (err < bestErr) { bestErr = err; best = { points: pts, r: r, target: target, attempts: att + 1 }; }
+      if (err <= 0.03) break;
+    }
+    return best;
+  }
+  var TARGETS16 = [0.8, -0.9, 0.3, -0.5, 0.95, 0, -0.2, 0.6, -0.75, 0.1, 0.5, -0.95, -0.1, 0.7, -0.35, 0.9];
+  function roundSpec(i) { return { seed: 20260 + i * 7919, target: TARGETS16[(i * 5) % 16], n: 30 + (i * 7) % 11 }; }
+  function makeRound(i) { var s = roundSpec(i); return makeScatter(s.seed, s.target, s.n); }
+
+  function fmtR(r) {
+    if (r === null || r === undefined || !isFinite(r)) return '—';
+    var s = r.toFixed(2);
+    if (Math.abs(r) < 0.005) return '0.00';
+    return (r > 0 ? '+' : '') + s;
+  }
+  function strengthWord(r) {
+    var a = Math.abs(r);
+    return a < 0.3 ? 'weak' : a < 0.6 ? 'moderate' : a < 0.85 ? 'strong' : 'very strong';
+  }
+  function describe(r) {
+    if (r === null) return 'no linear association can be measured';
+    if (Math.abs(r) < 0.1) return 'little or no linear association';
+    return strengthWord(r) + ' ' + (r > 0 ? 'positive' : 'negative') + ' linear association';
+  }
+
+  // Constructed point sets for "When r misleads" (made up for this exercise; x and y on a 0 to 10 scale).
+  var SETS = /*SETS_START*/{"curve":[[1.0,8.9],[1.5,6.1],[2.0,4.8],[2.5,3.9],[3.0,1.7],[3.5,1.5],[4.0,0.3],[4.5,0.6],[5.0,0.3],[5.5,0.4],[6.0,0.6],[6.5,0.8],[7.0,2.7],[7.5,3.0],[8.0,5.1],[8.5,6.3],[9.0,8.7]],"outlier":[[1.5,1.8],[2,1.6],[2.5,2.7],[3,3.5],[3.5,3.3],[4,3.5],[4.5,4.8],[5,5.1],[5.5,5.2],[6,6.4],[6.5,6.4],[7,6.6],[3,2.7],[5,5.4],[4.2,4.8]],"outlierPt":[9.5,1.0],"c1":[[1.5,2.2],[2.2,3.1],[3.0,1.9],[1.8,2.9],[2.6,2.4],[1.2,2.6],[3.1,2.8],[2.1,1.6]],"c2":[[7.0,7.4],[7.8,8.3],[8.7,7.1],[7.3,8.1],[8.2,7.7],[6.9,7.9],[8.8,8.4],[7.7,6.9]],"line":[[1.0,1.7],[1.55,1.1],[2.1,2.3],[2.65,3.5],[3.2,2.5],[3.75,4.2],[4.3,3.4],[4.85,5.1],[5.4,6.1],[5.95,5.7],[6.5,5.8],[7.05,7.5],[7.6,8.5],[8.15,7.7],[8.7,8.9],[9.25,8.6]]}/*SETS_END*/;
+  function setPoints(key, outlierOn) {
+    if (key === 'curve') return SETS.curve.slice();
+    if (key === 'line') return SETS.line.slice();
+    if (key === 'clusters') return SETS.c1.concat(SETS.c2);
+    return outlierOn ? SETS.outlier.concat([SETS.outlierPt]) : SETS.outlier.slice();
+  }
+  // ==================== CORE END ====================
+
+  var $ = function (id) { return document.getElementById(id); };
+  var NS = 'http://www.w3.org/2000/svg';
+
+  // ---------- plot geometry (shared) ----------
+  var W = 600, H = 300, PL = 34, PR = 586, PT = 12, PB = 268;
+  function px(u) { return PL + u * (PR - PL); }
+  function py(v) { return PB - v * (PB - PT); }
+  function base(id) {
+    return '<defs><clipPath id="clip' + id + '"><rect x="' + PL + '" y="' + PT + '" width="' + (PR - PL) + '" height="' + (PB - PT) + '"/></clipPath></defs>' +
+      '<rect x="' + PL + '" y="' + PT + '" width="' + (PR - PL) + '" height="' + (PB - PT) + '" fill="#FAFBFE" stroke="#D0D9E8"/>' +
+      '<line x1="' + PL + '" y1="' + PT + '" x2="' + PL + '" y2="' + PB + '" stroke="#0E1C42" stroke-width="2"/>' +
+      '<line x1="' + PL + '" y1="' + PB + '" x2="' + PR + '" y2="' + PB + '" stroke="#0E1C42" stroke-width="2"/>' +
+      '<text x="' + PR + '" y="' + (PB + 18) + '" text-anchor="end" font-size="14" font-style="italic" fill="#0E1C42">x</text>' +
+      '<text x="' + (PL - 8) + '" y="' + (PT + 12) + '" text-anchor="end" font-size="14" font-style="italic" fill="#0E1C42">y</text>';
+  }
+  function dot(u, v, kind) {
+    var x = px(u), y = py(v);
+    if (kind === 'sq') return '<rect x="' + (x - 6) + '" y="' + (y - 6) + '" width="12" height="12" fill="#FDF3E3" stroke="#C7922C" stroke-width="2"/>';
+    if (kind === 'out') return '<circle cx="' + x + '" cy="' + y + '" r="8" fill="#fff" stroke="#C0392B" stroke-width="3"/>' +
+      '<text x="' + (x - 12) + '" y="' + (y - 12) + '" text-anchor="end" font-size="12" font-weight="700" fill="#C0392B">far-away point</text>';
+    return '<circle cx="' + x + '" cy="' + y + '" r="6" fill="#55C8E8" stroke="#0E1C42" stroke-width="1.5"/>';
+  }
+  function fitSvg(id, pts, on) { // pts in unit coordinates
+    var f = fitLine(pts);
+    if (!f) return '';
+    return '<line class="fitline" id="' + id + '" x1="' + px(0) + '" y1="' + py(f.a) + '" x2="' + px(1) + '" y2="' + py(f.a + f.b) + '" stroke="#C7922C" stroke-width="3" stroke-dasharray="9 5" clip-path="url(#clip' + id + ')" style="opacity:' + (on ? 1 : 0) + '"/>';
+  }
+  // (clip id needs its own def; simplest is to reuse the base clip per svg)
+  function fixClip(svgId, lineId) { var el = $(lineId); if (el) el.setAttribute('clip-path', 'url(#clip' + svgId + ')'); }
+
+  // ==================== MODE 1: GUESS ====================
+  var G = { i: 0, cur: null, checked: false, played: 0, sumErr: 0, streak: 0, best: 0, last: null };
+  function setGuessVal() {
+    var v = Math.round(parseFloat($('gSlider').value) * 20) / 20;
+    $('gVal').textContent = fmtR(v);
+    $('gSlider').setAttribute('aria-valuetext', fmtR(v));
+    return v;
+  }
+  function newRound() {
+    G.cur = makeRound(G.i);
+    G.checked = false;
+    var pts = G.cur.points;
+    var s = base('g');
+    pts.forEach(function (p) { s += dot(p[0], p[1], 'c'); });
+    s += fitSvg('gFitLine', pts, false);
+    $('gSvg').innerHTML = s; fixClip('g', 'gFitLine');
+    $('gRound').textContent = 'Round ' + (G.i + 1);
+    $('gN').textContent = pts.length;
+    $('gSlider').value = 0; $('gSlider').disabled = false; setGuessVal();
+    $('gCheck').disabled = false; $('gNext').disabled = true;
+    $('gFit').checked = false; $('gFit').disabled = true;
+    $('gOut').innerHTML = '<div class="small">Move the slider to your best estimate of r, then press Check. The arrow keys work on the slider too.</div>';
+  }
+  function guessCheck() {
+    if (G.checked) return;
+    var guess = setGuessVal();
+    var actual = pearsonPts(G.cur.points);
+    if (actual === null) actual = 0;
+    var err = guess - actual, abs = Math.abs(err), within = abs <= 0.10 + 1e-9;
+    G.checked = true; G.played++; G.sumErr += abs;
+    if (within) { G.streak++; if (G.streak > G.best) G.best = G.streak; } else G.streak = 0;
+    G.last = { guess: guess, actual: actual, err: err, within: within };
+    var dirWord = abs < 0.005 ? 'the same as the actual r' : (err < 0 ? 'below the actual r' : 'above the actual r');
+    var trend = Math.abs(actual) < 0.1 ? 'Knowing x tells you very little about y along a straight line.' :
+      (actual > 0 ? 'y tends to increase as x increases.' : 'y tends to decrease as x increases.');
+    $('gOut').innerHTML =
+      '<div class="small">Actual r, computed from the ' + G.cur.points.length + ' plotted points</div>' +
+      '<div class="big">' + fmtR(actual) + '</div>' +
+      '<div class="small">Your guess: <b>' + fmtR(guess) + '</b>. Difference: <b>' + abs.toFixed(2) + '</b> (your guess was ' + dirWord + '). ' +
+      (within ? '<b>Within 0.10.</b>' : '<b>Not within 0.10.</b>') + '</div>' +
+      '<div class="small">These points show a <b>' + describe(actual) + '</b>. ' + trend + '</div>';
+    $('gSlider').disabled = true; $('gCheck').disabled = true; $('gNext').disabled = false; $('gFit').disabled = false;
+    $('sPlayed').textContent = G.played;
+    $('sMae').textContent = (G.sumErr / G.played).toFixed(2);
+    $('sBest').textContent = G.best;
+    $('gNext').focus();
+  }
+  $('gSlider').addEventListener('input', setGuessVal);
+  $('gCheck').onclick = guessCheck;
+  $('gNext').onclick = function () { G.i++; newRound(); $('gSlider').focus(); };
+  $('gFit').onchange = function () { var el = $('gFitLine'); if (el) el.style.opacity = this.checked ? 1 : 0; };
+
+  // ==================== MODE 2: HIT THE TARGET ====================
+  var HT = [0.9, 0.5, 0, -0.3, -0.8];
+  var M = { pts: [], tIdx: 1, tCount: 0, fills: 0 };
+  var hSvg = $('hSvg'), hGroup;
+  function hInit() {
+    hSvg.innerHTML = base('h') + '<g id="hPts"></g>';
+    hGroup = $('hPts');
+  }
+  function hSync() {
+    var els = hGroup.children, i;
+    while (els.length < M.pts.length) {
+      var c = document.createElementNS(NS, 'circle');
+      c.setAttribute('class', 'pt'); c.setAttribute('r', 8); c.setAttribute('tabindex', 0); c.setAttribute('role', 'button');
+      hGroup.appendChild(c);
+    }
+    while (els.length > M.pts.length) hGroup.removeChild(els[els.length - 1]);
+    for (i = 0; i < M.pts.length; i++) {
+      var e = els[i];
+      e.setAttribute('cx', px(M.pts[i][0]).toFixed(1)); e.setAttribute('cy', py(M.pts[i][1]).toFixed(1));
+      e.setAttribute('data-i', i);
+      e.setAttribute('aria-label', 'Point ' + (i + 1) + ' of ' + M.pts.length + ', x ' + M.pts[i][0].toFixed(2) + ', y ' + M.pts[i][1].toFixed(2) + '. Arrow keys move it, Delete removes it.');
+    }
+    hUpdate();
+  }
+  function hUpdate() {
+    var r = pearsonPts(M.pts), t = HT[M.tIdx];
+    $('hTarget').textContent = 'r = ' + fmtR(t);
+    $('hCount').textContent = M.pts.length + ' / 40 points';
+    $('hR').textContent = 'r = ' + fmtR(r);
+    var tl = (t + 1) / 2 * 100;
+    $('hZone').style.left = tl + '%';
+    var cur = $('hCur'), band = $('hBand'), msg = $('hMsg');
+    if (r === null) {
+      cur.style.visibility = 'hidden'; band.style.width = '0%';
+      msg.innerHTML = 'Add at least 3 points that vary in both x and y to see r. Target: ' + fmtR(t) + '.';
+      return null;
+    }
+    cur.style.visibility = 'visible';
+    var cl = (r + 1) / 2 * 100;
+    cur.style.left = cl + '%';
+    band.style.left = Math.min(cl, tl) + '%'; band.style.width = Math.abs(cl - tl) + '%';
+    var gap = Math.abs(r - t);
+    if (gap <= 0.05 + 1e-9) {
+      msg.innerHTML = '<div class="ok">&#10003; Within 0.05 of the target. Your r is ' + fmtR(r) + ' and the target is ' + fmtR(t) + '. Press New target to try another.</div>';
+    } else {
+      msg.innerHTML = 'Gap to target: <b>' + gap.toFixed(2) + '</b>. Your r is ' + fmtR(r) + (r < t ? ', below' : ', above') + ' the target of ' + fmtR(t) + '. You need to be within 0.05.';
+    }
+    return gap;
+  }
+  function hAddAt(u, v) {
+    if (M.pts.length >= 40) { $('hMsg').innerHTML = 'The plot holds up to 40 points. Move or remove one.'; return -1; }
+    M.pts.push([clamp(u, 0.01, 0.99), clamp(v, 0.01, 0.99)]);
+    hSync(); return M.pts.length - 1;
+  }
+  function hRemove(i) {
+    if (i < 0 || i >= M.pts.length) return;
+    var hadFocus = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute('data-i') !== null;
+    M.pts.splice(i, 1); hSync();
+    if (hadFocus && M.pts.length) hGroup.children[Math.min(i, M.pts.length - 1)].focus();
+  }
+  function hFill() {
+    var rand = mulberry32(555 + 31 * (M.fills++)), a = [];
+    for (var i = 0; i < 20; i++) a.push([q4(0.08 + 0.84 * rand()), q4(0.08 + 0.84 * rand())]);
+    M.pts = a; hSync();
+  }
+  function hNewTarget() {
+    var rand = mulberry32(900 + 13 * (++M.tCount)), j;
+    do { j = Math.floor(rand() * HT.length); } while (j === M.tIdx);
+    M.tIdx = j; hUpdate();
+  }
+  function evUV(e) {
+    var rc = hSvg.getBoundingClientRect();
+    var sx = (e.clientX - rc.left) / rc.width * W, sy = (e.clientY - rc.top) / rc.height * H;
+    return [clamp((sx - PL) / (PR - PL), 0, 1), clamp((PB - sy) / (PB - PT), 0, 1), sx, sy];
+  }
+  var drag = null;
+  hSvg.addEventListener('pointerdown', function (e) {
+    if (e.button !== undefined && e.button > 0) return;
+    var t = e.target, idx;
+    if (t && t.getAttribute && t.getAttribute('data-i') !== null) {
+      idx = parseInt(t.getAttribute('data-i'), 10);
+      t.focus();
+    } else {
+      var uv = evUV(e);
+      idx = hAddAt(uv[0], uv[1]);
+      if (idx < 0) return;
+    }
+    e.preventDefault();
+    drag = { i: idx, x0: e.clientX, y0: e.clientY, moved: false, timer: null };
+    drag.timer = setTimeout(function () { if (drag && !drag.moved) { var k = drag.i; drag = null; hRemove(k); } }, 650);
+  });
+  document.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    if (!drag.moved && Math.abs(e.clientX - drag.x0) + Math.abs(e.clientY - drag.y0) > 4) { drag.moved = true; clearTimeout(drag.timer); }
+    if (drag.moved) {
+      var uv = evUV(e);
+      M.pts[drag.i] = [clamp(uv[0], 0.01, 0.99), clamp(uv[1], 0.01, 0.99)];
+      var c = hGroup.children[drag.i];
+      c.setAttribute('cx', px(M.pts[drag.i][0]).toFixed(1)); c.setAttribute('cy', py(M.pts[drag.i][1]).toFixed(1));
+      hUpdate();
+    }
+  });
+  function endDrag() { if (drag) { clearTimeout(drag.timer); var moved = drag.moved; drag = null; if (moved) hSync(); } }
+  document.addEventListener('pointerup', endDrag);
+  document.addEventListener('pointercancel', endDrag);
+  hSvg.addEventListener('dblclick', function (e) {
+    var uv = evUV(e), best = -1, bd = 16;
+    M.pts.forEach(function (p, i) { var d = Math.hypot(px(p[0]) - uv[2], py(p[1]) - uv[3]); if (d < bd) { bd = d; best = i; } });
+    if (best >= 0) { if (drag) { clearTimeout(drag.timer); drag = null; } hRemove(best); }
+  });
+  hSvg.addEventListener('keydown', function (e) {
+    var t = e.target;
+    if (!t.getAttribute || t.getAttribute('data-i') === null) return;
+    var i = parseInt(t.getAttribute('data-i'), 10), step = e.shiftKey ? 0.1 : 0.02, p = M.pts[i];
+    if (e.key === 'ArrowLeft') p[0] = clamp(p[0] - step, 0.01, 0.99);
+    else if (e.key === 'ArrowRight') p[0] = clamp(p[0] + step, 0.01, 0.99);
+    else if (e.key === 'ArrowUp') p[1] = clamp(p[1] + step, 0.01, 0.99);
+    else if (e.key === 'ArrowDown') p[1] = clamp(p[1] - step, 0.01, 0.99);
+    else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); hRemove(i); return; }
+    else return;
+    e.preventDefault(); hSync();
+  });
+  $('hAdd').onclick = function () {
+    var rand = mulberry32(77 + M.pts.length * 17 + M.tCount);
+    var k = hAddAt(0.3 + 0.4 * rand(), 0.3 + 0.4 * rand());
+    if (k >= 0) hGroup.children[k].focus();
+  };
+  $('hUndo').onclick = function () { if (M.pts.length) { M.pts.pop(); hSync(); } };
+  $('hClear').onclick = function () { M.pts = []; hSync(); };
+  $('hFill').onclick = hFill;
+  $('hNew').onclick = hNewTarget;
+
+  // ==================== MODE 3: WHEN r MISLEADS ====================
+  var X = { key: 'curve', out: true, fit: false };
+  var WHAT = {
+    curve: 'Set A: points that follow a clear U-shaped curve (constructed for this exercise).',
+    outlier: 'Set B: a tight, straight-line cloud plus one far-away point (constructed for this exercise).',
+    clusters: 'Set C: two separate clusters of points (constructed for this exercise).',
+    line: 'Set D: a clean straight-line pattern, for contrast (constructed for this exercise).'
+  };
+  function renderX() {
+    var key = X.key, pts = setPoints(key, X.out), s = base('x'), u = [];
+    ['curve', 'outlier', 'clusters', 'line'].forEach(function (k) { $('x-' + k).setAttribute('aria-pressed', k === key ? 'true' : 'false'); });
+    $('xWhat').textContent = WHAT[key];
+    pts.forEach(function (p) { u.push([p[0] / 10, p[1] / 10]); });
+    if (key === 'clusters') {
+      u.forEach(function (p, i) { s += dot(p[0], p[1], i < SETS.c1.length ? 'c' : 'sq'); });
+    } else {
+      u.forEach(function (p, i) { s += dot(p[0], p[1], (key === 'outlier' && X.out && i === u.length - 1) ? 'out' : 'c'); });
+    }
+    s += fitSvg('xFitLine', u, X.fit);
+    if (key === 'clusters') s += '<g font-size="12" fill="#0E1C42"><circle cx="' + (PR - 150) + '" cy="' + (PT + 14) + '" r="5" fill="#55C8E8" stroke="#0E1C42"/><text x="' + (PR - 140) + '" y="' + (PT + 18) + '">cluster 1</text>' +
+      '<rect x="' + (PR - 80) + '" y="' + (PT + 9) + '" width="10" height="10" fill="#FDF3E3" stroke="#C7922C" stroke-width="2"/><text x="' + (PR - 66) + '" y="' + (PT + 18) + '">cluster 2</text></g>';
+    $('xSvg').innerHTML = s; fixClip('x', 'xFitLine');
+    $('xToggle').classList.toggle('hide', key !== 'outlier');
+    $('xToggle').setAttribute('aria-pressed', X.out ? 'false' : 'true');
+    $('xToggle').textContent = X.out ? 'Remove the outlier' : 'Put the outlier back';
+    var r = pearsonPts(pts), extra = '', take = '';
+    $('xR').textContent = 'r = ' + fmtR(r) + ' (' + pts.length + ' points)';
+    if (key === 'curve') {
+      take = 'The points follow a clear curve, yet r is close to 0. r only measures how closely points follow a straight line, so a strong pattern that bends can still give an r near 0.';
+    } else if (key === 'outlier') {
+      var rWith = pearsonPts(setPoints('outlier', true)), rWithout = pearsonPts(setPoints('outlier', false));
+      extra = 'With the far-away point: r = ' + fmtR(rWith) + '. Without it: r = ' + fmtR(rWithout) + '.';
+      take = X.out ? 'One far-away point pulls r down from ' + fmtR(rWithout) + ' to ' + fmtR(rWith) + '. A single unusual point can change r a lot.' :
+        'Without the far-away point, the other ' + pts.length + ' points hug a straight line closely. Press the button again to see how much one point can change r.';
+    } else if (key === 'clusters') {
+      var r1 = pearsonPts(SETS.c1), r2 = pearsonPts(SETS.c2);
+      extra = 'Cluster 1 alone: r = ' + fmtR(r1) + '. Cluster 2 alone: r = ' + fmtR(r2) + '.';
+      take = 'Together the clusters give a strong r, but inside each cluster there is no straight-line trend. The strong r comes from the gap between the two groups.';
+    } else {
+      take = 'These points sit close to a straight line, so r is close to +1. This is the kind of pattern r is built to summarize.';
+    }
+    $('xExtra').textContent = extra; $('xTake').textContent = take;
+  }
+  ['curve', 'outlier', 'clusters', 'line'].forEach(function (k) { $('x-' + k).onclick = function () { X.key = k; renderX(); }; });
+  $('xToggle').onclick = function () { X.out = !X.out; renderX(); };
+  $('xFit').onchange = function () { X.fit = this.checked; var el = $('xFitLine'); if (el) el.style.opacity = X.fit ? 1 : 0; };
+
+  // ==================== MODES ====================
+  function setMode(m) {
+    [['guess', 'p-guess', 'm-guess'], ['hit', 'p-hit', 'm-hit'], ['mis', 'p-mis', 'm-mis']].forEach(function (a) {
+      $(a[1]).classList.toggle('hide', a[0] !== m);
+      $(a[2]).setAttribute('aria-pressed', a[0] === m ? 'true' : 'false');
+    });
+    if (m === 'mis') renderX();
+    if (m === 'hit') hUpdate();
+  }
+  $('m-guess').onclick = function () { setMode('guess'); };
+  $('m-hit').onclick = function () { setMode('hit'); };
+  $('m-mis').onclick = function () { setMode('mis'); };
+
+  // ---------- start ----------
+  newRound();
+  hInit(); hFill();
+  renderX();
+
+  window.CG = { mulberry32: mulberry32, gauss: gauss, pearson: pearson, pearsonPts: pearsonPts, fitLine: fitLine, makeScatter: makeScatter,
+    roundSpec: roundSpec, makeRound: makeRound, describe: describe, fmtR: fmtR, SETS: SETS, setPoints: setPoints, TARGETS16: TARGETS16,
+    G: G, M: M, X: X, HT: HT, hSync: hSync, hAddAt: hAddAt, hUpdate: hUpdate, guessCheck: guessCheck };
+})();
+</script>
+</body>
+</html>

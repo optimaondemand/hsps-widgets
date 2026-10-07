@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fit the Line — Regression Playground</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 8px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 8px; }
+  .wrap { max-width: 700px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 6px 12px; margin-bottom: 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 5px; }
+  .row:last-child { margin-bottom: 0; }
+  .lab { font-size: 0.72rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 2px; }
+  button { font-family: inherit; }
+  .btn { padding: 5px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .btn:hover:not(:disabled) { background: #F8FAFD; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.reset { border-color: #C0392B; color: #C0392B; margin-left: auto; }
+  .btn.reset:hover { background: #fdf0ee; }
+  .btn.gold { border-color: #C7922C; color: #8a5f12; background: #FDF3E3; }
+  .btn.gold[aria-pressed="true"] { background: #C7922C; color: #fff; }
+  .seg { display: flex; flex-wrap: wrap; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .seg .btn { border: none; border-radius: 0; }
+  .seg .btn + .btn { border-left: 2px solid #0E1C42; }
+  button:focus-visible, input:focus-visible, g:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 700; color: #0E1C42; cursor: pointer; }
+  .chk input { width: 18px; height: 18px; }
+  .sl { flex: 1 1 45%; display: flex; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 700; color: #0E1C42; }
+  .sl span.nm { white-space: nowrap; }
+  .sl input[type=range] { flex: 1 1 80px; min-width: 70px; accent-color: #C7922C; height: 22px; }
+  .sl output { min-width: 56px; text-align: right; font-variant-numeric: tabular-nums; color: #8a5f12; }
+  .addbox { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; background: #FDF3E3; border: 1px solid #C7922C; border-radius: 8px; padding: 3px 8px; }
+  .addbox label { font-size: 0.78rem; font-weight: 700; color: #8a5f12; }
+  .addbox input[type=number], .predin input[type=number] { width: 66px; padding: 3px 5px; border: 2px solid #D0D9E8; border-radius: 6px; font-size: 0.8rem; font-family: inherit; }
+  .ctx { font-size: 0.78rem; color: #6b7a99; margin-bottom: 3px; }
+  .ctx strong { color: #0E1C42; }
+  .host { width: 100%; touch-action: pan-y; }
+  svg { display: block; width: 100%; height: auto; overflow: hidden; user-select: none; -webkit-user-select: none; }
+  svg text { font-family: 'Segoe UI', Arial, sans-serif; fill: #1a2340; }
+  .small { font-size: 0.74rem; color: #6b7a99; line-height: 1.45; }
+  g.dot { cursor: grab; touch-action: none; outline: none; }
+  g.dot.dragging { cursor: grabbing; }
+  g.dot .body { fill: #9DBBDD; stroke: #0E1C42; stroke-width: 1.5; }
+  g.dot .focusring { fill: none; stroke: #55C8E8; stroke-width: 3; display: none; }
+  g.dot:focus-visible .focusring, g.hdl:focus-visible .focusring { display: block; }
+  g.hdl { cursor: ns-resize; touch-action: none; outline: none; }
+  g.hdl .body { fill: #C7922C; stroke: #0E1C42; stroke-width: 2; }
+  g.hdl .focusring { fill: none; stroke: #55C8E8; stroke-width: 3; display: none; }
+  g.mk { cursor: ew-resize; touch-action: none; outline: none; }
+  g.mk .body { fill: #55C8E8; stroke: #0E1C42; stroke-width: 2; }
+  g.mk .focusring { fill: none; stroke: #0E1C42; stroke-width: 2; stroke-dasharray: 3 2; display: none; }
+  g.mk:focus-visible .focusring { display: block; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+  .cell { flex: 1 1 80px; background: #EEF1F8; border-radius: 8px; padding: 3px 2px; text-align: center; min-width: 78px; }
+  .cell .k { font-size: 0.6rem; white-space: nowrap; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7a99; }
+  .cell .v { font-size: 0.95rem; font-weight: 900; color: #0E1C42; }
+  .cell.q { background: #E8F6FB; }
+  .cell.m { background: #FDF3E3; }
+  .eq { background: #E8F6FB; border-left: 5px solid #55C8E8; border-radius: 8px; padding: 3px 10px; font-size: 0.84rem; line-height: 1.35; margin-bottom: 4px; }
+  .eq.my { background: #FDF3E3; border-left-color: #C7922C; }
+  .eq b { color: #0E1C42; }
+  .note { background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 8px; padding: 3px 10px; font-size: 0.78rem; line-height: 1.35; margin-bottom: 4px; }
+  .note.warn { background: #FDF3E3; border-left-color: #C7922C; }
+  .note.bad { background: #fdf0ee; border-left-color: #C0392B; color: #8E1F13; font-weight: 700; }
+  .note.cause { background: #fff; border: 2px solid #C0392B; border-left-width: 5px; font-weight: 700; color: #8E1F13; }
+  .note:last-child { margin-bottom: 0; }
+  .bars { margin-bottom: 5px; }
+  .barrow { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; margin-bottom: 2px; }
+  .barrow .bl { flex: 0 0 120px; font-weight: 700; color: #0E1C42; }
+  .barrow .track { flex: 1 1 auto; height: 13px; background: #EEF1F8; border-radius: 4px; overflow: hidden; }
+  .barrow .fill { display: block; height: 100%; width: 0; transition: width 0.2s ease; }
+  .barrow .fill.my { background: #C7922C; }
+  .barrow .fill.ls { background: #55C8E8; }
+  .barrow .bv { flex: 0 0 62px; text-align: right; font-weight: 900; font-variant-numeric: tabular-nums; }
+  .predin { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 700; margin-bottom: 5px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 800; border: 2px solid #0E1C42; }
+  .tag.in { background: #E8F6FB; border-color: #55C8E8; color: #1f78a8; }
+  .tag.ex { background: #FDF3E3; border-color: #C7922C; color: #8a5f12; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .hidden { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Fit the Line: Where Does the Best Line Go?</h1>
+<p class="subtitle">Every dataset here is made up / simulated. Place a line, see what it misses, then compare it with least squares.</p>
+
+<div class="panel">
+  <div class="row" role="group" aria-label="Choose a made-up scenario" id="scRow">
+    <span class="lab">Data (made up / simulated)</span>
+  </div>
+  <div class="row">
+    <span class="lab">Mode</span>
+    <div class="seg" role="group" aria-label="Which line to work with">
+      <button class="btn" id="modeMy" aria-pressed="true">My line</button>
+      <button class="btn" id="modeLS" aria-pressed="false">Least-squares line</button>
+    </div>
+    <label class="chk"><input type="checkbox" id="segChk" checked> Show residual segments</label>
+    <button class="btn reset" id="resetBtn" aria-label="Reset this scenario to its starting state">Reset</button>
+  </div>
+  <div id="myRow">
+  <div class="row">
+    <button class="btn gold" id="showLSBtn" aria-pressed="false">Show least-squares line</button>
+    <button class="btn" id="snapBtn">Snap my line to it</button>
+    <span class="small" id="slBnote">Drag the gold handles on the plot or use the sliders (arrow keys work on both).</span>
+  </div>
+  <div class="row">
+    <div class="sl"><label class="nm" for="slB">Slope b</label><input type="range" id="slB" aria-describedby="slBnote"><output id="outB" for="slB"></output></div>
+    <div class="sl"><label class="nm" for="slA">Intercept a</label><input type="range" id="slA"><output id="outA" for="slA"></output></div>
+  </div>
+  </div>
+  <div class="row hidden" id="identRow">
+    <label class="chk"><input type="checkbox" id="identChk" checked> Show the line y = x (a child exactly as tall as the parent)</label>
+  </div>
+  <div class="row hidden" id="ownRow">
+    <div class="addbox">
+      <label for="addX">x</label><input type="number" id="addX" value="5" step="0.5" min="0" max="10" aria-label="x value for a new point, 0 to 10">
+      <label for="addY">y</label><input type="number" id="addY" value="5" step="0.5" min="0" max="10" aria-label="y value for a new point, 0 to 10">
+      <button class="btn" id="addBtn">Add point</button>
+    </div>
+    <button class="btn" id="undoBtn">Remove last</button>
+    <button class="btn" id="clearBtn">Clear</button>
+    <span class="small">Click the plot to add a point (up to 30).</span>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="ctx" id="ctx"></div>
+  <div class="host" id="chartHost"></div>
+  <div class="small" id="legend"></div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <span class="lab">Residual plot</span>
+    <div class="seg" role="group" aria-label="Which line the residual plot uses">
+      <button class="btn" id="rsMy" aria-pressed="true">Residuals from my line</button>
+      <button class="btn" id="rsLS" aria-pressed="false">Residuals from least-squares</button>
+    </div>
+  </div>
+  <div class="host" id="resHost"></div>
+  <div class="small" id="resNote"></div>
+  <div class="note" id="resHint" style="margin-top:4px">A pattern (curve or fan) in the residuals means a line is not the whole story; no pattern is a good sign.</div>
+</div>
+
+<div class="panel">
+  <div class="bars" id="bars">
+    <div class="barrow"><span class="bl">Your SSE</span><span class="track"><span class="fill my" id="fillMy"></span></span><span class="bv" id="bvMy"></span></div>
+    <div class="barrow"><span class="bl">Least-squares SSE</span><span class="track"><span class="fill ls" id="fillLS"></span></span><span class="bv" id="bvLS"></span></div>
+    <div class="small" id="barNote"></div>
+  </div>
+  <div class="eq my hidden" id="eqMy"></div>
+  <div class="eq" id="eqLS"></div>
+  <div class="chips" id="chips"></div>
+  <div class="note" id="slopeSent"></div>
+  <div class="note" id="intSent"></div>
+  <div class="note warn hidden" id="galton"></div>
+  <div class="note cause">Association is not cause. The line describes how x and y move together; it does not show that one makes the other change.</div>
+</div>
+
+<div class="panel">
+  <div class="predin">
+    <span class="lab">Predict</span>
+    <label for="predX">x =</label><input type="number" id="predX" step="any" aria-label="x value to predict at">
+    <span id="predUnit"></span>
+    <span class="tag in" id="predTag"></span>
+  </div>
+  <div class="note" id="predText"></div>
+  <div class="note bad hidden" id="predBad">This prediction does not make sense in context.</div>
+  <div class="note warn hidden" id="predCaution"></div>
+</div>
+<div class="sr" role="status" aria-live="polite" id="srStatus"></div>
+</div>
+
+<script>
+/*MATH*/
+function olsFit(xs,ys){
+  var n=xs.length,i,sx=0,sy=0;
+  var res={n:n,ok:false,rOk:false,xbar:null,ybar:null,sxx:null,syy:null,sxy:null,a:null,b:null,r:null,r2:null,sse:null};
+  if(n<1)return res;
+  for(i=0;i<n;i++){sx+=xs[i];sy+=ys[i];}
+  var xbar=sx/n,ybar=sy/n,sxx=0,syy=0,sxy=0,dx,dy;
+  for(i=0;i<n;i++){dx=xs[i]-xbar;dy=ys[i]-ybar;sxx+=dx*dx;syy+=dy*dy;sxy+=dx*dy;}
+  res.xbar=xbar;res.ybar=ybar;res.sxx=sxx;res.syy=syy;res.sxy=sxy;
+  if(n<2||!(sxx>1e-12*(1+xbar*xbar)*n))return res;
+  res.ok=true;
+  res.b=sxy/sxx;res.a=ybar-res.b*xbar;
+  if(syy>1e-12*(1+ybar*ybar)*n){
+    var r=sxy/Math.sqrt(sxx*syy);if(r>1)r=1;if(r<-1)r=-1;
+    res.r=r;res.r2=r*r;res.rOk=true;
+  }
+  res.sse=sseOf(xs,ys,res.a,res.b);
+  return res;
+}
+function residualsOf(xs,ys,a,b){var o=[],i;for(i=0;i<xs.length;i++)o.push(ys[i]-(a+b*xs[i]));return o;}
+function sseOf(xs,ys,a,b){var t=0,i,e;for(i=0;i<xs.length;i++){e=ys[i]-(a+b*xs[i]);t+=e*e;}return t;}
+function leverageOf(xs){
+  var n=xs.length,i,m=0,s=0,o=[];
+  if(!n)return o;
+  for(i=0;i<n;i++)m+=xs[i];m/=n;
+  for(i=0;i<n;i++)s+=(xs[i]-m)*(xs[i]-m);
+  var degenerate=!(s>1e-12*(1+m*m)*n);
+  for(i=0;i<n;i++)o.push(degenerate?1/n:1/n+(xs[i]-m)*(xs[i]-m)/s);
+  return o;
+}
+function predictAt(a,b,x){return a+b*x;}
+/*ENDMATH*/
+
+/* ---------- formatting ---------- */
+function mn(s){return String(s).replace(/-/g,'−');}
+function sig(v,d){
+  if(v===null||v===undefined||!isFinite(v))return '—';
+  if(v===0||Math.abs(v)<5e-4)return '0';
+  var s=parseFloat(Number(v).toPrecision(d||4));
+  if(Math.abs(s)>=1e6||Math.abs(s)<1e-4)s=Number(s.toPrecision(3));
+  return mn(s===0?0:s);
+}
+function f2(v){if(v===null||v===undefined||!isFinite(v))return '—';var t=Number(v).toFixed(2);if(parseFloat(t)===0)t='0.00';return mn(t);}
+function f3(v){if(v===null||v===undefined||!isFinite(v))return '—';var t=Number(v).toFixed(3);if(parseFloat(t)===0)t='0.000';return mn(t);}
+function fsse(v){
+  if(v===null||v===undefined||!isFinite(v))return '—';
+  if(v>=1000)return mn(Math.round(v));
+  if(v>=10)return mn(v.toFixed(1));
+  return mn(v.toFixed(2));
+}
+function eqStr(a,b){
+  if(a===null||b===null)return '—';
+  var bs=sig(b,3);
+  return 'ŷ = '+sig(a,3)+' '+(b<0?'−':'+')+' '+sig(Math.abs(b),3)+'x';
+}
+function niceTicks(lo,hi,target){
+  var span=hi-lo;if(!(span>0))return [lo];
+  var raw=span/Math.max(1,target),pow=Math.pow(10,Math.floor(Math.log(raw)/Math.LN10)),m=raw/pow,step;
+  step=(m<=1?1:m<=2?2:m<=2.5?2.5:m<=5?5:10)*pow;
+  var t=[],v=Math.ceil(lo/step-1e-9)*step,k=0;
+  while(v<=hi+1e-9&&k<50){t.push(parseFloat(v.toPrecision(10)));v+=step;k++;}
+  return t;
+}
+function niceCeil(v){
+  if(!(v>0))return 1;
+  var pow=Math.pow(10,Math.floor(Math.log(v)/Math.LN10)),m=v/pow;
+  return (m<=1?1:m<=2?2:m<=2.5?2.5:m<=5?5:10)*pow;
+}
+
+/* ---------- scenarios (all made up) ---------- */
+var SCEN=[
+ {id:'hours',label:'Hours studied',
+  ctx:'Made up / simulated: 15 students, hours studied and quiz score.',
+  xName:'hours studied',xUnit:'hours',xPer:'hour studied',yName:'quiz score',yUnit:'points',yPer:'point',
+  xmin:0,xmax:10,ymin:0,ymax:110,xdec:1,ydec:0,xlab:'hours studied (hours)',ylab:'quiz score (points)',
+  lo:0,hi:100,loWhy:'a score below 0',hiWhy:'a score above 100',
+  px:4.5,
+  xs:[0.5,1,1,1.5,2,2,2.5,3,3,3.5,4,4.5,5,5.5,6],
+  ys:[52,58,49,63,60,68,66,72,64,75,78,74,85,82,90]},
+ {id:'cocoa',label:'Hot chocolate',
+  ctx:'Made up / simulated: 14 days at a made-up cafe, outdoor temperature and cups of hot chocolate sold.',
+  xName:'outdoor temperature',xUnit:'°F',xPer:'°F of outdoor temperature',yName:'hot chocolate sold',yUnit:'cups',yPer:'cup',
+  xmin:20,xmax:100,ymin:0,ymax:120,xdec:0,ydec:0,xlab:'outdoor temperature (°F)',ylab:'hot chocolate sold (cups)',
+  lo:0,hi:null,loWhy:'a negative number of cups',hiWhy:'',
+  px:60,
+  xs:[28,32,36,40,44,48,52,55,58,62,66,70,75,80],
+  ys:[96,88,92,80,78,70,66,68,55,50,44,38,30,22]},
+ {id:'car',label:'Used car',
+  ctx:'Made up / simulated: 14 used cars of one made-up model, age and asking price.',
+  xName:'age of car',xUnit:'years',xPer:'year of age',yName:'asking price',yUnit:'thousand dollars',yPer:'thousand dollars',
+  xmin:0,xmax:14,ymin:0,ymax:32,xdec:1,ydec:1,xlab:'age of car (years)',ylab:'asking price ($1000s)',
+  lo:0,hi:null,loWhy:'a negative price',hiWhy:'',
+  px:5,
+  xs:[1,1,2,2,3,3,4,5,5,6,7,8,9,10],
+  ys:[27.5,26,24,25.5,22,21,19.5,17,18.5,15,13.5,12,10.5,8]},
+ {id:'plant',label:'Plant growth (curved)',
+  ctx:'Made up / simulated: one plant measured for 16 weeks. Its growth levels off, so the pattern is curved.',
+  xName:'weeks of growth',xUnit:'weeks',xPer:'week of growth',yName:'plant height',yUnit:'cm',yPer:'cm',
+  xmin:0,xmax:24,ymin:0,ymax:45,xdec:0,ydec:1,xlab:'time (weeks)',ylab:'plant height (cm)',
+  lo:0,hi:null,loWhy:'a negative height',hiWhy:'',
+  note:'This pattern is curved and levels off, so a straight line is a poor guide beyond the data.',
+  px:8,
+  xs:[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+  ys:[6,12,17,21,24,26,27.5,28.5,29,29.5,30,30,30.5,30,30.5,30]},
+ {id:'galton',label:'Regression toward the mean',
+  ctx:'Made up / simulated: 40 parent and child heights, both in standard deviations from the average (z-scores).',
+  xName:'parent height',xUnit:'SD from average',xPer:'SD of parent height',yName:'child height',yUnit:'SD from average',yPer:'SD',
+  xmin:-3,xmax:3,ymin:-3,ymax:3,xdec:2,ydec:2,xlab:'parent height (SD from average)',ylab:'child height (SD from average)',
+  lo:null,hi:null,loWhy:'',hiWhy:'',galton:true,
+  px:2,
+  xs:[-1.12,-1.46,0.56,-0.31,1.7,0.67,-0.64,0.77,0.14,-0.75,0.92,-0.79,2.03,0.91,-0.51,-0.32,0.85,-1.69,-0.22,-1.69,0.04,-0.13,1.39,-0.37,-0.15,1.35,-0.94,1.2,-0.5,-1.38,0.74,0.49,-0.7,1.56,1.55,-0.9,-0.77,-0.25,-0.35,-0.94],
+  ys:[0.07,-0.76,0.58,-0.13,1.24,-0.44,-1.22,0.06,-0.22,0.67,0.99,-1.23,0.12,1.96,0.21,0.76,-0.64,-1.01,0.79,0.62,-0.33,0.04,0.7,0.17,-0.28,1.27,-0.49,2.06,-0.51,-1.49,-0.67,0.65,-2.2,-0.15,1.34,1.27,-2.37,-0.77,-0.15,-0.53]},
+ {id:'own',label:'My own points',own:true,
+  ctx:'Your own made-up points. Click to add, drag to move.',
+  xName:'x',xUnit:'units of x',xPer:'unit of x',yName:'y',yUnit:'units of y',yPer:'unit of y',
+  xmin:0,xmax:10,ymin:0,ymax:10,xdec:1,ydec:1,xlab:'x',ylab:'y',
+  lo:null,hi:null,loWhy:'',hiWhy:'',
+  px:5,
+  xs:[1,2,3,4,5,6,7,8],
+  ys:[2.1,3.4,2.8,5.2,4.6,6.9,6.1,8.3]}
+];
+var MAXPTS=30;
+function scById(id){for(var i=0;i<SCEN.length;i++)if(SCEN[i].id===id)return SCEN[i];}
+
+/* ---------- state ---------- */
+var S={sc:'hours',pts:[],nextId:1,mode:'my',showLS:false,showSeg:true,resSrc:'my',myA:0,myB:0,hx:[0,1],showIdent:true,predX:4.5,rmax:1,smax:1,aLo:0,aHi:1,sel:null,drag:null};
+var view={pts:{},a:0,b:0};
+var NS='http://www.w3.org/2000/svg';
+var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function $(id){return document.getElementById(id);}
+function SC(){return scById(S.sc);}
+function xsOf(){return S.pts.map(function(p){return p.x;});}
+function ysOf(){return S.pts.map(function(p){return p.y;});}
+function rnd(v,d){var m=Math.pow(10,d);return Math.round(v*m)/m;}
+function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+
+function defaultMyLine(sc,fit){
+  var xsp=sc.xmax-sc.xmin,ysp=sc.ymax-sc.ymin;
+  if(fit.ok){var b=0.35*fit.b;return{b:b,a:fit.ybar-b*fit.xbar};}
+  return{b:0,a:(sc.ymin+sc.ymax)/2};
+}
+function loadScenario(id){
+  var sc=scById(id);S.sc=id;S.pts=[];S.sel=null;S.drag=null;
+  for(var i=0;i<sc.xs.length;i++)S.pts.push({id:S.nextId++,x:sc.xs[i],y:sc.ys[i]});
+  var fit=olsFit(sc.xs,sc.ys),ml=defaultMyLine(sc,fit);
+  S.myA=ml.a;S.myB=ml.b;
+  var xsp=sc.xmax-sc.xmin;
+  S.hx=[sc.xmin+0.2*xsp,sc.xmin+0.8*xsp];
+  S.predX=sc.px;
+  var ysp=sc.ymax-sc.ymin;
+  var b0=fit.ok?Math.abs(fit.b):0;
+  S.smax=Math.max(3*b0,1.5*ysp/xsp);
+  var lo=1e18,hi=-1e18,cx=[sc.xmin,sc.xmax],cy=[sc.ymin,sc.ymax],i2,j,k;
+  for(i2=0;i2<2;i2++)for(j=0;j<2;j++)for(k=-1;k<=1;k+=2){var a=cy[j]-k*S.smax*cx[i2];lo=Math.min(lo,a);hi=Math.max(hi,a);}
+  S.aLo=lo;S.aHi=hi;
+  if(fit.ok){S.rmax=niceCeil(Math.max(1.6*maxAbs(residualsOf(sc.xs,sc.ys,fit.a,fit.b)),0.06*ysp));}
+  else S.rmax=niceCeil(0.2*ysp);
+  if(sc.galton){S.mode='ls';S.showIdent=true;}
+  S.resSrc=S.mode;
+  syncViewNow();
+}
+function maxAbs(a){var m=0;for(var i=0;i<a.length;i++)m=Math.max(m,Math.abs(a[i]));return m;}
+function syncViewNow(){
+  view.pts={};S.pts.forEach(function(p){view.pts[p.id]={x:p.x,y:p.y};});
+  view.a=S.myA;view.b=S.myB;
+}
+
+/* ---------- tween (~200 ms) ---------- */
+var anim={raf:0,t0:0,from:null};
+function animateView(){
+  if(reduceMotion){syncViewNow();render();return;}
+  var from={pts:{},a:view.a,b:view.b};
+  S.pts.forEach(function(p){var c=view.pts[p.id];from.pts[p.id]=c?{x:c.x,y:c.y}:{x:p.x,y:p.y};});
+  anim.from=from;anim.t0=0;
+  if(!anim.raf)anim.raf=requestAnimationFrame(frame);
+}
+function frame(ts){
+  anim.raf=0;
+  if(!anim.t0)anim.t0=ts;
+  var p=Math.min(1,(ts-anim.t0)/200),e=p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
+  var np={};
+  S.pts.forEach(function(q){var f=anim.from.pts[q.id]||{x:q.x,y:q.y};np[q.id]={x:f.x+(q.x-f.x)*e,y:f.y+(q.y-f.y)*e};});
+  view.pts=np;view.a=anim.from.a+(S.myA-anim.from.a)*e;view.b=anim.from.b+(S.myB-anim.from.b)*e;
+  render();
+  if(p<1)anim.raf=requestAnimationFrame(frame);
+  else{syncViewNow();render();}
+}
+function stopAnim(){if(anim.raf)cancelAnimationFrame(anim.raf);anim.raf=0;}
+
+/* ---------- SVG plumbing ---------- */
+function el(name,attrs,parent){
+  var e=document.createElementNS(NS,name);
+  for(var k in attrs)e.setAttribute(k,attrs[k]);
+  if(parent)parent.appendChild(e);
+  return e;
+}
+function txt(parent,x,y,str,attrs){
+  var a={x:x,y:y,'font-size':attrs&&attrs.size||10};
+  if(attrs){for(var k in attrs)if(k!=='size')a[k]=attrs[k];}
+  var t=el('text',a,parent);t.textContent=str;return t;
+}
+function halo(t){t.setAttribute('stroke','#fff');t.setAttribute('stroke-width','3');t.setAttribute('paint-order','stroke');return t;}
+function clearG(g){while(g.firstChild)g.removeChild(g.firstChild);}
+var W=700,H=262,RH=120,ML=46,MR=12,MT=8,MB=36,RMB=22;
+var svg,gStatic,gBack,gAnno,gLab,gDots,gHdl,gMk,bgRect,clipRect,rsvg,gR,dotEls={},hdlEls=[],mkEl=null,uid=0;
+function PX(x){var sc=SC();return ML+(x-sc.xmin)/(sc.xmax-sc.xmin)*(W-ML-MR);}
+function IX(px){var sc=SC();return sc.xmin+(px-ML)/(W-ML-MR)*(sc.xmax-sc.xmin);}
+function PY(y){var sc=SC();return H-MB-(y-sc.ymin)/(sc.ymax-sc.ymin)*(H-MT-MB);}
+function IY(py){var sc=SC();return sc.ymin+(H-MB-py)/(H-MT-MB)*(sc.ymax-sc.ymin);}
+function RY(v){return MT+(1-(v+S.rmax)/(2*S.rmax))*(RH-MT-RMB);}
+
+function buildCharts(){
+  var host=$('chartHost');host.innerHTML='';
+  W=Math.max(280,host.clientWidth||700);
+  H=W<480?250:262;
+  uid++;
+  svg=el('svg',{viewBox:'0 0 '+W+' '+H,role:'group','aria-label':'Scatter plot of the made-up data with a fitted line. Points and line handles can be moved.'},host);
+  var defs=el('defs',{},svg),cp=el('clipPath',{id:'clip'+uid},defs);
+  clipRect=el('rect',{x:ML,y:MT,width:W-ML-MR,height:H-MT-MB},cp);
+  bgRect=el('rect',{x:0,y:0,width:W,height:H,fill:'#fff'},svg);
+  gBack=el('g',{},svg);gAnno=el('g',{'pointer-events':'none'},svg);
+  gDots=el('g',{},svg);gLab=el('g',{'pointer-events':'none'},svg);gHdl=el('g',{},svg);gMk=el('g',{},svg);
+  dotEls={};hdlEls=[];mkEl=null;
+  bgRect.addEventListener('click',onBgClick);
+  buildHandles();buildMarker();
+  var rh=$('resHost');rh.innerHTML='';
+  rsvg=el('svg',{viewBox:'0 0 '+W+' '+RH,role:'img','aria-label':'Residual plot: residual against x, with a zero line.'},rh);
+  el('rect',{x:0,y:0,width:W,height:RH,fill:'#fff'},rsvg);
+  gR=el('g',{},rsvg);
+}
+function drawStatic(){
+  clearG(gBack);
+  var sc=SC(),i,t,x,y;
+  t=niceTicks(sc.xmin,sc.xmax,W<480?5:8);
+  t.forEach(function(v){x=PX(v);
+    el('line',{x1:x,x2:x,y1:MT,y2:H-MB,stroke:'#E3E9F3','stroke-width':1},gBack);
+    el('line',{x1:x,x2:x,y1:H-MB,y2:H-MB+4,stroke:'#0E1C42','stroke-width':1.5},gBack);
+    txt(gBack,x,H-MB+16,mn(v),{'text-anchor':'middle',size:10});});
+  t=niceTicks(sc.ymin,sc.ymax,6);
+  t.forEach(function(v){y=PY(v);
+    el('line',{x1:ML,x2:W-MR,y1:y,y2:y,stroke:'#E3E9F3','stroke-width':1},gBack);
+    el('line',{x1:ML-4,x2:ML,y1:y,y2:y,stroke:'#0E1C42','stroke-width':1.5},gBack);
+    txt(gBack,ML-7,y+3.5,mn(v),{'text-anchor':'end',size:10});});
+  // zero axes when inside the window
+  if(sc.xmin<0&&sc.xmax>0)el('line',{x1:PX(0),x2:PX(0),y1:MT,y2:H-MB,stroke:'#9aa7c2','stroke-width':1.2},gBack);
+  if(sc.ymin<0&&sc.ymax>0)el('line',{x1:ML,x2:W-MR,y1:PY(0),y2:PY(0),stroke:'#9aa7c2','stroke-width':1.2},gBack);
+  el('line',{x1:ML,x2:W-MR,y1:H-MB,y2:H-MB,stroke:'#0E1C42','stroke-width':2},gBack);
+  el('line',{x1:ML,x2:ML,y1:MT,y2:H-MB,stroke:'#0E1C42','stroke-width':2},gBack);
+  txt(gBack,(ML+W-MR)/2,H-6,sc.xlab,{'text-anchor':'middle',size:11,'font-weight':700});
+  var yl=txt(gBack,12,(MT+H-MB)/2,sc.ylab,{'text-anchor':'middle',size:11,'font-weight':700});
+  yl.setAttribute('transform','rotate(-90 12 '+((MT+H-MB)/2)+')');
+  // scenario bounds
+  if(sc.hi!==null&&sc.hi>=sc.ymin&&sc.hi<=sc.ymax){
+    el('line',{x1:ML,x2:W-MR,y1:PY(sc.hi),y2:PY(sc.hi),stroke:'#C0392B','stroke-width':1,'stroke-dasharray':'2 3'},gBack);
+    txt(gBack,W-MR-3,PY(sc.hi)+11,'highest possible: '+sc.hi,{'text-anchor':'end',size:9,fill:'#8E1F13'});
+  }
+  if(sc.lo!==null&&sc.lo>sc.ymin&&sc.lo<sc.ymax){
+    el('line',{x1:ML,x2:W-MR,y1:PY(sc.lo),y2:PY(sc.lo),stroke:'#C0392B','stroke-width':1,'stroke-dasharray':'2 3'},gBack);
+  }
+}
+
+/* ---------- handles / marker / dots ---------- */
+function buildHandles(){
+  [0,1].forEach(function(i){
+    var g=el('g',{'class':'hdl',tabindex:0,role:'slider','aria-orientation':'vertical'},gHdl);
+    el('circle',{'class':'hit',r:18,fill:'transparent'},g);
+    el('circle',{'class':'focusring',r:13},g);
+    el('circle',{'class':'body',r:8},g);
+    g.addEventListener('pointerdown',function(e){hdlDown(e,i,g);});
+    g.addEventListener('pointermove',function(e){hdlMove(e,i);});
+    g.addEventListener('pointerup',function(e){endDrag(e,g);});
+    g.addEventListener('pointercancel',function(e){endDrag(e,g);});
+    g.addEventListener('keydown',function(e){hdlKey(e,i);});
+    hdlEls.push(g);
+  });
+}
+function buildMarker(){
+  var g=el('g',{'class':'mk',tabindex:0,role:'slider','aria-label':'Prediction marker. Left and right arrows change x.'},gMk);
+  el('circle',{'class':'hit',r:18,fill:'transparent'},g);
+  el('rect',{'class':'focusring',x:-12,y:-12,width:24,height:24},g);
+  el('polygon',{'class':'body',points:'0,-9 9,0 0,9 -9,0'},g);
+  g.addEventListener('pointerdown',function(e){
+    if(e.button!==undefined&&e.button!==0)return;e.preventDefault();
+    try{g.setPointerCapture(e.pointerId);}catch(err){}
+    S.drag={kind:'mk',pid:e.pointerId};g.focus({preventScroll:true});
+  });
+  g.addEventListener('pointermove',function(e){
+    if(!S.drag||S.drag.kind!=='mk')return;
+    var sc=SC();S.predX=rnd(clamp(IX(pointerX(e)),sc.xmin,sc.xmax),Math.max(sc.xdec,1));render();
+  });
+  g.addEventListener('pointerup',function(e){endDrag(e,g);});
+  g.addEventListener('pointercancel',function(e){endDrag(e,g);});
+  g.addEventListener('keydown',function(e){
+    var sc=SC(),st=Math.max(Math.pow(10,-sc.xdec),(sc.xmax-sc.xmin)/100)*(e.shiftKey?5:1),nv=null;
+    if(e.key==='ArrowRight'||e.key==='ArrowUp')nv=S.predX+st;
+    else if(e.key==='ArrowLeft'||e.key==='ArrowDown')nv=S.predX-st;
+    else if(e.key==='Home')nv=sc.xmin;else if(e.key==='End')nv=sc.xmax;
+    if(nv===null)return;e.preventDefault();
+    S.predX=rnd(clamp(nv,sc.xmin,sc.xmax),Math.max(sc.xdec,2));render();
+  });
+  mkEl=g;
+}
+function ensureDot(p){
+  var g=dotEls[p.id];if(g)return g;
+  g=el('g',{'class':'dot',tabindex:0,role:'group'},gDots);
+  el('circle',{'class':'hit',r:14,fill:'transparent'},g);
+  el('circle',{'class':'focusring',r:11},g);
+  el('circle',{'class':'body',r:6},g);
+  g.addEventListener('pointerdown',function(e){dotDown(e,p.id,g);});
+  g.addEventListener('pointermove',function(e){dotMove(e,p.id);});
+  g.addEventListener('pointerup',function(e){endDrag(e,g);});
+  g.addEventListener('pointercancel',function(e){endDrag(e,g);});
+  g.addEventListener('focus',function(){S.sel=p.id;});
+  g.addEventListener('keydown',function(e){dotKey(e,p.id);});
+  dotEls[p.id]=g;return g;
+}
+function syncDotEls(){
+  var ids={};
+  S.pts.forEach(function(p){ids[p.id]=true;ensureDot(p);});
+  for(var id in dotEls)if(!ids[id]){gDots.removeChild(dotEls[id]);delete dotEls[id];}
+}
+function pointerX(e){var r=svg.getBoundingClientRect();return(e.clientX-r.left)*(W/(r.width||W));}
+function pointerY(e){var r=svg.getBoundingClientRect();return(e.clientY-r.top)*(H/(r.height||H));}
+function ptById(id){for(var i=0;i<S.pts.length;i++)if(S.pts[i].id===id)return S.pts[i];return null;}
+function endDrag(e,g){
+  if(!S.drag)return;
+  S.drag=null;
+  try{g.releasePointerCapture(e.pointerId);}catch(err){}
+  render();
+}
+function dotDown(e,id,g){
+  if(e.button!==undefined&&e.button!==0)return;
+  e.preventDefault();
+  var p=ptById(id);if(!p)return;
+  try{g.setPointerCapture(e.pointerId);}catch(err){}
+  S.sel=id;S.drag={kind:'dot',id:id,dx:pointerX(e)-PX(p.x),dy:pointerY(e)-PY(p.y)};
+  g.focus({preventScroll:true});
+  stopAnim();syncViewNow();render();
+}
+function setPt(p,x,y){
+  var sc=SC();
+  p.x=rnd(clamp(x,sc.xmin,sc.xmax),sc.xdec);p.y=rnd(clamp(y,sc.ymin,sc.ymax),sc.ydec);
+  view.pts[p.id]={x:p.x,y:p.y};
+}
+function dotMove(e,id){
+  if(!S.drag||S.drag.kind!=='dot'||S.drag.id!==id)return;
+  var p=ptById(id);if(!p)return;
+  setPt(p,IX(pointerX(e)-S.drag.dx),IY(pointerY(e)-S.drag.dy));
+  render();
+}
+function dotKey(e,id){
+  var p=ptById(id),sc=SC();if(!p)return;
+  var k=e.key,m=e.shiftKey?5:1;
+  var sx=Math.max(Math.pow(10,-sc.xdec),(sc.xmax-sc.xmin)/100)*m,sy=Math.max(Math.pow(10,-sc.ydec),(sc.ymax-sc.ymin)/100)*m;
+  var nx=p.x,ny=p.y;
+  if(k==='ArrowRight')nx+=sx;else if(k==='ArrowLeft')nx-=sx;
+  else if(k==='ArrowUp')ny+=sy;else if(k==='ArrowDown')ny-=sy;
+  else if((k==='Delete'||k==='Backspace')&&sc.own){e.preventDefault();removePoint(id);return;}
+  else return;
+  e.preventDefault();
+  setPt(p,nx,ny);stopAnim();syncViewNow();render();
+}
+/* handle on the line */
+function lineAtModel(x){return S.myA+S.myB*x;}
+function setFromHandle(i,y){
+  var sc=SC(),y1=lineAtModel(S.hx[0]),y2=lineAtModel(S.hx[1]);
+  y=clamp(y,sc.ymin,sc.ymax);
+  if(i===0)y1=y;else y2=y;
+  var b=(y2-y1)/(S.hx[1]-S.hx[0]);
+  S.myB=b;S.myA=y1-b*S.hx[0];
+  stopAnim();view.a=S.myA;view.b=S.myB;render();
+}
+function hdlDown(e,i,g){
+  if(e.button!==undefined&&e.button!==0)return;
+  e.preventDefault();
+  try{g.setPointerCapture(e.pointerId);}catch(err){}
+  S.drag={kind:'hdl',i:i};g.focus({preventScroll:true});
+}
+function hdlMove(e,i){
+  if(!S.drag||S.drag.kind!=='hdl'||S.drag.i!==i)return;
+  setFromHandle(i,IY(pointerY(e)));
+}
+function hdlKey(e,i){
+  var sc=SC(),st=(sc.ymax-sc.ymin)/200*(e.shiftKey?5:1),y=lineAtModel(S.hx[i]);
+  if(e.key==='ArrowUp'||e.key==='ArrowRight')y+=st;
+  else if(e.key==='ArrowDown'||e.key==='ArrowLeft')y-=st;
+  else return;
+  e.preventDefault();setFromHandle(i,y);
+}
+function onBgClick(e){
+  var sc=SC();if(!sc.own)return;
+  if(S.pts.length>=MAXPTS){$('srStatus').textContent='The plot holds at most '+MAXPTS+' points.';return;}
+  addPoint(IX(pointerX(e)),IY(pointerY(e)));
+}
+function addPoint(x,y){
+  var sc=SC();
+  if(S.pts.length>=MAXPTS)return;
+  if(!isFinite(x)||!isFinite(y))return;
+  var p={id:S.nextId++,x:rnd(clamp(x,sc.xmin,sc.xmax),sc.xdec),y:rnd(clamp(y,sc.ymin,sc.ymax),sc.ydec)};
+  S.pts.push(p);view.pts[p.id]={x:p.x,y:p.y};S.sel=p.id;
+  render();
+  $('srStatus').textContent='Point added. Now '+S.pts.length+' points.';
+}
+function removePoint(id){
+  var idx=-1,i;for(i=0;i<S.pts.length;i++)if(S.pts[i].id===id)idx=i;
+  if(idx<0)return;
+  S.pts.splice(idx,1);delete view.pts[id];S.sel=null;
+  render();
+  if(S.pts.length){var n=S.pts[Math.min(idx,S.pts.length-1)];if(dotEls[n.id])dotEls[n.id].focus({preventScroll:true});}
+  $('srStatus').textContent='Point removed. Now '+S.pts.length+' points.';
+}
+
+/* ---------- drawing ---------- */
+function viewArrays(){
+  var vx=[],vy=[];
+  S.pts.forEach(function(p){var c=view.pts[p.id]||p;vx.push(c.x);vy.push(c.y);});
+  return{x:vx,y:vy};
+}
+function activeLine(fit,which){ /* which: 'my'|'ls' */
+  if(which==='ls')return fit.ok?{a:fit.a,b:fit.b}:null;
+  return null;
+}
+function clipLine(a,b,parent,attrs){
+  var sc=SC(),x1=sc.xmin,x2=sc.xmax;
+  var l=el('line',{x1:PX(x1),y1:PY(a+b*x1),x2:PX(x2),y2:PY(a+b*x2),'clip-path':'url(#clip'+uid+')'},parent);
+  for(var k in attrs)l.setAttribute(k,attrs[k]);
+  return l;
+}
+function render(){
+  if(!svg)return;
+  var sc=SC(),n=S.pts.length;
+  syncDotEls();
+  var mxs=xsOf(),mys=ysOf(),fitM=olsFit(mxs,mys);
+  var va=viewArrays(),fitV=olsFit(va.x,va.y);
+  var lineV=S.mode==='ls'?(fitV.ok?{a:fitV.a,b:fitV.b}:null):{a:view.a,b:view.b};
+  var lineM=S.mode==='ls'?(fitM.ok?{a:fitM.a,b:fitM.b}:null):{a:S.myA,b:S.myB};
+  var resLineV=S.resSrc==='ls'?(fitV.ok?{a:fitV.a,b:fitV.b}:null):{a:view.a,b:view.b};
+  var resLineM=S.resSrc==='ls'?(fitM.ok?{a:fitM.a,b:fitM.b}:null):{a:S.myA,b:S.myB};
+  // residual scale: expand only
+  if(resLineM&&n){var need=maxAbs(residualsOf(mxs,mys,resLineM.a,resLineM.b))*1.1;if(need>S.rmax)S.rmax=niceCeil(need);}
+  drawStatic();
+  clearG(gAnno);clearG(gLab);
+  /* extrapolation shading */
+  var dmin=null,dmax=null;
+  if(n){dmin=Math.min.apply(null,mxs);dmax=Math.max.apply(null,mxs);}
+  var plotL=ML,plotR=W-MR;
+  if(n){
+    var xl=PX(dmin),xr=PX(dmax);
+    if(xl>plotL+0.5)el('rect',{x:plotL,y:MT,width:xl-plotL,height:H-MB-MT,fill:'#FDF3E3',opacity:0.85},gAnno);
+    if(xr<plotR-0.5)el('rect',{x:xr,y:MT,width:plotR-xr,height:H-MB-MT,fill:'#FDF3E3',opacity:0.85},gAnno);
+    var wl=xl-plotL,wr=plotR-xr,big=wl>=wr?{x0:plotL,w:wl}:{x0:xr,w:wr},cx=big.x0+big.w/2;
+    var lab=big.w>=150?'Extrapolation: beyond the data':(big.w>=80?'Extrapolation':'');
+    if(lab)txt(gAnno,cx,MT+12,lab,{'text-anchor':'middle',size:10,'font-weight':700,fill:'#8a5f12'});
+    var small=wl>=wr?{x0:xr,w:wr}:{x0:plotL,w:wl};
+    if(small.w>=80)txt(gAnno,small.x0+small.w/2,MT+12,'Extrapolation',{'text-anchor':'middle',size:10,'font-weight':700,fill:'#8a5f12'});
+    var iw=xr-xl;
+    if(iw>=76)txt(gAnno,(xl+xr)/2,MT+12,'Interpolation',{'text-anchor':'middle',size:10,'font-weight':700,fill:'#1f78a8'});
+  }
+  /* y = x */
+  if(sc.galton&&S.showIdent){
+    clipLine(0,1,gAnno,{stroke:'#6b7a99','stroke-width':2,'stroke-dasharray':'2 4','stroke-linecap':'round'});
+    var lx=PX(2.25),ly=PY(2.25);
+    halo(txt(gAnno,lx-4,ly+(W<480?-4:-5),W<480?'y = x':'y = x: a child exactly as tall as the parent',{'text-anchor':'end',size:9.5,'font-weight':700,fill:'#4a5877'}));
+  }
+  /* LS overlay */
+  var showLSline=(S.mode==='ls')||S.showLS;
+  /* residual segments to the line shown */
+  var shown=lineV;
+  var res=[],i;
+  if(shown&&n){
+    res=residualsOf(va.x,va.y,shown.a,shown.b);
+    if(S.showSeg){
+      for(i=0;i<n;i++)el('line',{x1:PX(va.x[i]),x2:PX(va.x[i]),y1:PY(va.y[i]),y2:PY(shown.a+shown.b*va.x[i]),stroke:'#C0392B','stroke-width':1.6,opacity:0.85,'clip-path':'url(#clip'+uid+')'},gAnno);
+    }
+  }
+  if(S.mode==='my'&&S.showLS&&fitV.ok)clipLine(fitV.a,fitV.b,gAnno,{stroke:'#C7922C','stroke-width':2.5,'stroke-dasharray':'7 4'});
+  if(shown)clipLine(shown.a,shown.b,gAnno,{stroke:S.mode==='ls'?'#0E1C42':'#0E1C42','stroke-width':3,'stroke-dasharray':S.mode==='ls'?'':''});
+  /* mean point */
+  if(fitV.xbar!==null){
+    var mx=PX(fitV.xbar),my=PY(fitV.ybar);
+    el('path',{d:'M'+(mx-7)+' '+my+'L'+(mx+7)+' '+my+'M'+mx+' '+(my-7)+'L'+mx+' '+(my+7),stroke:'#C7922C','stroke-width':3,'stroke-linecap':'round',fill:'none'},gAnno);
+    el('circle',{cx:mx,cy:my,r:9,fill:'none',stroke:'#C7922C','stroke-width':1.5},gAnno);
+    var ml='(x̄, ȳ) = ('+sig(fitV.xbar,3)+', '+sig(fitV.ybar,3)+')';
+    var tx=mx>W*0.55?mx-12:mx+12;
+    halo(txt(gAnno,tx,my+22,ml,{'text-anchor':mx>W*0.55?'end':'start',size:9.5,'font-weight':700,fill:'#8a5f12'}));
+  }
+  /* biggest miss and most pull */
+  var bi=-1,hi=-1,lev=leverageOf(mxs);
+  if(n>=3){
+    var resM=lineM?residualsOf(mxs,mys,lineM.a,lineM.b):null;
+    if(resM){var mm=0;for(i=0;i<n;i++)if(Math.abs(resM[i])>mm+1e-12){mm=Math.abs(resM[i]);bi=i;}}
+    if(fitM.ok){var ml2=-1;for(i=0;i<n;i++)if(lev[i]>ml2+1e-12){ml2=lev[i];hi=i;}}
+  }
+  S.biggest=bi;S.pull=hi;
+  /* dots */
+  S.pts.forEach(function(p,idx){
+    var g=dotEls[p.id],c=view.pts[p.id]||p;
+    g.setAttribute('transform','translate('+PX(c.x)+','+PY(c.y)+')');
+    g.setAttribute('class','dot'+(S.drag&&S.drag.kind==='dot'&&S.drag.id===p.id?' dragging':''));
+    var extra=(idx===bi?' Biggest miss.':'')+(idx===hi?' Pulls hardest on the line.':'');
+    g.setAttribute('aria-label','Point '+(idx+1)+' of '+n+': x = '+sig(p.x,4)+', y = '+sig(p.y,4)+'.'+extra+' Arrow keys move it. Shift plus arrow moves 5 steps.'+(sc.own?' Delete removes it.':''));
+    g.setAttribute('role','slider');g.setAttribute('aria-valuenow',p.y);g.setAttribute('aria-valuetext','x '+sig(p.x,4)+', y '+sig(p.y,4));
+    g.childNodes[2].setAttribute('r',n>20?5:6);
+  });
+  /* rings + labels in anno (above dots visually is not needed; drawn under as rings) */
+  function ring(idx,color,dash,r,label,dy){
+    var c=view.pts[S.pts[idx].id]||S.pts[idx],x=PX(c.x),y=PY(c.y);
+    el('circle',{cx:x,cy:y,r:r,fill:'none',stroke:color,'stroke-width':2,'stroke-dasharray':dash},gLab);
+    var anch='middle',lx=x;
+    if(x<ML+55){anch='start';lx=x-4;}else if(x>W-MR-55){anch='end';lx=x+4;}
+    halo(txt(gLab,lx,y+dy,label,{'text-anchor':anch,size:9.5,'font-weight':700,fill:color==='#C0392B'?'#8E1F13':'#8a5f12'}));
+  }
+  if(bi>=0&&hi===bi){ring(bi,'#C0392B','',11,'biggest miss',-16);ring(hi,'#C7922C','3 2',14,'pulls hardest',24);}
+  else{
+    if(bi>=0&&S.showSeg!==null)ring(bi,'#C0392B','',10,'biggest miss',(function(){var c=view.pts[S.pts[bi].id]||S.pts[bi];return (lineV&&lineV.a+lineV.b*c.x>c.y)?21:-15;})());
+    if(hi>=0)ring(hi,'#C7922C','3 2',13,'pulls hardest',(function(){var c=view.pts[S.pts[hi].id]||S.pts[hi];return PY(c.y)>H-MB-40?-19:24;})());
+  }
+  /* handles */
+  var showH=(S.mode==='my');
+  hdlEls.forEach(function(g,i){
+    g.style.display=showH?'':'none';
+    var y=PY(clamp(view.a+view.b*S.hx[i],SC().ymin,SC().ymax));
+    g.setAttribute('transform','translate('+PX(S.hx[i])+','+y+')');
+    g.setAttribute('aria-label','Line handle '+(i+1)+' of 2, at x = '+sig(S.hx[i],3)+'. Up and down arrows move it. Your line height here is '+sig(lineAtModel(S.hx[i]),4)+'.');
+    g.setAttribute('aria-valuenow',sig(lineAtModel(S.hx[i]),4));
+  });
+  /* prediction marker */
+  var px=PX(S.predX);
+  var pm=el('line',{x1:px,x2:px,y1:MT,y2:H-MB,stroke:'#1f78a8','stroke-width':1.5,'stroke-dasharray':'4 3'},gAnno);
+  var yhat=lineM?predictAt(lineM.a,lineM.b,S.predX):null;
+  if(lineV){
+    var yh=predictAt(lineV.a,lineV.b,S.predX);
+    if(yh>=sc.ymin&&yh<=sc.ymax){
+      el('circle',{cx:px,cy:PY(yh),r:5.5,fill:'#55C8E8',stroke:'#0E1C42','stroke-width':2},gAnno);
+    }
+  }
+  mkEl.setAttribute('transform','translate('+px+','+(H-MB-13)+')');
+  mkEl.setAttribute('aria-label','Prediction marker at x = '+sig(S.predX,4)+'. Left and right arrows change x.');
+  mkEl.setAttribute('aria-valuenow',S.predX);
+  /* messages if no line */
+  if(S.mode==='ls'&&!fitV.ok){
+    halo(txt(gAnno,(ML+W-MR)/2,(MT+H-MB)/2,n<2?'Add at least 2 points to fit a line.':'All x values are the same: no line can be fit.',{'text-anchor':'middle',size:12,'font-weight':700,fill:'#8E1F13'}));
+  }
+  drawResid(va,fitV,resLineV,fitM,resLineM);
+  updateText(fitM,fitV,lineM,resLineM,lev,bi,hi,dmin,dmax);
+}
+function drawResid(va,fitV,resLineV,fitM,resLineM){
+  clearG(gR);
+  var sc=SC(),n=S.pts.length,i,x,y;
+  var t=niceTicks(sc.xmin,sc.xmax,W<480?5:8);
+  t.forEach(function(v){x=PX(v);
+    el('line',{x1:x,x2:x,y1:MT,y2:RH-RMB,stroke:'#E3E9F3','stroke-width':1},gR);
+    txt(gR,x,RH-RMB+14,mn(v),{'text-anchor':'middle',size:10},gR);});
+  var rt=[-S.rmax,-S.rmax/2,0,S.rmax/2,S.rmax];
+  rt.forEach(function(v){y=RY(v);
+    if(v!==0)el('line',{x1:ML,x2:W-MR,y1:y,y2:y,stroke:'#EEF1F8','stroke-width':1},gR);
+    el('line',{x1:ML-4,x2:ML,y1:y,y2:y,stroke:'#0E1C42','stroke-width':1.2},gR);
+    txt(gR,ML-7,y+3.5,sig(v,3),{'text-anchor':'end',size:9.5},gR);});
+  var yl=txt(gR,11,(MT+RH-RMB)/2,'residual',{'text-anchor':'middle',size:10.5,'font-weight':700});
+  yl.setAttribute('transform','rotate(-90 11 '+((MT+RH-RMB)/2)+')');
+  el('line',{x1:ML,x2:ML,y1:MT,y2:RH-RMB,stroke:'#0E1C42','stroke-width':2},gR);
+  el('line',{x1:ML,x2:W-MR,y1:RY(0),y2:RY(0),stroke:'#0E1C42','stroke-width':2,'stroke-dasharray':'6 3'},gR);
+  txt(gR,W-MR-2,RY(0)-4,'zero: on the line',{'text-anchor':'end',size:9,fill:'#6b7a99'});
+  txt(gR,W-MR-2,MT+10,'above the line',{'text-anchor':'end',size:9,fill:'#6b7a99'});
+  txt(gR,W-MR-2,RH-RMB-4,'below the line',{'text-anchor':'end',size:9,fill:'#6b7a99'});
+  if(!resLineV||!n){
+    txt(gR,(ML+W-MR)/2,RH/2,'No line to measure residuals from yet.',{'text-anchor':'middle',size:11,fill:'#8E1F13'});
+    return;
+  }
+  var res=residualsOf(va.x,va.y,resLineV.a,resLineV.b);
+  for(i=0;i<n;i++){
+    x=PX(va.x[i]);y=RY(clamp(res[i],-S.rmax,S.rmax));
+    el('line',{x1:x,x2:x,y1:RY(0),y2:y,stroke:'#C0392B','stroke-width':1.2,opacity:0.6},gR);
+    var up=res[i]>=0;
+    if(up)el('circle',{cx:x,cy:y,r:4.5,fill:'#E8F6FB',stroke:'#0E1C42','stroke-width':1.5},gR);
+    else el('rect',{x:x-4,y:y-4,width:8,height:8,fill:'#FDF3E3',stroke:'#0E1C42','stroke-width':1.5},gR);
+  }
+  // mark the same two special points
+  [S.biggest].forEach(function(bi){
+    if(bi>=0&&bi<n){var xx=PX(va.x[bi]);el('circle',{cx:xx,cy:RY(clamp(res[bi],-S.rmax,S.rmax)),r:9,fill:'none',stroke:'#C0392B','stroke-width':2},gR);}
+  });
+}
+
+/* ---------- text ---------- */
+function plural(n){return n===1?'':'s';}
+function updateText(fitM,fitV,lineM,resLineM,lev,bi,hi,dmin,dmax){
+  var sc=SC(),n=S.pts.length,mxs=xsOf(),mys=ysOf(),i;
+  $('ctx').innerHTML='<strong>'+sc.ctx+'</strong>'+(sc.own?' ('+n+' of '+MAXPTS+' points)':'');
+  $('legend').innerHTML='Drag a point (or focus it and use arrow keys; Shift = 5 steps) to see its pull. <b>Red ring</b> = biggest miss. <b>Gold dashed ring</b> = pulls hardest (leverage). Drag the blue diamond to predict.';
+  /* LS readout */
+  var eqLS=$('eqLS');
+  if(fitM.ok){
+    eqLS.innerHTML='<b>Least-squares line:</b> <b>'+eqStr(fitM.a,fitM.b)+'</b> &nbsp;<span class="small">predicted '+sc.yName+' ('+sc.yUnit+') = '+sig(fitM.a,3)+' '+(fitM.b<0?'−':'+')+' '+sig(Math.abs(fitM.b),3)+' × '+sc.xName+' ('+sc.xUnit+'). Always passes through (x̄, ȳ) = ('+sig(fitM.xbar,4)+', '+sig(fitM.ybar,4)+').</span>';
+  }else{
+    eqLS.innerHTML='<b>Least-squares line:</b> not available. '+(n<2?'It needs at least 2 points.':'All the x values are the same, so the slope cannot be found.');
+  }
+  var eqMy=$('eqMy');
+  eqMy.classList.toggle('hidden',S.mode!=='my');
+  if(S.mode==='my'){
+    eqMy.innerHTML='<b>Your line:</b> <b>'+eqStr(S.myA,S.myB)+'</b> &nbsp;<span class="small">slope b = '+sig(S.myB,3)+', intercept a = '+sig(S.myA,3)+'</span>';
+  }
+  var mySSE=n?sseOf(mxs,mys,S.myA,S.myB):null;
+  var chips=[['n',n,''],['x̄',fitM.xbar===null?'—':sig(fitM.xbar,4),'m'],['ȳ',fitM.ybar===null?'—':sig(fitM.ybar,4),'m'],
+    ['r',fitM.rOk&&fitM.ok?f3(fitM.r):'—','q'],['r²',fitM.rOk&&fitM.ok?f3(fitM.r2):'—','q'],['SSE (least squares)',fitM.ok?fsse(fitM.sse):'—','q']];
+  $('chips').innerHTML=chips.map(function(c){return'<div class="cell'+(c[2]?' '+c[2]:'')+'"><div class="k">'+c[0]+'</div><div class="v">'+c[1]+'</div></div>';}).join('');
+  /* SSE bars */
+  var bars=$('bars');bars.classList.toggle('hidden',S.mode!=='my');
+  if(S.mode==='my'){
+    var ls=fitM.ok?fitM.sse:null;
+    var mx=Math.max(mySSE||0,ls||0);
+    var wm=mx>0&&mySSE!==null?(mySSE/mx*100):0,wl=mx>0&&ls!==null?(ls/mx*100):0;
+    $('fillMy').style.width=wm+'%';$('fillLS').style.width=wl+'%';
+    $('bvMy').textContent=mySSE===null?'—':fsse(mySSE);
+    $('bvLS').textContent=ls===null?'—':fsse(ls);
+    var bn='';
+    if(ls===null)bn='Least squares needs at least 2 points with different x values.';
+    else if(mySSE<=ls*1.005+1e-12)bn='Your line is essentially the least-squares line. Nothing can beat it: least squares is the smallest SSE any straight line can have.';
+    else if(ls<=1e-12)bn='Least squares fits these points perfectly (SSE = 0).';
+    else bn='Your SSE is '+f2(mySSE/ls)+' times the least-squares SSE. SSE adds up the squared red segments. Can you get closer?';
+    $('barNote').textContent=bn;
+  }
+  /* sentences: line shown */
+  var ln=lineM,who=S.mode==='ls'?'least-squares line':'line you set';
+  var ss=$('slopeSent'),is=$('intSent');
+  if(!ln){
+    ss.textContent='There is no line to read yet.';is.textContent='';is.classList.add('hidden');
+  }else{
+    is.classList.remove('hidden');
+    var sgn=ln.b>=0?'up':'down';
+    ss.innerHTML='<b>Slope ('+who+'):</b> For each additional '+sc.xPer+', the model predicts the '+sc.yName+' to change by about <b>'+sig(ln.b,3)+' '+sc.yUnit+'</b> ('+sgn+').';
+    var out0=!(n&&0>=dmin&&0<=dmax);
+    is.className='note'+(out0?' warn':'');
+    is.innerHTML='<b>Intercept ('+who+'):</b> When x is 0 ('+sc.xName+' = 0), the model predicts '+sc.yName+' of about <b>'+sig(ln.a,3)+' '+sc.yUnit+'</b> (this may not make sense in context).'+(out0?' <b>Warning:</b> x = 0 is outside the data (data run from '+(n?sig(dmin,4):'—')+' to '+(n?sig(dmax,4):'—')+'), so this is extrapolation.':'');
+  }
+  /* Galton note */
+  var gl=$('galton');
+  gl.classList.toggle('hidden',!sc.galton);
+  if(sc.galton){
+    gl.innerHTML='<b>Regression toward the mean.</b> The least-squares slope is '+(fitM.ok?f2(fitM.b):'—')+', flatter than the line y = x (slope 1). A child of a parent who is 2 SD above average is predicted to be only about '+(fitM.ok?f2(predictAt(fitM.a,fitM.b,2)):'—')+' SD above average: still tall, but closer to average. Galton noticed this pattern in real heights. It is a fact about how imperfect association works in data, not a force pulling children back.';
+  }
+  /* residual panel */
+  var rl=resLineM;
+  $('rsMy').setAttribute('aria-pressed',S.resSrc==='my'?'true':'false');
+  $('rsLS').setAttribute('aria-pressed',S.resSrc==='ls'?'true':'false');
+  var rn='';
+  if(rl&&n){
+    var rr=residualsOf(mxs,mys,rl.a,rl.b),sum=0;for(i=0;i<n;i++)sum+=rr[i];
+    var sse=sseOf(mxs,mys,rl.a,rl.b);
+    rn='Residual = actual y minus line y (circles above the line, squares below). Sum of residuals: '+f2(Math.abs(sum)<1e-9?0:sum)+(S.resSrc==='ls'?' (always 0 for least squares)':'')+'. SSE: '+fsse(sse)+'.';
+    if(S.resSrc==='ls'&&n>=10){
+      var ord=[];for(i=0;i<n;i++)ord.push(i);ord.sort(function(p,q){return mxs[p]-mxs[q]||p-q;});
+      var ch=0,last=0;
+      ord.forEach(function(k){var s=Math.abs(rr[k])<1e-9?0:(rr[k]>0?1:-1);if(s!==0){if(last!==0&&s!==last)ch++;last=s;}});
+      if(ch<=2)rn+=' Look: the residuals run in long streaks (mostly one sign, then the other, then back), which is a curve pattern. A straight line misses something here.';
+    }
+  }else rn='Residuals appear once a line is available.';
+  $('resNote').textContent=rn;
+  /* prediction */
+  var pxv=S.predX;
+  var inI=n&&pxv>=dmin-1e-9&&pxv<=dmax+1e-9;
+  var tag=$('predTag');
+  if(!n){tag.textContent='no data';tag.className='tag';}
+  else if(inI){tag.textContent='Interpolation';tag.className='tag in';}
+  else{tag.textContent='Extrapolation: beyond the data';tag.className='tag ex';}
+  var pi=$('predX');
+  if(document.activeElement!==pi){pi.value=sig(pxv,6).replace('−','-');}
+  pi.min=sc.xmin;pi.max=sc.xmax;
+  $('predUnit').textContent=sc.xUnit;
+  var pt=$('predText'),bad=$('predBad'),cau=$('predCaution');
+  if(ln&&n){
+    var yh=predictAt(ln.a,ln.b,pxv);
+    pt.innerHTML='At x = '+sig(pxv,5)+' '+sc.xUnit+', the '+who+' predicts '+sc.yName+' of about <b>'+sig(yh,4)+' '+sc.yUnit+'</b> (ŷ = '+sig(ln.a,3)+' '+(ln.b<0?'−':'+')+' '+sig(Math.abs(ln.b),3)+' × '+sig(pxv,4)+').';
+    var impossible=(sc.lo!==null&&yh<sc.lo-1e-9)||(sc.hi!==null&&yh>sc.hi+1e-9);
+    bad.classList.toggle('hidden',!impossible);
+    if(impossible)bad.textContent='This prediction does not make sense in context: it gives '+((sc.lo!==null&&yh<sc.lo)?sc.loWhy:sc.hiWhy)+'.';
+    cau.classList.toggle('hidden',inI);
+    if(!inI){
+      cau.innerHTML='<b>Extrapolation: beyond the data.</b> The data only cover x from '+sig(dmin,4)+' to '+sig(dmax,4)+' '+sc.xUnit+'. Outside that range we do not know whether the pattern keeps going, so this prediction is a risk.'+(sc.note?' '+sc.note:'');
+    }
+  }else{
+    pt.textContent='No line to predict with yet.';bad.classList.add('hidden');cau.classList.add('hidden');
+  }
+  /* sliders */
+  syncSliders();
+}
+function syncSliders(){
+  var sb=$('slB'),sa=$('slA'),sc=SC();
+  sb.min=-S.smax;sb.max=S.smax;sb.step=S.smax*2/1000;
+  sa.min=S.aLo;sa.max=S.aHi;sa.step=(S.aHi-S.aLo)/1000;
+  if(document.activeElement!==sb||!S.drag){sb.value=S.myB;}
+  sa.value=S.myA;
+  sb.setAttribute('aria-label','Slope b of your line, in '+sc.yUnit+' per '+sc.xPer);
+  sa.setAttribute('aria-label','Intercept a of your line, in '+sc.yUnit+', the height at x = 0');
+  sb.setAttribute('aria-valuetext',sig(S.myB,3)+' '+sc.yUnit+' per '+sc.xPer);
+  sa.setAttribute('aria-valuetext',sig(S.myA,3)+' '+sc.yUnit);
+  $('outB').textContent=sig(S.myB,3);$('outA').textContent=sig(S.myA,3);
+}
+function syncControls(){
+  var sc=SC();
+  SCEN.forEach(function(q){$('sc_'+q.id).setAttribute('aria-pressed',S.sc===q.id?'true':'false');});
+  $('modeMy').setAttribute('aria-pressed',S.mode==='my'?'true':'false');
+  $('modeLS').setAttribute('aria-pressed',S.mode==='ls'?'true':'false');
+  $('myRow').classList.toggle('hidden',S.mode!=='my');
+    $('showLSBtn').setAttribute('aria-pressed',S.showLS?'true':'false');
+  $('segChk').checked=S.showSeg;
+  $('identRow').classList.toggle('hidden',!sc.galton);
+  $('identChk').checked=S.showIdent;
+  $('ownRow').classList.toggle('hidden',!sc.own);
+  $('addX').min=sc.xmin;$('addX').max=sc.xmax;$('addY').min=sc.ymin;$('addY').max=sc.ymax;
+}
+
+/* ---------- init ---------- */
+function switchScenario(id){
+  stopAnim();
+  var oldPts=view.pts;
+  loadScenario(id);
+  syncControls();
+  // fresh svg geometry for the new axes
+  syncViewNow();
+  render();
+  $('srStatus').textContent='Scenario: '+SC().label+'. Made up data, '+S.pts.length+' points.';
+}
+function init(){
+  var row=$('scRow');
+  SCEN.forEach(function(q){
+    var b=document.createElement('button');b.className='btn';b.id='sc_'+q.id;b.textContent=q.label;b.setAttribute('aria-pressed','false');
+    b.addEventListener('click',function(){switchScenario(q.id);});
+    row.appendChild(b);
+  });
+  $('modeMy').addEventListener('click',function(){S.mode='my';S.resSrc='my';syncControls();render();});
+  $('modeLS').addEventListener('click',function(){S.mode='ls';S.resSrc='ls';syncControls();render();});
+  $('rsMy').addEventListener('click',function(){S.resSrc='my';render();});
+  $('rsLS').addEventListener('click',function(){S.resSrc='ls';render();});
+  $('segChk').addEventListener('change',function(){S.showSeg=this.checked;render();});
+  $('identChk').addEventListener('change',function(){S.showIdent=this.checked;render();});
+  $('showLSBtn').addEventListener('click',function(){S.showLS=!S.showLS;syncControls();render();});
+  $('snapBtn').addEventListener('click',function(){
+    var f=olsFit(xsOf(),ysOf());
+    if(!f.ok){$('srStatus').textContent='Least squares is not available yet.';return;}
+    S.myA=f.a;S.myB=f.b;S.showLS=true;syncControls();animateView();
+    $('srStatus').textContent='Your line now matches the least-squares line.';
+  });
+  $('slB').addEventListener('input',function(){S.myB=parseFloat(this.value);S.drag=null;stopAnim();view.a=S.myA;view.b=S.myB;render();});
+  $('slA').addEventListener('input',function(){S.myA=parseFloat(this.value);stopAnim();view.a=S.myA;view.b=S.myB;render();});
+  $('resetBtn').addEventListener('click',function(){switchScenario(S.sc);});
+  $('predX').addEventListener('input',function(){
+    var v=parseFloat(this.value),sc=SC();
+    if(!isFinite(v))return;
+    S.predX=clamp(v,sc.xmin,sc.xmax);render();
+  });
+  $('predX').addEventListener('change',function(){this.value=sig(S.predX,6).replace('−','-');});
+  $('addBtn').addEventListener('click',function(){addPoint(parseFloat($('addX').value),parseFloat($('addY').value));});
+  $('undoBtn').addEventListener('click',function(){if(S.pts.length)removePoint(S.pts[S.pts.length-1].id);});
+  $('clearBtn').addEventListener('click',function(){S.pts=[];view.pts={};S.sel=null;render();$('srStatus').textContent='All points cleared. Click the plot to add points.';});
+  S.mode='my';
+  buildCharts();
+  loadScenario('hours');
+  S.mode='my';S.resSrc='my';
+  syncControls();render();
+  if(window.ResizeObserver){
+    var last=$('chartHost').clientWidth;
+    new ResizeObserver(function(){
+      var w=$('chartHost').clientWidth;
+      if(w!==last&&!S.drag){last=w;buildCharts();render();}
+    }).observe($('chartHost'));
+  }
+}
+if(typeof document!=='undefined'&&document.getElementById('chartHost'))init();
+</script>
+</body>
+</html>

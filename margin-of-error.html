@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Margin of Error Lab</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 12px; font-size: 14px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 3px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+  .panel h2 { font-size: 0.74rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .part { font-size: 0.95rem; font-weight: 800; color: #0E1C42; margin: 4px 2px 6px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 8px; }
+  .field { flex: 1; min-width: 140px; font-size: 0.78rem; font-weight: 700; color: #0E1C42; }
+  .field select, .field input[type=number] { display: block; width: 100%; margin-top: 3px; padding: 6px; border: 2px solid #D0D9E8; border-radius: 8px; font: inherit; font-size: 0.88rem; color: #1a2340; background: #fff; }
+  .field input[type=range] { display: block; width: 100%; margin-top: 3px; accent-color: #0E1C42; }
+  .ro { color: #C7922C; font-weight: 900; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { padding: 8px 12px; border: none; border-radius: 8px; font: inherit; font-size: 0.82rem; font-weight: 700; cursor: pointer; background: #0E1C42; color: #fff; }
+  .btn:hover { background: #1a2f63; }
+  .btn.gold { background: #C7922C; } .btn.gold:hover { background: #a87820; }
+  .btn.ghost { background: #fff; color: #0E1C42; border: 2px solid #0E1C42; }
+  .btn.small { padding: 5px 9px; font-size: 0.76rem; }
+  .btn.ghost[aria-pressed=true] { background: #0E1C42; color: #fff; }
+  .btn.red { background: #C0392B; } .btn.red:hover { background: #96281c; }
+  .btn:active { transform: scale(0.97); }
+  svg { display: block; width: 100%; height: auto; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.75rem; color: #6b7a99; margin-top: 4px; align-items: center; }
+  .legend svg { display: inline-block; width: 16px; height: 14px; vertical-align: -3px; margin-right: 3px; }
+  .big { background: #EEF1F8; border-left: 5px solid #C7922C; border-radius: 8px; padding: 8px 12px; margin-top: 8px; font-size: 0.9rem; line-height: 1.5; }
+  .big b { font-size: 1.05rem; color: #0E1C42; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .tile { background: #EEF1F8; border-radius: 8px; padding: 7px 8px; }
+  .tile .l { font-size: 0.68rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.03em; }
+  .tile .v { font-size: 1.15rem; font-weight: 900; color: #0E1C42; margin: 2px 0; }
+  .tile .d { font-size: 0.72rem; color: #1a2340; line-height: 1.35; }
+  .tile.sim { border: 2px solid #C7922C; background: #FDF3E3; }
+  .gold { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 10px; padding: 9px 12px; font-size: 0.82rem; line-height: 1.5; margin-bottom: 10px; }
+  .blue { background: #E8F6FB; border-radius: 10px; padding: 9px 12px; font-size: 0.82rem; line-height: 1.5; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 6px; }
+  th, td { border-bottom: 1px solid #D0D9E8; padding: 4px 5px; text-align: center; }
+  th { color: #6b7a99; font-size: 0.7rem; text-transform: uppercase; }
+  .muted { color: #6b7a99; font-size: 0.78rem; line-height: 1.45; }
+  .verdict { border-radius: 8px; padding: 9px 12px; border-left: 5px solid; font-size: 0.86rem; line-height: 1.5; margin-top: 8px; }
+  .verdict.close { background: #FDF3E3; border-color: #C7922C; }
+  .verdict.clear { background: #E8F6FB; border-color: #0E1C42; }
+  .verdict.bad { background: #fdf0ee; border-color: #C0392B; }
+  .card { border: 2px solid #0E1C42; border-radius: 10px; padding: 8px 12px; background: #F8FAFD; font-size: 0.9rem; line-height: 1.6; }
+  .card b { color: #0E1C42; }
+  @media (max-width: 480px) { .tiles { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Margin of Error Lab</h1>
+  <p class="subtitle">Every poll here is made up and simulated by your browser. Nothing is real data.</p>
+
+  <div class="part">Part 1. Simulate polls</div>
+  <div class="panel">
+    <h2>1. Pick a population and a poll size</h2>
+    <div class="row">
+      <label class="field">Scenario
+        <select id="scen"></select>
+      </label>
+      <label class="field" id="customWrap" hidden>My own true percent: <span class="ro" id="customRead">50%</span>
+        <input type="range" id="customP" min="5" max="95" step="1" value="50">
+      </label>
+      <label class="field">Sample size n: <span class="ro" id="nRead">400</span>
+        <input type="range" id="nSlider" min="0" max="100" step="1" value="55" aria-valuetext="n = 400">
+      </label>
+    </div>
+    <div class="btns" id="presets" role="group" aria-label="Sample size presets"></div>
+    <div class="btns" style="margin-top:8px">
+      <button class="btn gold" id="bRun" type="button">Run 1000 polls</button>
+      <button class="btn ghost" id="bTruth" type="button" aria-pressed="false">Show the truth</button>
+      <button class="btn red" id="bReset" type="button">Reset</button>
+    </div>
+    <p class="muted" style="margin-top:6px">Each poll asks n people and records the percent who say yes. Changing the scenario or n clears the results so you never mix different poll sizes.</p>
+  </div>
+
+  <div class="panel">
+    <h2>2. What 1000 polls look like</h2>
+    <div id="histBox"></div>
+    <div class="legend" id="histLegend"></div>
+    <div class="big" id="simRead" aria-live="polite"></div>
+  </div>
+
+  <div class="part">Part 2. Compare with the rule</div>
+  <div class="panel">
+    <h2>3. Simulated margin of error versus the formulas</h2>
+    <div class="tiles" id="tiles" aria-live="polite"></div>
+    <div class="blue" id="ruleNote"></div>
+  </div>
+
+  <div class="panel">
+    <h2>4. Sample size ladder</h2>
+    <table id="ladder"></table>
+    <p class="muted" style="margin-top:6px"><b>4 times the people, half the margin.</b> The square root is why: to cut the margin in half you must quadruple n.</p>
+    <div class="row" style="margin-top:10px">
+      <label class="field">How many people for plus-or-minus __ points?
+        <input type="number" id="wantMoe" min="0.5" max="20" step="0.5" value="3">
+      </label>
+    </div>
+    <div class="big" id="needRead" aria-live="polite"></div>
+    <p class="muted" style="margin-top:6px">This uses the safe rule at p = 50%, the case that needs the most people. Cost note: each person you reach costs time and money, so going from plus-or-minus 3 to plus-or-minus 1.5 costs about four times as much, not twice.</p>
+  </div>
+
+  <div class="part">Part 3. Read a poll</div>
+  <div class="panel">
+    <h2>5. A made-up poll card</h2>
+    <div class="row">
+      <label class="field">Preset poll
+        <select id="pollPreset"></select>
+      </label>
+    </div>
+    <div class="row">
+      <label class="field">Rivera (%)<input type="number" id="pA" min="0" max="100" step="1" value="52"></label>
+      <label class="field">Okafor (%)<input type="number" id="pB" min="0" max="100" step="1" value="48"></label>
+      <label class="field">Sample size n<input type="number" id="pN" min="25" max="10000" step="25" value="800"></label>
+    </div>
+    <div class="card" id="card" aria-live="polite"></div>
+    <div id="pollBox"></div>
+    <div class="legend">
+      <span><svg viewBox="0 0 16 14" aria-hidden="true"><circle cx="8" cy="7" r="5" fill="#0E1C42"/></svg>Rivera result (circle)</span>
+      <span><svg viewBox="0 0 16 14" aria-hidden="true"><path d="M8 1 L14 7 L8 13 L2 7 Z" fill="#C7922C"/></svg>Okafor result (diamond)</span>
+    </div>
+    <div class="verdict" id="verdict" aria-live="polite"></div>
+    <div class="blue" id="gapWhy"></div>
+  </div>
+
+  <div class="panel">
+    <h2>6. What the margin of error does NOT cover</h2>
+    <div class="gold" style="margin-bottom:0">
+      <ul style="margin:0 0 0 18px">
+        <li><b>Bias.</b> If the sample leaves out part of the population, a bigger sample just repeats the same mistake.</li>
+        <li><b>Nonresponse.</b> If the people who answer differ from the people who do not, the result is off by an amount the formula cannot see.</li>
+        <li><b>Bad wording.</b> A confusing or leading question shifts answers. No margin of error can fix that.</li>
+        <li><b>Chance misses.</b> The margin of error is built to hold about 95 times in 100. That means about <span id="missCount">5</span> polls in 100 miss by more than the margin <i>by chance alone</i>, even when the poll is done perfectly.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ---------- pure functions ---------- */
+function simPolls(p, n, reps, rng) {
+  var out = new Array(reps);
+  for (var i = 0; i < reps; i++) {
+    var k = 0;
+    for (var j = 0; j < n; j++) if (rng() < p) k++;
+    out[i] = k / n;
+  }
+  return out;
+}
+function simMoe(phats, p) {
+  var d = phats.map(function (x) { return Math.abs(x - p) * 100; }).sort(function (a, b) { return a - b; });
+  return d[Math.ceil(0.95 * d.length) - 1];
+}
+function formulaMoe(p, n) { return 196 * Math.sqrt(p * (1 - p) / n); }
+function ruleMoe(n) { return 100 / Math.sqrt(n); }
+function needN(moePts) { return Math.ceil(Math.round(Math.pow(100 / moePts, 2) * 1e6) / 1e6); }
+function gapCheck(a, b, n) {
+  var m = ruleMoe(n), gap = Math.abs(a - b);
+  return { moe: m, gap: gap, twice: 2 * m, tooClose: gap < 2 * m };
+}
+var PRESET_N = [25, 50, 100, 200, 400, 800, 1600, 3200];
+function nFromSlider(t) {
+  var raw = 25 * Math.pow(160, t / 100), best = Math.round(raw);
+  PRESET_N.concat([4000]).forEach(function (q) { if (Math.abs(raw - q) / q < 0.05) best = q; });
+  return best;
+}
+function sliderFromN(n) { return Math.round(100 * Math.log(n / 25) / Math.log(160)); }
+
+/* ---------- state ---------- */
+var SCEN = [
+  { name: 'Residents who support a new library hours plan (made up)', p: 0.40 },
+  { name: 'Students who like the new lunch menu (made up)', p: 0.62 },
+  { name: 'Voters who favor a park bond (made up)', p: 0.50 },
+  { name: 'My own true percent', p: null }
+];
+var POLLS = [
+  { name: 'Close race: Rivera 52%, Okafor 48%, n = 800', a: 52, b: 48, n: 800 },
+  { name: 'Clear lead: Rivera 58%, Okafor 42%, n = 800', a: 58, b: 42, n: 800 },
+  { name: 'Small lead, big poll: Rivera 54%, Okafor 46%, n = 1600', a: 54, b: 46, n: 1600 }
+];
+var S = { scen: 0, custom: 50, n: 400, phats: null, truthOn: false };
+var $ = function (id) { return document.getElementById(id); };
+function truthP() { return (S.scen === 3 ? S.custom : SCEN[S.scen].p * 100) / 100; }
+function pct(x, d) { return x.toFixed(d === undefined ? 1 : d); }
+
+/* ---------- Part 1 ---------- */
+function drawHist() {
+  var W = 560, H = 270, L = 34, R = 10, T = 22, B = 44, iw = W - L - R, ih = H - T - B;
+  var p = truthP() * 100, n = S.n;
+  var half = Math.min(1.8 * ruleMoe(n), 50);
+  var lo = Math.max(0, p - half), hi = Math.min(100, p + half);
+  var bw = Math.max((hi - lo) / 40, 100 / n);
+  var nb = Math.ceil((hi - lo) / bw - 1e-9);
+  var counts = new Array(nb).fill(0), mx = 1, i, moe = null;
+  if (S.phats) {
+    moe = simMoe(S.phats, p / 100);
+    S.phats.forEach(function (x) {
+      var b = Math.floor((x * 100 - lo) / bw + 1e-9);
+      if (b >= 0 && b < nb) counts[b]++;
+    });
+    mx = Math.max.apply(null, counts);
+  }
+  var X = function (v) { return L + (v - lo) / (hi - lo) * iw; };
+  var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + (S.phats
+    ? 'Histogram of 1000 simulated poll results. The middle 95 percent lie within plus or minus ' + pct(moe) + ' points of the true ' + pct(p, 0) + ' percent.'
+    : 'Empty histogram axis. Run 1000 polls to fill it.') + '">';
+  if (S.phats) {
+    s += '<rect x="' + X(p - moe) + '" y="' + T + '" width="' + (X(p + moe) - X(p - moe)) + '" height="' + ih + '" fill="#E8F6FB"/>';
+    s += '<text x="' + X(p) + '" y="14" text-anchor="middle" font-size="13" fill="#0E1C42" font-weight="700">shaded: middle 95% of results</text>';
+    for (i = 0; i < nb; i++) {
+      if (!counts[i]) continue;
+      var c = lo + (i + 0.5) * bw, h = counts[i] / mx * (ih - 6);
+      var inside = Math.abs(c - p) <= moe + 1e-9;
+      s += '<rect x="' + (X(lo + i * bw) + 0.5) + '" y="' + (T + ih - h) + '" width="' + Math.max(1, X(lo + (i + 1) * bw) - X(lo + i * bw) - 1) + '" height="' + h + '" ' +
+        (inside ? 'fill="#0E1C42"' : 'fill="#fff" stroke="#C7922C" stroke-width="2"') + '/>';
+    }
+  }
+  s += '<line x1="' + L + '" y1="' + (T + ih) + '" x2="' + (W - R) + '" y2="' + (T + ih) + '" stroke="#6b7a99" stroke-width="1.5"/>';
+  var step = (hi - lo) > 40 ? 10 : (hi - lo) > 16 ? 5 : (hi - lo) > 8 ? 2 : 1;
+  for (var t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) {
+    s += '<line x1="' + X(t) + '" y1="' + (T + ih) + '" x2="' + X(t) + '" y2="' + (T + ih + 5) + '" stroke="#6b7a99"/>' +
+      '<text x="' + X(t) + '" y="' + (T + ih + 19) + '" text-anchor="middle" font-size="13" fill="#6b7a99">' + t + '%</text>';
+  }
+  s += '<text x="' + (L + iw / 2) + '" y="' + (H - 4) + '" text-anchor="middle" font-size="13" fill="#1a2340">Percent who said yes in the poll</text>';
+  if (S.phats || S.truthOn) {
+    s += '<line x1="' + X(p) + '" y1="' + (T - 4) + '" x2="' + X(p) + '" y2="' + (T + ih) + '" stroke="#C7922C" stroke-width="3"/>' +
+      '<text x="' + (X(p) + 5) + '" y="' + (T + 14) + '" font-size="13" fill="#8a6200" font-weight="700">Truth: ' + pct(p, 0) + '%</text>';
+  }
+  s += '</svg>';
+  $('histBox').innerHTML = s;
+  $('histLegend').innerHTML = S.phats
+    ? '<span><svg viewBox="0 0 16 14" aria-hidden="true"><rect x="2" y="2" width="12" height="10" fill="#0E1C42"/></svg>Inside the middle 95% (solid)</span>' +
+      '<span><svg viewBox="0 0 16 14" aria-hidden="true"><rect x="2" y="2" width="12" height="10" fill="#fff" stroke="#C7922C" stroke-width="2"/></svg>Outside (outlined)</span>' +
+      '<span><svg viewBox="0 0 16 14" aria-hidden="true"><line x1="8" y1="0" x2="8" y2="14" stroke="#C7922C" stroke-width="3"/></svg>True percent</span>'
+    : '';
+  $('simRead').innerHTML = S.phats
+    ? 'In 95 of every 100 polls, the result landed within about <b>' + pct(moe) + ' points</b> of the truth. Simulated margin of error: <b>&plusmn;' + pct(moe) + ' points</b>.'
+    : 'Press &ldquo;Run 1000 polls&rdquo; to see where the poll results land.' + (S.truthOn ? '' : ' The true percent stays hidden until you run, or press &ldquo;Show the truth&rdquo;.');
+}
+
+function drawTiles() {
+  var p = truthP(), n = S.n, f = formulaMoe(p, n), r = ruleMoe(n);
+  var sm = S.phats ? simMoe(S.phats, p) : null;
+  var hidden = !S.phats && !S.truthOn;
+  $('tiles').innerHTML =
+    '<div class="tile sim"><div class="l">Simulated margin of error</div><div class="v">' + (sm === null ? 'run first' : '&plusmn;' + pct(sm)) +
+    '</div><div class="d">From the 1000 polls you ran: how far 95 of every 100 results landed from the truth (points).</div></div>' +
+    '<div class="tile"><div class="l">Formula at the true p</div><div class="v">' + (hidden ? 'hidden' : '&plusmn;' + pct(f)) +
+    '</div><div class="d">1.96 &times; &radic;(p(1&minus;p)/n)' + (hidden ? ' (uses the hidden truth)' : ' with p = ' + pct(p * 100, 0) + '% and n = ' + n) + '.</div></div>' +
+    '<div class="tile"><div class="l">Safe rule 1/&radic;n</div><div class="v">&plusmn;' + pct(r) +
+    '</div><div class="d">100 &divide; &radic;' + n + ', in points. Needs no knowledge of p.</div></div>';
+  $('ruleNote').innerHTML = '<b>Why two formulas?</b> The first needs the true percent, which a pollster does not know. The rule 1/&radic;n is the largest the margin of error can be for a given n (it happens at p = 50%), so it is a safe stand-in. ' +
+    (hidden ? '' : (Math.abs(p - 0.5) < 1e-9 ? 'Here p is 50%, so the two formulas agree.' : 'Here p is ' + pct(p * 100, 0) + '%, so the safe rule is a little larger than the formula at the true p.')) +
+    (sm === null ? '' : ' Your simulated value should land close to both; small differences are chance in the 1000 polls.');
+}
+
+function drawLadder() {
+  var rows = [100, 400, 1600], h = '<tr><th>Sample size n</th><th>Margin of error 1/&radic;n</th><th>Compared with the row above</th></tr>';
+  rows.forEach(function (n, i) {
+    h += '<tr><td>' + n + '</td><td>&plusmn;' + pct(ruleMoe(n)) + ' points</td><td>' +
+      (i ? (n / rows[i - 1]) + ' times the people, margin &times; ' + (ruleMoe(n) / ruleMoe(rows[i - 1])) : 'starting point') + '</td></tr>';
+  });
+  $('ladder').innerHTML = h;
+  var m = parseFloat($('wantMoe').value);
+  if (!(m >= 0.5 && m <= 20)) {
+    $('needRead').innerHTML = 'Enter a margin between 0.5 and 20 points.';
+  } else {
+    $('needRead').innerHTML = 'For plus-or-minus <b>' + m + '</b> points you need about <b>' + needN(m).toLocaleString() + ' people</b> (n = (100 &divide; ' + m + ')&sup2;, rounded up).';
+  }
+}
+
+/* ---------- Part 3 ---------- */
+function drawPoll() {
+  var a = parseFloat($('pA').value), b = parseFloat($('pB').value), n = parseFloat($('pN').value);
+  if (!(a >= 0 && b >= 0 && a + b <= 100 && n >= 25)) {
+    $('card').innerHTML = 'Enter percents that add up to 100 or less, and n of at least 25.';
+    $('pollBox').innerHTML = ''; $('verdict').className = 'verdict bad'; $('verdict').innerHTML = 'Waiting for valid numbers.'; $('gapWhy').innerHTML = '';
+    return;
+  }
+  var g = gapCheck(a, b, n), m = g.moe, und = 100 - a - b;
+  $('card').innerHTML = '<b>Candidate Rivera ' + a + '%</b>, <b>Candidate Okafor ' + b + '%</b>' + (und > 0 ? ', undecided ' + und + '%' : '') + ', n = ' + n +
+    '<br>Margin of error for each share: <b>&plusmn;' + pct(m) + ' points</b> (1/&radic;n)';
+  var lo = Math.max(0, Math.floor((Math.min(a, b) - m - 4) / 5) * 5), hi = Math.min(100, Math.ceil((Math.max(a, b) + m + 4) / 5) * 5);
+  var W = 560, H = 120, L = 40, R = 40, iw = W - L - R;
+  var X = function (v) { return L + (v - lo) / (hi - lo) * iw; };
+  var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Rivera ' + pct(a - m) + ' to ' + pct(a + m) + ' percent. Okafor ' + pct(b - m) + ' to ' + pct(b + m) + ' percent.">';
+  s += '<line x1="' + L + '" y1="92" x2="' + (W - R) + '" y2="92" stroke="#6b7a99" stroke-width="1.5"/>';
+  var step = (hi - lo) > 40 ? 10 : 5;
+  for (var t = lo; t <= hi; t += step) s += '<line x1="' + X(t) + '" y1="92" x2="' + X(t) + '" y2="97" stroke="#6b7a99"/><text x="' + X(t) + '" y="114" text-anchor="middle" font-size="13" fill="#6b7a99">' + t + '%</text>';
+  function bar(y, v, col, label, shape) {
+    var o = '<line x1="' + X(v - m) + '" y1="' + y + '" x2="' + X(v + m) + '" y2="' + y + '" stroke="' + col + '" stroke-width="7" opacity="0.45"/>' +
+      '<line x1="' + X(v - m) + '" y1="' + (y - 9) + '" x2="' + X(v - m) + '" y2="' + (y + 9) + '" stroke="' + col + '" stroke-width="3"/>' +
+      '<line x1="' + X(v + m) + '" y1="' + (y - 9) + '" x2="' + X(v + m) + '" y2="' + (y + 9) + '" stroke="' + col + '" stroke-width="3"/>';
+    o += shape === 'c' ? '<circle cx="' + X(v) + '" cy="' + y + '" r="7" fill="' + col + '"/>'
+      : '<path d="M' + X(v) + ' ' + (y - 9) + ' L' + (X(v) + 9) + ' ' + y + ' L' + X(v) + ' ' + (y + 9) + ' L' + (X(v) - 9) + ' ' + y + ' Z" fill="' + col + '"/>';
+    return o + '<text x="' + X(v) + '" y="' + (y - 13) + '" text-anchor="middle" font-size="13" font-weight="700" fill="#1a2340">' + label + '</text>';
+  }
+  s += bar(32, a, '#0E1C42', 'Rivera ' + pct(a - m) + '% to ' + pct(a + m) + '%', 'c');
+  s += bar(68, b, '#C7922C', 'Okafor ' + pct(b - m) + '% to ' + pct(b + m) + '%', 'd');
+  $('pollBox').innerHTML = s + '</svg>';
+  var lead = a > b ? 'Rivera' : 'Okafor', v = $('verdict');
+  if (g.tooClose) {
+    v.className = 'verdict close';
+    v.innerHTML = '<b>The gap (' + pct(g.gap) + ' points) is smaller than about twice the margin of error (' + pct(g.twice) + ' points), so the poll cannot tell us who is ahead.</b> The race is too close to call from this poll.';
+  } else {
+    v.className = 'verdict clear';
+    v.innerHTML = '<b>The gap (' + pct(g.gap) + ' points) is larger than about twice the margin of error (' + pct(g.twice) + ' points), so ' + lead + ' is ahead by more than polling chance alone usually produces.</b>';
+  }
+  $('gapWhy').innerHTML = '<b>Why twice?</b> The margin of error belongs to one share. The gap compares two shares from the same poll, and when one candidate gains in the sample the other tends to lose, so the gap can swing about twice as far as one share. Rule of thumb: <b>if the gap is smaller than about twice the margin of error, the race is too close to call.</b> The two bars overlapping on the number line is the same check. (If many voters are undecided the true swing of the gap is a bit smaller, so this rule is on the cautious side.)';
+}
+
+/* ---------- wiring ---------- */
+function syncN() {
+  $('nRead').textContent = S.n; $('nSlider').setAttribute('aria-valuetext', 'n = ' + S.n);
+  Array.prototype.forEach.call($('presets').children, function (b) { b.setAttribute('aria-pressed', String(+b.dataset.n === S.n)); });
+}
+function renderAll() {
+  $('missCount').textContent = Math.round(100 * (1 - 0.95));
+  drawHist(); drawTiles(); drawLadder(); drawPoll();
+}
+function clearResults() { S.phats = null; renderAll(); }
+function loadPoll(i) { var c = POLLS[i]; $('pA').value = c.a; $('pB').value = c.b; $('pN').value = c.n; }
+function init() {
+  SCEN.forEach(function (c, i) { var o = document.createElement('option'); o.value = i; o.textContent = c.name; $('scen').appendChild(o); });
+  PRESET_N.forEach(function (n) {
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'btn ghost small'; b.textContent = 'n = ' + n; b.dataset.n = n;
+    b.setAttribute('aria-pressed', 'false');
+    b.onclick = function () { S.n = n; $('nSlider').value = sliderFromN(n); syncN(); clearResults(); };
+    $('presets').appendChild(b);
+  });
+  POLLS.forEach(function (c, i) { var o = document.createElement('option'); o.value = i; o.textContent = c.name; $('pollPreset').appendChild(o); });
+  $('scen').onchange = function () {
+    S.scen = +this.value; $('customWrap').hidden = S.scen !== 3; S.truthOn = false; $('bTruth').setAttribute('aria-pressed', 'false'); clearResults();
+  };
+  $('customP').oninput = function () { S.custom = +this.value; $('customRead').textContent = S.custom + '%'; clearResults(); };
+  $('nSlider').oninput = function () { S.n = nFromSlider(+this.value); syncN(); clearResults(); };
+  $('bRun').onclick = function () { S.phats = simPolls(truthP(), S.n, 1000, Math.random); renderAll(); };
+  $('bTruth').onclick = function () { S.truthOn = !S.truthOn; this.setAttribute('aria-pressed', String(S.truthOn)); renderAll(); };
+  $('bReset').onclick = function () {
+    S = { scen: 0, custom: 50, n: 400, phats: null, truthOn: false };
+    $('scen').value = 0; $('customWrap').hidden = true; $('customP').value = 50; $('customRead').textContent = '50%';
+    $('nSlider').value = sliderFromN(400); $('bTruth').setAttribute('aria-pressed', 'false');
+    $('wantMoe').value = 3; $('pollPreset').value = 0; loadPoll(0); syncN(); renderAll();
+  };
+  $('wantMoe').oninput = drawLadder;
+  $('pollPreset').onchange = function () { loadPoll(+this.value); drawPoll(); };
+  ['pA', 'pB', 'pN'].forEach(function (id) { $(id).oninput = drawPoll; });
+  $('nSlider').value = sliderFromN(400); syncN(); renderAll();
+}
+if (typeof document !== 'undefined' && document.getElementById('scen')) init();
+</script>
+</body>
+</html>

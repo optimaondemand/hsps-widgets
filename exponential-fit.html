@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Straighten the Curve — Exponential Fit</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 6px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 8px; }
+  .wrap { max-width: 700px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 6px 12px; margin-bottom: 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 5px; }
+  .row:last-child { margin-bottom: 0; }
+  .lab { font-size: 0.72rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.05em; }
+  h2 { font-size: 0.74rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  button { font-family: inherit; }
+  .btn { padding: 5px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .btn:hover { background: #F8FAFD; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  .btn.red { border-color: #C0392B; color: #C0392B; }
+  .seg { display: flex; flex-wrap: wrap; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .seg .btn { border: none; border-radius: 0; }
+  .seg .btn + .btn { border-left: 2px solid #0E1C42; }
+  button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, svg:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  select, input[type=number] { font-family: inherit; padding: 4px 6px; border: 2px solid #D0D9E8; border-radius: 6px; font-size: 0.82rem; color: #1a2340; background: #fff; }
+  input[type=number] { width: 84px; }
+  .field { display: flex; align-items: center; gap: 5px; font-size: 0.8rem; font-weight: 700; color: #0E1C42; }
+  .chk { display: flex; align-items: center; gap: 5px; font-size: 0.8rem; font-weight: 700; color: #0E1C42; cursor: pointer; }
+  .chk input { width: 16px; height: 16px; accent-color: #0E1C42; }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: 'Segoe UI', Arial, sans-serif; }
+  #plot { touch-action: none; }
+  code { font-family: Consolas, 'Courier New', monospace; background: #E8F6FB; border-radius: 4px; padding: 1px 5px; font-size: 0.78rem; color: #0E1C42; }
+  .note { font-size: 0.76rem; color: #6b7a99; line-height: 1.45; }
+  .small { font-size: 0.8rem; line-height: 1.5; }
+  .hide { display: none !important; }
+  .legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 0.74rem; font-weight: 700; color: #0E1C42; margin-bottom: 3px; }
+  .legend svg { display: inline-block; width: 26px; height: 12px; vertical-align: -2px; margin-right: 3px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .grid2 > .panel { margin-bottom: 0; }
+  .gap { margin-bottom: 6px; }
+  .big { font-size: 1.15rem; font-weight: 800; color: #0E1C42; font-variant-numeric: tabular-nums; }
+  .readout { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 12px; padding: 7px 12px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; font-size: 0.78rem; line-height: 1.45; margin-top: 3px; }
+  .kv dt { color: #6b7a99; font-weight: 700; }
+  .kv dd { color: #1a2340; font-variant-numeric: tabular-nums; }
+  .hint { background: #E8F6FB; border-left: 4px solid #55C8E8; border-radius: 6px; padding: 5px 10px; font-size: 0.78rem; line-height: 1.4; margin-top: 5px; }
+  .badge { font-size: 0.76rem !important; line-height: 1.35 !important; }
+  .resbox { border: 2px solid #D0D9E8; border-radius: 10px; padding: 4px 6px; transition: opacity .3s, border-color .3s; }
+  .resbox.emph { border: 4px solid #C7922C; padding: 2px 4px; background: #FFFCF6; }
+  .resbox:not(.emph) { opacity: 0.7; }
+  .resbox .t { font-size: 0.72rem; font-weight: 700; color: #0E1C42; line-height: 1.3; }
+  .resbox .p { font-size: 0.72rem; color: #3b4766; line-height: 1.35; }
+  .badge { display: inline-block; font-size: 0.8rem; font-weight: 700; border-radius: 8px; padding: 4px 9px; margin-top: 5px; line-height: 1.4; }
+  .badge.in { background: #E8F6FB; border: 2px solid #55C8E8; color: #0E1C42; }
+  .badge.near { background: #FDF3E3; border: 2px solid #C7922C; color: #6b4a0c; }
+  .badge.far { background: #fdf0ee; border: 3px solid #C0392B; color: #8c2619; }
+  .msg { font-size: 0.78rem; font-weight: 700; color: #C0392B; min-height: 0; }
+  .msg.ok { color: #0E1C42; }
+  details { font-size: 0.8rem; line-height: 1.5; }
+  details + details { margin-top: 5px; }
+  summary { cursor: pointer; font-weight: 700; color: #0E1C42; }
+  details p, details pre { margin-top: 4px; }
+  pre { font-family: Consolas, 'Courier New', monospace; background: #E8F6FB; border-radius: 6px; padding: 5px 8px; font-size: 0.76rem; line-height: 1.55; overflow-x: auto; white-space: pre; color: #0E1C42; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } .grid2 > .panel { margin-bottom: 0; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Straighten the Curve</h1>
+  <p class="subtitle">Every dataset here is simulated (made up) for practice. Switch the scale and watch the curve straighten.</p>
+
+  <div class="panel">
+    <div class="row">
+      <label class="field" for="scen">Scenario
+        <select id="scen">
+          <option value="bact">Bacteria in a dish (simulated)</option>
+          <option value="sav">Savings account (simulated)</option>
+          <option value="gad">Gadget value (simulated)</option>
+          <option value="lin">Not exponential: steady growth (simulated)</option>
+          <option value="own">My own points</option>
+        </select>
+      </label>
+    </div>
+    <div class="note" id="scDesc" style="margin-bottom:5px"></div>
+    <div class="row">
+      <span class="lab" id="viewLab">Scale</span>
+      <div class="seg" role="group" aria-labelledby="viewLab">
+        <button class="btn" id="v-ord" aria-pressed="true">Ordinary scale (y)</button>
+        <button class="btn" id="v-log" aria-pressed="false">Log scale (ln y)</button>
+      </div>
+      <label class="chk" id="linChkWrap"><input type="checkbox" id="showLin"> Also show the straight-line fit of y on x</label>
+    </div>
+    <div class="legend" aria-hidden="true">
+      <span><svg viewBox="0 0 26 12"><circle cx="13" cy="6" r="5" fill="#55C8E8" stroke="#0E1C42" stroke-width="1.6"/></svg>data (simulated)</span>
+      <span><svg viewBox="0 0 26 12"><line x1="1" y1="6" x2="25" y2="6" stroke="#0E1C42" stroke-width="3"/></svg>exponential fit</span>
+      <span id="lgLin"><svg viewBox="0 0 26 12"><line x1="1" y1="6" x2="25" y2="6" stroke="#C0392B" stroke-width="2.4" stroke-dasharray="6 4"/></svg>straight-line fit of y on x</span>
+      <span id="lgPred"><svg viewBox="0 0 26 12"><path d="M13 0L19 6L13 12L7 6Z" fill="#C7922C" stroke="#6b4a0c" stroke-width="1.4"/></svg>prediction</span>
+    </div>
+    <svg id="plot" viewBox="0 0 700 230" role="img" tabindex="0" aria-label="Scatter plot with fitted exponential curve"></svg>
+    <div class="row" id="ownTools" style="margin-top:5px">
+      <span class="lab">My points</span>
+      <label class="field" for="ox">x <input type="number" id="ox" step="any" placeholder="e.g. 8"></label>
+      <label class="field" for="oy">y <input type="number" id="oy" step="any" placeholder="e.g. 60"></label>
+      <button class="btn" id="oAdd">Add point</button>
+      <button class="btn" id="oUndo">Remove last</button>
+      <button class="btn" id="oReset">Starter points</button>
+      <button class="btn red" id="oClear">Clear all</button>
+    </div>
+    <div class="msg" id="ownMsg" role="status" aria-live="polite"></div>
+    <div class="note" id="plotNote"></div>
+  </div>
+
+  <div class="grid2 gap"><div class="readout" id="model" aria-live="polite"></div>
+  <div class="panel" id="predPanel">
+    <h2>Predict</h2>
+    <div class="row">
+      <label class="field" for="px">x = <input type="number" id="px" step="any" value="12"></label>
+      <label class="chk"><input type="checkbox" id="showPred"> Show it on the plot</label>
+    </div>
+    <div id="predOut" aria-live="polite"></div>
+  </div></div>
+
+  <div class="panel">
+    <div class="row">
+      <h2 style="margin:0" id="resLab" title="A residual is data minus fit. Filled dots are above zero, hollow dots are below.">Residual plots (data − fit)</h2>
+      <div class="seg" role="group" aria-labelledby="resLab">
+        <button class="btn" id="e-lin" aria-pressed="true">Emphasise: straight-line fit</button>
+        <button class="btn" id="e-log" aria-pressed="false">Emphasise: log-scale fit</button>
+      </div>
+    </div>
+    <div class="grid2" style="gap:6px">
+      <div class="resbox emph" id="rbLin"><div class="t" id="rtLin"></div><svg id="resLin" viewBox="0 0 340 130" role="img" aria-label="Residuals of the straight-line fit of y on x"></svg><div class="p" id="rpLin"></div></div>
+      <div class="resbox" id="rbLog"><div class="t" id="rtLog"></div><svg id="resLog" viewBox="0 0 340 130" role="img" aria-label="Residuals of the line fit on the log scale"></svg><div class="p" id="rpLog"></div></div>
+    </div>
+        <div class="hint" id="resHint" aria-live="polite"></div>
+  </div>
+
+  <div class="panel">
+    <details id="dExcel">
+      <summary>In Excel (the formulas that give the same a and b)</summary>
+      <pre id="excel"></pre>
+    </details>
+    <details>
+      <summary>How the fit is made</summary>
+      <p>The fit uses ordinary least squares on the pairs (x, ln y). It chooses the line <code>ln y = c + d x</code> that makes the sum of squared vertical gaps on the log scale as small as possible. The intercept c is ln a and the slope d is ln b. Undoing the log gives <code>a = e<sup>c</sup></code> and <code>b = e<sup>d</sup></code>, so the model is <code>ŷ = a · b<sup>x</sup></code>.</p>
+      <p>Each step of 1 in x multiplies ŷ by b. The percent change per step is (b − 1) × 100. The doubling time is ln 2 ÷ ln b when b &gt; 1. The halving time is ln 2 ÷ |ln b| when b &lt; 1. The r and r² shown for the exponential model are measured on the log scale, using ln y.</p>
+      <p>This method minimises gaps on the log scale, not gaps on the original scale, so other fitting methods can give slightly different a and b. Real growth often slows down as limits appear (food, space, customers), so an exponential model describes a stretch of growth, not growth forever.</p>
+    </details>
+  </div>
+</div>
+
+<script>
+/*CORE-BEGIN*/
+var DATA = {
+  bact: { x: [0,1,2,3,4,5,6,7,8,9], y: [113,235,496,915,1801,3824,6525,16902,32631,64336] },
+  sav:  { x: [0,1,2,3,4,5,6,7,8,9,10,11,12], y: [1002,1072,1136,1191,1250,1328,1416,1484,1604,1709,1759,1920,1998] },
+  gad:  { x: [0,1,2,3,4,5,6,7,8,9,10], y: [790,643,518,426,361,275,255,184,162,134,103] },
+  lin:  { x: [0,1,2,3,4,5,6,7,8,9,10,11], y: [46,56,65,78,111,120,119,137,150,163,176,185] },
+  own:  { x: [0,1,2,3,4,5,6,7], y: [5,7,10,13,21,25,38,50] }
+};
+
+// Simple least squares of v on u.
+function olsFit(us, vs) {
+  var n = us.length, i;
+  if (n < 2) return null;
+  var mu = 0, mv = 0;
+  for (i = 0; i < n; i++) { mu += us[i]; mv += vs[i]; }
+  mu /= n; mv /= n;
+  var suu = 0, suv = 0, svv = 0;
+  for (i = 0; i < n; i++) {
+    suu += (us[i] - mu) * (us[i] - mu);
+    suv += (us[i] - mu) * (vs[i] - mv);
+    svv += (vs[i] - mv) * (vs[i] - mv);
+  }
+  if (!(suu > 0)) return null;
+  var slope = suv / suu, intercept = mv - slope * mu;
+  var r = svv > 0 ? suv / Math.sqrt(suu * svv) : 0;
+  return { n: n, slope: slope, intercept: intercept, r: r, r2: r * r };
+}
+
+// Exponential model y = a * b^x via least squares of ln(y) on x.
+function expFit(xs, ys) {
+  var n = xs.length, i, lys = [];
+  if (n < 3) return null;
+  for (i = 0; i < n; i++) { if (!(ys[i] > 0) || !isFinite(ys[i]) || !isFinite(xs[i])) return null; lys.push(Math.log(ys[i])); }
+  var f = olsFit(xs, lys);
+  if (!f) return null;
+  var b = Math.exp(f.slope);
+  var kind = f.slope > 0 ? 'growth' : (f.slope < 0 ? 'decay' : 'flat');
+  var tm = f.slope !== 0 ? Math.LN2 / Math.abs(f.slope) : NaN;
+  return { n: n, lnA: f.intercept, lnB: f.slope, a: Math.exp(f.intercept), b: b, r: f.r, r2: f.r2,
+           pct: (b - 1) * 100, kind: kind, time: tm, lys: lys };
+}
+function expPredict(fit, x) { return Math.exp(fit.lnA + fit.lnB * x); }
+function linPredict(lf, x) { return lf.intercept + lf.slope * x; }
+
+// Fit a quadratic to residuals; return R^2 (how much of the residual ups and downs a curve explains).
+function quadR2(xs, res) {
+  var n = xs.length, i;
+  if (n < 4) return 0;
+  var xm = 0, mn = Infinity, mx = -Infinity;
+  for (i = 0; i < n; i++) { xm += xs[i]; mn = Math.min(mn, xs[i]); mx = Math.max(mx, xs[i]); }
+  xm /= n;
+  var span = mx - mn;
+  if (!(span > 0)) return 0;
+  var S = [0, 0, 0, 0, 0], T = [0, 0, 0], rm = 0, u;
+  for (i = 0; i < n; i++) {
+    u = (xs[i] - xm) / span;
+    S[0] += 1; S[1] += u; S[2] += u * u; S[3] += u * u * u; S[4] += u * u * u * u;
+    T[0] += res[i]; T[1] += u * res[i]; T[2] += u * u * res[i];
+    rm += res[i];
+  }
+  rm /= n;
+  var M = [[S[0], S[1], S[2], T[0]], [S[1], S[2], S[3], T[1]], [S[2], S[3], S[4], T[2]]], c, r, k, p, tmp, fct;
+  for (c = 0; c < 3; c++) {
+    p = c;
+    for (r = c + 1; r < 3; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    if (Math.abs(M[p][c]) < 1e-12) return 0;
+    tmp = M[c]; M[c] = M[p]; M[p] = tmp;
+    for (r = c + 1; r < 3; r++) {
+      fct = M[r][c] / M[c][c];
+      for (k = c; k < 4; k++) M[r][k] -= fct * M[c][k];
+    }
+  }
+  var co = [0, 0, 0];
+  for (r = 2; r >= 0; r--) {
+    var s = M[r][3];
+    for (k = r + 1; k < 3; k++) s -= M[r][k] * co[k];
+    co[r] = s / M[r][r];
+  }
+  var sse = 0, sst = 0, fit;
+  for (i = 0; i < n; i++) {
+    u = (xs[i] - xm) / span;
+    fit = co[0] + co[1] * u + co[2] * u * u;
+    sse += (res[i] - fit) * (res[i] - fit);
+    sst += (res[i] - rm) * (res[i] - rm);
+  }
+  if (!(sst > 0)) return 0;
+  return Math.max(0, Math.min(1, 1 - sse / sst));
+}
+
+// Everything the page needs for one dataset.
+function diagnose(xs, ys) {
+  var out = { ok: false, reason: '' }, n = xs.length, i;
+  if (n < 3) { out.reason = 'few'; return out; }
+  var ex = expFit(xs, ys);
+  if (!ex) { out.reason = 'nofit'; return out; }
+  var lf = olsFit(xs, ys);
+  if (!lf) { out.reason = 'nofit'; return out; }
+  var linRes = [], logRes = [];
+  for (i = 0; i < n; i++) {
+    linRes.push(ys[i] - linPredict(lf, xs[i]));
+    logRes.push(ex.lys[i] - (ex.lnA + ex.lnB * xs[i]));
+  }
+  var linPat = quadR2(xs, linRes), logPat = quadR2(xs, logRes), verdict;
+  if (n < 4) verdict = 'few4';
+  else if (linPat >= 0.5 && logPat < 0.5) verdict = 'exp-better';
+  else if (linPat >= 0.5 && logPat >= 0.5) verdict = 'both-curve';
+  else if (linPat < 0.5 && logPat >= 0.5) verdict = 'lin-better';
+  else verdict = 'both-clear';
+  var mn = Infinity, mx = -Infinity, ymax = -Infinity;
+  for (i = 0; i < n; i++) { mn = Math.min(mn, xs[i]); mx = Math.max(mx, xs[i]); ymax = Math.max(ymax, ys[i]); }
+  out.ok = true; out.n = n; out.exp = ex; out.lin = lf; out.linRes = linRes; out.logRes = logRes;
+  out.linPat = linPat; out.logPat = logPat; out.verdict = verdict; out.xmin = mn; out.xmax = mx; out.ymax = ymax;
+  return out;
+}
+
+// How far a prediction x is from the data range.
+function rangeStatus(xmin, xmax, x) {
+  var span = xmax - xmin, d = 0, side = 'in';
+  if (x > xmax) { d = x - xmax; side = 'above'; } else if (x < xmin) { d = xmin - x; side = 'below'; }
+  var level = d === 0 ? 'in' : (d > 0.5 * span ? 'far' : 'near');
+  return { steps: d, side: side, level: level, span: span };
+}
+/*CORE-END*/
+
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+
+  var SC = {
+    bact: { label: 'Bacteria in a dish', xName: 'Time', xUnit: 'hours', step: 'hour', yName: 'Bacteria count', yUnit: 'cells', yShort: 'count', pre: '', suf: ' cells', px: 12,
+            desc: 'Simulated counts of bacteria in a dish, hours 0 to 9 (n = 10). The count roughly doubles each hour, with noise.' },
+    sav:  { label: 'Savings account', xName: 'Time', xUnit: 'years', step: 'year', yName: 'Balance', yUnit: 'dollars', yShort: 'balance', pre: '$', suf: '', px: 20,
+            desc: 'Simulated year-end savings balances, years 0 to 12 (n = 13), growing by a steady yearly percent, with small ups and downs.' },
+    gad:  { label: 'Gadget value', xName: 'Age', xUnit: 'years', step: 'year', yName: 'Resale value', yUnit: 'dollars', yShort: 'value', pre: '$', suf: '', px: 14,
+            desc: 'Simulated resale values of a gadget at ages 0 to 10 years (n = 11). It loses a steady percent each year, with noise.' },
+    lin:  { label: 'Steady growth', xName: 'Time', xUnit: 'weeks', step: 'week', yName: 'Subscribers', yUnit: 'people', yShort: 'subscribers', pre: '', suf: ' people', px: 16,
+            desc: 'Simulated newsletter subscribers, weeks 0 to 11 (n = 12). It gains about the same number of people each week (linear, not constant-percent). Does taking logs help?' },
+    own:  { label: 'My own points', xName: 'x', xUnit: 'x-steps', step: 'x-step', yName: 'y', yUnit: '', yShort: 'y', pre: '', suf: '', px: 10,
+            desc: 'Click or tap the plot to add a point, drag a point to move it, or type x and y below. Up to 20 points; y must be greater than 0. Your points, not real data.' }
+  };
+  var OWN_START = { x: DATA.own.x.slice(), y: DATA.own.y.slice() };
+  var predBy = { bact: 12, sav: 20, gad: 14, lin: 16, own: 10 };
+
+  var S = { sc: 'bact', view: 'ord', t: 0, showLin: false, emph: 'lin', showPred: false, xs: [], ys: [], dg: null, D: null, px: 12 };
+  var W = 700, H = 230, ML = 60, MR = 48, MT = 14, MB = 40;
+  var plot = $('plot');
+  function sizePlot() {
+    var w = plot.parentNode.clientWidth;
+    if (w && w < 520) { W = 380; H = 300; } else { W = 700; H = 230; }
+    plot.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  }
+
+  // ---------- number formatting ----------
+  function fmt3(x) {
+    if (!isFinite(x)) return 'too large to display';
+    if (x === 0) return '0';
+    var ax = Math.abs(x);
+    if (ax >= 1e15 || ax < 1e-6) return x.toExponential(2).replace('e+', ' × 10^').replace('e-', ' × 10^−');
+    if (ax >= 1000) return Math.round(Number(x.toPrecision(3))).toLocaleString('en-US');
+    return x.toPrecision(3).replace('-', '−');
+  }
+  function sgn3(v) { return (v >= 0 ? '+' : '−') + fmt3(Math.abs(v)); }
+  function f4(v) { return isFinite(v) ? (Math.abs(v) < 5e-5 ? '0' : v.toFixed(4)).replace('-', '−') : '—'; }
+  function f3(v) { return isFinite(v) ? v.toFixed(3).replace('-', '−') : '—'; }
+  function pc(v) { return Math.round(v * 100) + '%'; }
+  function yFmt(v) {
+    var c = SC[S.sc], s = fmt3(v);
+    if (!isFinite(v)) return s;
+    if (v < 0) return '−' + c.pre + fmt3(-v) + c.suf;
+    return c.pre + s + c.suf;
+  }
+  function tickFmt(v) {
+    var a = Math.abs(v);
+    if (a >= 1e6) return v.toExponential(0).replace('e+', 'e');
+    if (a >= 1000) return Math.round(v).toLocaleString('en-US');
+    var s = String(Math.round(v * 1000) / 1000);
+    return s.replace('-', '−');
+  }
+  function niceStep(raw) {
+    if (!(raw > 0)) return 1;
+    var p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+  }
+  function clampPx(v) { return Math.max(-1e5, Math.min(1e5, v)); }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+
+  // ---------- data access ----------
+  function loadScenario(key) {
+    S.sc = key;
+    if (key === 'own') { S.xs = S.ownX; S.ys = S.ownY; }
+    else { S.xs = DATA[key].x.slice(); S.ys = DATA[key].y.slice(); }
+    S.px = predBy[key];
+    $('px').value = S.px;
+  }
+  S.ownX = OWN_START.x.slice(); S.ownY = OWN_START.y.slice();
+
+  // ---------- domains ----------
+  function computeDomains() {
+    var xs = S.xs, ys = S.ys, n = xs.length, i, own = S.sc === 'own', c = SC[S.sc];
+    var dg = S.dg, ex = dg && dg.ok ? dg.exp : null;
+    var xmin = Infinity, xmax = -Infinity, ymax = 0, lmin = Infinity, lmax = -Infinity;
+    for (i = 0; i < n; i++) {
+      xmin = Math.min(xmin, xs[i]); xmax = Math.max(xmax, xs[i]); ymax = Math.max(ymax, ys[i]);
+      lmin = Math.min(lmin, Math.log(ys[i])); lmax = Math.max(lmax, Math.log(ys[i]));
+    }
+    if (!n) { xmin = 0; xmax = 10; ymax = 100; lmin = 0; lmax = Math.log(100); }
+    var x0, x1;
+    if (own) { x0 = Math.min(0, xmin - 0.4); x1 = Math.max(12, xmax + 0.4); }
+    else { var pd = Math.max(0.04 * (xmax - xmin), 0.2); x0 = xmin - pd; x1 = xmax + pd; }
+    var px = S.px;
+    if (S.showPred && isFinite(px) && Math.abs(px) <= 1000) {
+      var pd2 = Math.max(0.04 * Math.abs(Math.max(x1, px) - Math.min(x0, px)), 0.2);
+      x0 = Math.min(x0, px - pd2); x1 = Math.max(x1, px + pd2);
+      if (ex) { var pv = Math.min(expPredict(ex, px), 1e300); ymax = Math.max(ymax, pv); lmax = Math.max(lmax, Math.log(pv)); lmin = Math.min(lmin, Math.log(Math.max(pv, 1e-300))); }
+    }
+    var yTop = ymax * 1.08;
+    if (own) yTop = Math.max(100, yTop);
+    var ys1 = niceStep(yTop / 5), ymaxN = Math.ceil(yTop / ys1) * ys1;
+    var lo = lmin, hi = lmax;
+    if (own) { lo = Math.min(0, lo); hi = Math.max(hi, Math.log(ymaxN)); }
+    var padL = Math.max(0.08 * (hi - lo), 0.3);
+    lo -= padL; hi += padL;
+    var ls = niceStep((hi - lo) / 5);
+    lo = Math.floor(lo / ls) * ls; hi = Math.ceil(hi / ls) * ls;
+    if (hi - lo < ls) hi = lo + ls;
+    var xs1 = niceStep((x1 - x0) / 8);
+    S.D = { x0: x0, x1: x1, xStep: xs1, yMax: ymaxN, yStep: ys1, l0: lo, l1: hi, lStep: ls };
+  }
+  function pX(x) { return ML + (x - S.D.x0) / (S.D.x1 - S.D.x0) * (W - ML - MR); }
+  function pYo(y) { return H - MB - y / S.D.yMax * (H - MB - MT); }
+  function pYl(l) { return H - MB - (l - S.D.l0) / (S.D.l1 - S.D.l0) * (H - MB - MT); }
+  function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  // ---------- main plot drawing ----------
+  function draw() {
+    var D = S.D, c = SC[S.sc], t = ease(S.t), i, s = '', own = S.sc === 'own';
+    var ex = S.dg && S.dg.ok ? S.dg.exp : null, lf = S.dg && S.dg.ok ? S.dg.lin : null;
+    var top = MT, bot = H - MB, left = ML, right = W - MR;
+    s += '<defs><clipPath id="clp"><rect x="' + left + '" y="' + (top - 2) + '" width="' + (right - left) + '" height="' + (bot - top + 4) + '"/></clipPath></defs>';
+    s += '<rect x="' + left + '" y="' + top + '" width="' + (right - left) + '" height="' + (bot - top) + '" fill="#FBFCFE" stroke="#D0D9E8"/>';
+    // grid + ticks, ordinary (fades out) and log (fades in)
+    var v, py, k;
+    if (t < 1) {
+      s += '<g opacity="' + (1 - t).toFixed(3) + '">';
+      for (k = 0; k * D.yStep <= D.yMax + 1e-9; k++) {
+        v = k * D.yStep; py = pYo(v);
+        s += '<line x1="' + left + '" x2="' + right + '" y1="' + py + '" y2="' + py + '" stroke="#E4EAF4"/>';
+        s += '<text x="' + (left - 6) + '" y="' + (py + 4) + '" text-anchor="end" font-size="11" fill="#1a2340">' + tickFmt(v) + '</text>';
+      }
+      s += '</g>';
+    }
+    if (t > 0) {
+      s += '<g opacity="' + t.toFixed(3) + '">';
+      for (k = 0; D.l0 + k * D.lStep <= D.l1 + 1e-9; k++) {
+        v = D.l0 + k * D.lStep; py = pYl(v);
+        s += '<line x1="' + left + '" x2="' + right + '" y1="' + py + '" y2="' + py + '" stroke="#E4EAF4"/>';
+        s += '<text x="' + (left - 6) + '" y="' + (py + 4) + '" text-anchor="end" font-size="11" fill="#1a2340">' + tickFmt(Math.round(v * 1e6) / 1e6) + '</text>';
+        s += '<text x="' + (right + 5) + '" y="' + (py + 4) + '" text-anchor="start" font-size="10" fill="#6b7a99">' + tickFmt(Number(Math.exp(v).toPrecision(2))) + '</text>';
+      }
+      s += '<text transform="translate(' + (W - 5) + ',' + ((top + bot) / 2) + ') rotate(90)" text-anchor="middle" font-size="10" fill="#6b7a99">grey: y, original units</text>';
+      s += '</g>';
+    }
+    // x ticks
+    var xk = Math.ceil(D.x0 / D.xStep - 1e-9);
+    for (k = xk; k * D.xStep <= D.x1 + 1e-9; k++) {
+      v = k * D.xStep; var px = pX(v);
+      s += '<line x1="' + px + '" x2="' + px + '" y1="' + bot + '" y2="' + (bot + 5) + '" stroke="#0E1C42"/>';
+      s += '<text x="' + px + '" y="' + (bot + 18) + '" text-anchor="middle" font-size="11" fill="#1a2340">' + tickFmt(Math.round(v * 1e6) / 1e6) + '</text>';
+    }
+    s += '<line x1="' + left + '" x2="' + right + '" y1="' + bot + '" y2="' + bot + '" stroke="#0E1C42" stroke-width="1.5"/>';
+    s += '<line x1="' + left + '" x2="' + left + '" y1="' + top + '" y2="' + bot + '" stroke="#0E1C42" stroke-width="1.5"/>';
+    // axis labels (crossfade)
+    var xl = own ? 'x' : c.xName + ' (' + c.xUnit + ')';
+    s += '<text x="' + ((left + right) / 2) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="12" font-weight="700" fill="#0E1C42">' + esc(xl) + '</text>';
+    var yo = own ? 'y' : c.yName + (c.yUnit ? ' (' + c.yUnit + ')' : '');
+    var yl = own ? 'ln y' : 'ln(' + c.yShort + ')';
+    s += '<text transform="translate(13,' + ((top + bot) / 2) + ') rotate(-90)" text-anchor="middle" font-size="12" font-weight="700" fill="#0E1C42" opacity="' + (1 - t).toFixed(3) + '">' + esc(yo) + '</text>';
+    s += '<text transform="translate(13,' + ((top + bot) / 2) + ') rotate(-90)" text-anchor="middle" font-size="12" font-weight="700" fill="#0E1C42" opacity="' + t.toFixed(3) + '">' + esc(yl) + '</text>';
+
+    s += '<g clip-path="url(#clp)">';
+    // straight-line fit of y on x (ordinary view only, fades out)
+    if (lf && S.showLin && t < 1) {
+      s += '<line x1="' + pX(D.x0) + '" y1="' + clampPx(pYo(linPredict(lf, D.x0))) + '" x2="' + pX(D.x1) + '" y2="' + clampPx(pYo(linPredict(lf, D.x1))) + '" stroke="#C0392B" stroke-width="2.4" stroke-dasharray="7 5" opacity="' + (1 - t).toFixed(3) + '"/>';
+    }
+    // exponential fit morphing between curve and line
+    if (ex) {
+      var pts = [], N = 90, xx, lv, po, pl;
+      for (i = 0; i <= N; i++) {
+        xx = D.x0 + (D.x1 - D.x0) * i / N;
+        lv = ex.lnA + ex.lnB * xx;
+        po = clampPx(pYo(Math.min(Math.exp(lv), 1e300)));
+        pl = clampPx(pYl(lv));
+        pts.push((i ? 'L' : 'M') + pX(xx).toFixed(1) + ' ' + (po + (pl - po) * t).toFixed(1));
+      }
+      s += '<path d="' + pts.join(' ') + '" fill="none" stroke="#0E1C42" stroke-width="3"/>';
+    }
+    // prediction marker
+    if (ex && S.showPred && isFinite(S.px)) {
+      var lvp = ex.lnA + ex.lnB * S.px, pvp = Math.min(Math.exp(lvp), 1e300);
+      var mx = pX(S.px), my = clampPx(pYo(pvp)) * (1 - t) + clampPx(pYl(lvp)) * t;
+      s += '<path d="M' + mx + ' ' + (my - 9) + 'L' + (mx + 7) + ' ' + my + 'L' + mx + ' ' + (my + 9) + 'L' + (mx - 7) + ' ' + my + 'Z" fill="#C7922C" stroke="#6b4a0c" stroke-width="1.6"/>';
+    }
+    // points
+    for (i = 0; i < S.xs.length; i++) {
+      var po2 = pYo(S.ys[i]), pl2 = pYl(Math.log(S.ys[i]));
+      s += '<circle data-i="' + i + '" cx="' + pX(S.xs[i]).toFixed(1) + '" cy="' + clampPx(po2 + (pl2 - po2) * t).toFixed(1) + '" r="5.5" fill="#55C8E8" stroke="#0E1C42" stroke-width="2"' + (own ? ' style="cursor:grab"' : '') + '/>';
+    }
+    s += '</g>';
+    // equation caption (crossfade)
+    if (ex) {
+      var cap1 = 'ŷ = ' + fmt3(ex.a) + ' · ' + fmt3(ex.b), cap2 = 'ln ŷ = ' + f3(ex.lnA) + (ex.lnB >= 0 ? ' + ' : ' − ') + f3(Math.abs(ex.lnB)) + ' x';
+      s += '<g font-size="13" font-weight="700" fill="#0E1C42"><rect x="' + (left + 8) + '" y="' + (top + 6) + '" width="196" height="22" rx="5" fill="#fff" fill-opacity="0.9" stroke="#D0D9E8"/>';
+      s += '<text x="' + (left + 14) + '" y="' + (top + 22) + '" opacity="' + (1 - t).toFixed(3) + '">' + esc(cap1) + '<tspan dy="-5" font-size="10">x</tspan></text>';
+      s += '<text x="' + (left + 14) + '" y="' + (top + 22) + '" opacity="' + t.toFixed(3) + '">' + esc(cap2) + '</text></g>';
+    } else {
+      s += '<text x="' + ((left + right) / 2) + '" y="' + (top + 24) + '" text-anchor="middle" font-size="13" font-weight="700" fill="#6b7a99">Need 3 or more points (with at least 2 different x values) for a fit.</text>';
+    }
+    plot.innerHTML = s;
+  }
+
+  var animId = null, animFrom = 0, animTo = 0, animT0 = 0;
+  function setView(v, instant) {
+    S.view = v;
+    $('v-ord').setAttribute('aria-pressed', v === 'ord' ? 'true' : 'false');
+    $('v-log').setAttribute('aria-pressed', v === 'log' ? 'true' : 'false');
+    var target = v === 'log' ? 1 : 0;
+    $('plotNote').innerHTML = noteText();
+    $('linChkWrap').style.opacity = v === 'log' ? 0.55 : 1;
+    if (animId) { cancelAnimationFrame(animId); animId = null; }
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (instant || reduce || S.t === target) { S.t = target; draw(); return; }
+    animFrom = S.t; animTo = target; animT0 = performance.now();
+    (function step(now) {
+      var p = Math.min(1, ((now || performance.now()) - animT0) / 300);
+      S.t = animFrom + (animTo - animFrom) * p;
+      draw();
+      if (p < 1) animId = requestAnimationFrame(step); else animId = null;
+    })(animT0);
+  }
+  function noteText() {
+    return 'Real growth often slows because of limits, so an exponential model fits a stretch of growth, not growth forever.';
+  }
+
+  // ---------- residual plots ----------
+  function drawRes(svg, xs, res, label, xmin, xmax) {
+    var w = 340, h = 130, l = 40, r = 8, tp = 6, b = 22, i, s = '';
+    var m = 0; for (i = 0; i < res.length; i++) m = Math.max(m, Math.abs(res[i]));
+    if (!(m > 0)) m = 1;
+    m *= 1.2;
+    var span = xmax - xmin || 1;
+    function X(x) { return l + (x - xmin) / span * (w - l - r) * 0.94 + (w - l - r) * 0.03; }
+    function Y(v) { return tp + (1 - (v + m) / (2 * m)) * (h - tp - b); }
+    s += '<rect x="' + l + '" y="' + tp + '" width="' + (w - l - r) + '" height="' + (h - tp - b) + '" fill="#FBFCFE" stroke="#D0D9E8"/>';
+    s += '<line x1="' + l + '" x2="' + (w - r) + '" y1="' + Y(0) + '" y2="' + Y(0) + '" stroke="#0E1C42" stroke-width="1.5"/>';
+    s += '<text x="' + (l - 4) + '" y="' + (Y(0) + 4) + '" text-anchor="end" font-size="10" fill="#1a2340">0</text>';
+    s += '<text x="' + (l - 4) + '" y="' + (tp + 9) + '" text-anchor="end" font-size="10" fill="#1a2340">+' + tickFmt(Number(m.toPrecision(2))) + '</text>';
+    s += '<text x="' + (l - 4) + '" y="' + (h - b) + '" text-anchor="end" font-size="10" fill="#1a2340">−' + tickFmt(Number(m.toPrecision(2))) + '</text>';
+    s += '<text x="' + ((l + w - r) / 2) + '" y="' + (h - 6) + '" text-anchor="middle" font-size="10" fill="#6b7a99">' + esc(label) + '</text>';
+    var pts = [];
+    for (i = 0; i < res.length; i++) pts.push([X(xs[i]), Y(res[i]), res[i] >= 0]);
+    for (i = 0; i < pts.length; i++) {
+      s += '<line x1="' + pts[i][0] + '" x2="' + pts[i][0] + '" y1="' + Y(0) + '" y2="' + pts[i][1] + '" stroke="#9fb0cf" stroke-width="1"/>';
+    }
+    for (i = 0; i < pts.length; i++) {
+      s += '<circle cx="' + pts[i][0].toFixed(1) + '" cy="' + pts[i][1].toFixed(1) + '" r="4.5" fill="' + (pts[i][2] ? '#0E1C42' : '#fff') + '" stroke="#0E1C42" stroke-width="2"/>';
+    }
+    svg.innerHTML = s;
+  }
+  function resEmpty(svg, msg) {
+    svg.innerHTML = '<rect x="2" y="2" width="336" height="126" fill="#FBFCFE" stroke="#D0D9E8"/><text x="170" y="68" text-anchor="middle" font-size="12" fill="#6b7a99">' + esc(msg) + '</text>';
+  }
+
+  // ---------- text panels ----------
+  function stepWord() { var c = SC[S.sc]; return c.step; }
+  function updatePanels() {
+    var dg = S.dg, c = SC[S.sc], own = S.sc === 'own', xl = own ? 'x' : c.xName.toLowerCase();
+    // model readout
+    var m = $('model');
+    if (!dg.ok) {
+      var why = dg.reason === 'few' ? 'Add at least 3 points to fit a model. You have ' + S.xs.length + '.' : 'These points cannot be fitted yet: use at least 3 points, with at least 2 different x values and every y greater than 0.';
+      m.innerHTML = '<div class="lab">Fitted model</div><div class="small">' + why + '</div>';
+    } else {
+      var ex = dg.exp, lf = dg.lin, st = c.step, pu = c.xUnit || 'x-steps';
+      var ptxt;
+      if (ex.kind === 'flat') ptxt = '0% per ' + st + ' (no change)';
+      else ptxt = sgn3(ex.pct) + '% per ' + st + ' (' + ex.kind + ')';
+      var ttxt;
+      if (ex.kind === 'growth') ttxt = '<dt>Doubling</dt><dd>ln 2 ÷ ln b ≈ <b>' + fmt3(ex.time) + ' ' + pu + '</b></dd>';
+      else if (ex.kind === 'decay') ttxt = '<dt>Halving</dt><dd>ln 2 ÷ |ln b| ≈ <b>' + fmt3(ex.time) + ' ' + pu + '</b></dd>';
+      else ttxt = '<dt>Doubling</dt><dd>none (b = 1, no change)</dd>';
+      var linEq = 'ŷ = ' + f3(lf.intercept) + (lf.slope >= 0 ? ' + ' : ' − ') + f3(Math.abs(lf.slope)) + ' x';
+      var cmp = 'ŷ = ' + fmt3(lf.intercept) + (lf.slope >= 0 ? ' + ' : ' − ') + fmt3(Math.abs(lf.slope)) + ' x';
+      m.innerHTML = '<div class="lab">Fitted model</div>' +
+        '<div class="big">ŷ = ' + fmt3(ex.a) + ' · ' + fmt3(ex.b) + '<sup>x</sup></div>' +
+        '<dl class="kv">' +
+        '<dt>Start a</dt><dd>' + fmt3(ex.a) + ' (model value at x = 0)</dd>' +
+        '<dt>Factor b</dt><dd>' + fmt3(ex.b) + ' (' + (ex.kind === 'decay' ? 'decay' : 'growth') + ' factor per ' + st + ')</dd>' +
+        '<dt>Percent</dt><dd><b>' + ptxt + '</b> = (b − 1) × 100</dd>' +
+        ttxt +
+        '<dt>Log line</dt><dd>ln ŷ = ' + f4(ex.lnA) + (ex.lnB >= 0 ? ' + ' : ' − ') + f4(Math.abs(ex.lnB)) + ' x (n = ' + dg.n + ')</dd>' +
+        '<dt>r (log)</dt><dd><b>' + f4(ex.r) + '</b>, r² = <b>' + f4(ex.r2) + '</b></dd>' +
+        '<dt>Compare</dt><dd>line of y on x: ' + cmp + ', r² = ' + f4(lf.r2) + '</dd>' +
+        '</dl>';
+    }
+    // residuals
+    var rp = { lin: $('rpLin'), log: $('rpLog') };
+    $('rtLin').textContent = 'Straight-line fit of y on x' + (S.emph === 'lin' ? ' (emphasised)' : '');
+    $('rtLog').textContent = 'Line fit of ln y on x (log scale)' + (S.emph === 'log' ? ' (emphasised)' : '');
+    $('rbLin').classList.toggle('emph', S.emph === 'lin');
+    $('rbLog').classList.toggle('emph', S.emph === 'log');
+    if (dg.ok) {
+      drawRes($('resLin'), S.xs, dg.linRes, 'x   (vertical: y − ŷ)', dg.xmin, dg.xmax);
+      drawRes($('resLog'), S.xs, dg.logRes, 'x   (vertical: ln y − ln ŷ)', dg.xmin, dg.xmax);
+      if (dg.n >= 4) {
+        rp.lin.textContent = 'A curve shape explains ' + pc(dg.linPat) + ' of the ups and downs.';
+        rp.log.textContent = 'A curve shape explains ' + pc(dg.logPat) + ' of the ups and downs.';
+      } else { rp.lin.textContent = 'Need 4 or more points to judge a shape.'; rp.log.textContent = rp.lin.textContent; }
+      var hint, V = dg.verdict;
+      if (V === 'exp-better') hint = '<b>What the plots show:</b> the straight-line residuals bend into a clear curve (a curve shape explains ' + pc(dg.linPat) + ' of their ups and downs), so a line is the wrong shape for these data. The log-scale residuals show no clear shape (' + pc(dg.logPat) + '), which is what we hope to see when an exponential model suits the data.';
+      else if (V === 'both-curve') hint = '<b>What the plots show:</b> both residual plots bend into a curve (' + pc(dg.linPat) + ' and ' + pc(dg.logPat) + ' of their ups and downs). Neither model matches the shape of these data well, so be cautious about both.';
+      else if (V === 'lin-better') hint = '<b>What the plots show:</b> here the log-scale residuals bend into a curve (' + pc(dg.logPat) + ') while the straight-line residuals show no clear shape (' + pc(dg.linPat) + '). Taking logs did not straighten these data. They look more like steady, constant-amount growth than constant-percent growth, so an exponential model is the wrong choice here.';
+      else if (V === 'both-clear') hint = '<b>What the plots show:</b> neither residual plot has a clear curved shape (' + pc(dg.linPat) + ' and ' + pc(dg.logPat) + '). Over this stretch the data cannot tell the two models apart by residuals alone. Check how differently they predict far outside the data.';
+      else hint = '<b>What the plots show:</b> with only 3 points there is too little to judge a shape. Add more points.';
+      $('resHint').innerHTML = hint;
+    } else {
+      resEmpty($('resLin'), 'Needs 3 or more points'); resEmpty($('resLog'), 'Needs 3 or more points');
+      rp.lin.textContent = ''; rp.log.textContent = '';
+      $('resHint').innerHTML = 'Residual plots appear once there are at least 3 points to fit.';
+    }
+    updatePred();
+    updateExcel();
+    $('lgLin').style.opacity = S.showLin ? 1 : 0.4;
+    $('lgPred').style.opacity = S.showPred ? 1 : 0.4;
+  }
+
+  function updatePred() {
+    var dg = S.dg, c = SC[S.sc], o = $('predOut'), x = S.px;
+    if (!dg.ok) { o.innerHTML = '<div class="small note">Add at least 3 usable points to make a prediction.</div>'; return; }
+    if (!isFinite(x) || $('px').value === '') { o.innerHTML = '<div class="small note">Enter a number for x.</div>'; return; }
+    if (Math.abs(x) > 1000) { o.innerHTML = '<div class="small note">Please enter an x between −1000 and 1000.</div>'; return; }
+    var ex = dg.exp, lf = dg.lin, ye = expPredict(ex, x), yl = linPredict(lf, x);
+    var rs = rangeStatus(dg.xmin, dg.xmax, x), st = c.step, pu = c.xUnit || 'x-steps';
+    var html = '<div class="small">At x = <b>' + fmt3(x) + '</b>:</div>' +
+      '<dl class="kv"><dt>Exponential model</dt><dd><b>ŷ = ' + (isFinite(ye) ? yFmt(ye) : 'too large to display') + '</b></dd>' +
+      '<dt>Straight line of y on x</dt><dd>ŷ = ' + yFmt(yl) + ' (comparison)</dd></dl>';
+    var badge, cls, steps = fmt3(rs.steps);
+    if (rs.level === 'in') { cls = 'in'; badge = '✔ In the data range (x from ' + fmt3(dg.xmin) + ' to ' + fmt3(dg.xmax) + '). This is interpolation, between observed values.'; }
+    else {
+      var where = rs.side === 'above' ? 'past the last data point (x = ' + fmt3(dg.xmax) + ')' : 'before the first data point (x = ' + fmt3(dg.xmin) + ')';
+      var spanTxt = 'The data cover ' + fmt3(rs.span) + ' ' + pu + '.';
+      if (rs.level === 'near') {
+        cls = 'near';
+        badge = '⚠ Extrapolation: ' + steps + ' ' + pu + ' ' + where + '. ' + spanTxt + ' Treat this as a rough guess, not a measurement.';
+      } else {
+        cls = 'far';
+        var extra;
+        if (ex.kind === 'growth' && rs.side === 'above') {
+          var ratio = ye / dg.ymax;
+          extra = 'The model predicts huge values' + (isFinite(ratio) && ratio > 1.5 ? ' (about ' + fmt3(ratio) + ' times the largest value observed)' : '') + ', and real processes usually hit limits long before that.';
+        } else if (ex.kind === 'decay' && rs.side === 'above') {
+          extra = 'The model keeps shrinking toward 0 but never reaches it. Real things have floors and breakdowns the model knows nothing about.';
+        } else if (rs.side === 'below') {
+          extra = 'Going backward far from the data is just as risky: the model has no information about what came before.';
+        } else extra = 'The model has no information out here, and real processes usually change their pattern.';
+        badge = '⛔ Strong caution, far outside the data: ' + steps + ' ' + pu + ' ' + where + '. ' + spanTxt + ' ' + extra;
+      }
+      if (yl <= 0 && dg.ymax > 0) badge += ' The straight line even gives a value at or below zero here, which cannot be right for these data.';
+    }
+    html += '<div class="badge ' + cls + '">' + badge + '</div>';
+    o.innerHTML = html;
+  }
+
+  function updateExcel() {
+    var dg = S.dg, el = $('excel');
+    var n = S.xs.length, last = n + 1;
+    if (!dg.ok) { el.textContent = 'Fit the model first (3 or more points), then these lines will show the numbers.'; return; }
+    var ex = dg.exp;
+    var X = 'A2:A' + last, Y = 'B2:B' + last, L = 'C2:C' + last;
+    el.textContent =
+      'Put x in column A and y in column B (rows 2 to ' + last + ').\n' +
+      'C2:   =LN(B2)        (copy down to C' + last + ')\n' +
+      'E1:   =INTERCEPT(' + L + ', ' + X + ')   gives ln a = ' + f4(ex.lnA) + '\n' +
+      'E2:   =SLOPE(' + L + ', ' + X + ')       gives ln b = ' + f4(ex.lnB) + '\n' +
+      'E3:   =EXP(E1)       gives a = ' + fmt3(ex.a) + '\n' +
+      'E4:   =EXP(E2)       gives b = ' + fmt3(ex.b) + '\n' +
+      'E5:   =RSQ(' + L + ', ' + X + ')         gives r² (log scale) = ' + f4(ex.r2) + '\n' +
+      'E6:   =LN(2)/LN(E4)   gives the ' + (ex.kind === 'decay' ? 'halving time with a minus sign (use ABS)' : 'doubling time') + (isFinite(ex.time) ? ' = ' + fmt3(ex.time) : '');
+  }
+
+  // ---------- update pipeline ----------
+  function update() {
+    S.dg = diagnose(S.xs, S.ys);
+    computeDomains();
+    updatePanels();
+    draw();
+  }
+
+  // ---------- own points ----------
+  function ownMsg(t, ok) { var m = $('ownMsg'); m.textContent = t; m.className = 'msg' + (ok ? ' ok' : ''); }
+  function addPoint(x, y) {
+    if (!isFinite(x) || !isFinite(y)) { ownMsg('Enter numbers for both x and y.'); return false; }
+    if (!(y > 0)) { ownMsg('y must be greater than 0. The log of 0 or of a negative number does not exist, so that point was not added.'); return false; }
+    if (S.xs.length >= 20) { ownMsg('You already have 20 points, the maximum. Remove one first.'); return false; }
+    if (Math.abs(x) > 1000 || y > 1e9) { ownMsg('Please keep x between −1000 and 1000 and y below 1,000,000,000.'); return false; }
+    S.ownX.push(x); S.ownY.push(y); S.xs = S.ownX; S.ys = S.ownY;
+    ownMsg('Added (' + fmt3(x) + ', ' + fmt3(y) + '). ' + S.xs.length + ' of 20 points.', true);
+    update(); return true;
+  }
+  function inOwn() { return S.sc === 'own'; }
+  $('oAdd').onclick = function () {
+    var xv = $('ox').value, yv = $('oy').value;
+    if (xv === '' || yv === '') { ownMsg('Type both x and y, or click the plot.'); return; }
+    if (addPoint(parseFloat(xv), parseFloat(yv))) { $('ox').value = ''; $('oy').value = ''; $('ox').focus(); }
+  };
+  ['ox', 'oy'].forEach(function (id) { $(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') $('oAdd').click(); }); });
+  $('oUndo').onclick = function () { if (S.ownX.length) { S.ownX.pop(); S.ownY.pop(); ownMsg('Removed the last point. ' + S.ownX.length + ' left.', true); update(); } else ownMsg('There are no points to remove.'); };
+  $('oClear').onclick = function () { S.ownX.length = 0; S.ownY.length = 0; ownMsg('All points cleared. Click the plot to add some.', true); update(); };
+  $('oReset').onclick = function () { S.ownX.length = 0; S.ownY.length = 0; OWN_START.x.forEach(function (v, i) { S.ownX.push(v); S.ownY.push(OWN_START.y[i]); }); ownMsg('Starter points restored (simulated).', true); update(); };
+
+  var drag = -1, warned = false;
+  function svgXY(e) {
+    var r = plot.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+  }
+  function invX(px) { return S.D.x0 + (px - ML) / (W - ML - MR) * (S.D.x1 - S.D.x0); }
+  function invY(py, log) {
+    var f = (H - MB - py) / (H - MB - MT);
+    return log ? Math.exp(S.D.l0 + f * (S.D.l1 - S.D.l0)) : f * S.D.yMax;
+  }
+  plot.addEventListener('pointerdown', function (e) {
+    if (!inOwn()) return;
+    var p = svgXY(e), i, best = -1, bd = 15, log = S.t > 0.5;
+    if (p[0] < ML - 2 || p[0] > W - MR + 2 || p[1] < MT - 2 || p[1] > H - MB + 26) return;
+    var ts = ease(S.t);
+    for (i = 0; i < S.xs.length; i++) {
+      var po = pYo(S.ys[i]), pl = pYl(Math.log(S.ys[i])), py = po + (pl - po) * ts;
+      var d = Math.hypot(pX(S.xs[i]) - p[0], py - p[1]);
+      if (d < bd) { bd = d; best = i; }
+    }
+    e.preventDefault();
+    if (best >= 0) { drag = best; plot.setPointerCapture(e.pointerId); warned = false; return; }
+    if (p[1] > H - MB) {
+      if (!log) ownMsg('y must be greater than 0: the plot starts at y = 0, and a point at or below 0 has no log. Click above the axis.');
+      return;
+    }
+    var x = Number(invX(p[0]).toFixed(1)), y = Number(invY(p[1], log).toPrecision(3));
+    addPoint(x, y);
+  });
+  plot.addEventListener('pointermove', function (e) {
+    if (drag < 0) return;
+    var p = svgXY(e), log = S.t > 0.5, x = invX(p[0]), y = invY(Math.min(p[1], H - MB - 1), log);
+    x = Math.max(S.D.x0 + 0.05, Math.min(S.D.x1 - 0.05, x));
+    if (!(y > 0)) { y = S.D.yMax * 0.002; }
+    S.ownX[drag] = Number(x.toFixed(2)); S.ownY[drag] = Number(Number(y.toPrecision(3)));
+    var D0 = S.D;
+    S.dg = diagnose(S.xs, S.ys); updatePanels();
+    S.D = D0; draw();
+  });
+  function endDrag() { if (drag >= 0) { drag = -1; update(); } }
+  plot.addEventListener('pointerup', endDrag);
+  plot.addEventListener('pointercancel', endDrag);
+
+  // ---------- controls ----------
+  $('scen').onchange = function () {
+    loadScenario(this.value);
+    $('scDesc').textContent = SC[S.sc].desc;
+    $('ownTools').classList.toggle('hide', !inOwn());
+    $('ownMsg').classList.toggle('hide', !inOwn());
+    ownMsg('');
+    $('showPred').checked = S.showPred;
+    update();
+    $('plotNote').innerHTML = noteText();
+  };
+  $('v-ord').onclick = function () { setView('ord'); };
+  $('v-log').onclick = function () { setView('log'); };
+  $('showLin').onchange = function () { S.showLin = this.checked; updatePanels(); draw(); };
+  $('showPred').onchange = function () { S.showPred = this.checked; update(); };
+  $('e-lin').onclick = function () { S.emph = 'lin'; $('e-lin').setAttribute('aria-pressed', 'true'); $('e-log').setAttribute('aria-pressed', 'false'); updatePanels(); };
+  $('e-log').onclick = function () { S.emph = 'log'; $('e-log').setAttribute('aria-pressed', 'true'); $('e-lin').setAttribute('aria-pressed', 'false'); updatePanels(); };
+  $('px').addEventListener('input', function () {
+    var v = parseFloat(this.value);
+    S.px = isFinite(v) ? v : NaN;
+    predBy[S.sc] = S.px;
+    if (S.showPred) update(); else updatePred();
+  });
+
+  // ---------- start ----------
+  sizePlot();
+  window.addEventListener('resize', function () { var ow = W; sizePlot(); if (W !== ow && S.D) { draw(); } });
+  loadScenario('bact');
+  $('scDesc').textContent = SC.bact.desc;
+  $('ownTools').classList.add('hide');
+  $('ownMsg').classList.add('hide');
+  update();
+  setView('ord', true);
+})();
+</script>
+</body>
+</html>

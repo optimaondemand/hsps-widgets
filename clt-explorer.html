@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sampling Distribution Explorer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 12px; font-size: 14px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 3px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+  .panel h2 { font-size: 0.74rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 8px; }
+  .field { flex: 1; min-width: 150px; font-size: 0.78rem; font-weight: 700; color: #0E1C42; }
+  .field select { display: block; width: 100%; margin-top: 3px; padding: 6px; border: 2px solid #D0D9E8; border-radius: 8px; font: inherit; font-size: 0.88rem; color: #1a2340; background: #fff; }
+  .field input[type=range] { display: block; width: 100%; margin-top: 3px; accent-color: #0E1C42; }
+  .field .ro { color: #C7922C; font-weight: 900; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .btn { padding: 8px 12px; border: none; border-radius: 8px; font: inherit; font-size: 0.82rem; font-weight: 700; cursor: pointer; background: #0E1C42; color: #fff; }
+  .btn:hover { background: #1a2f63; }
+  .btn.gold { background: #C7922C; } .btn.gold:hover { background: #a87820; }
+  .btn.ghost { background: #fff; color: #0E1C42; border: 2px solid #0E1C42; padding: 6px 10px; }
+  .btn.ghost:hover { background: #E8F6FB; }
+  .btn.ghost[aria-pressed=true] { background: #0E1C42; color: #fff; }
+  .btn.red { background: #C0392B; } .btn.red:hover { background: #96281c; }
+  .btn:active { transform: scale(0.97); }
+  svg { display: block; width: 100%; height: auto; }
+  .chk { display: inline-flex; gap: 6px; align-items: center; font-size: 0.8rem; font-weight: 700; color: #0E1C42; cursor: pointer; margin-right: 10px; }
+  .chk input { width: 17px; height: 17px; accent-color: #0E1C42; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.75rem; color: #6b7a99; margin-top: 4px; align-items: center; }
+  .legend svg { display: inline-block; width: 18px; height: 14px; vertical-align: -3px; margin-right: 3px; }
+  .big { background: #EEF1F8; border-left: 5px solid #C7922C; border-radius: 8px; padding: 8px 12px; margin-top: 8px; font-size: 0.88rem; line-height: 1.45; }
+  .big b { color: #0E1C42; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+  .stat { background: #EEF1F8; border-radius: 8px; padding: 6px 8px; }
+  .stat .l { font-size: 0.68rem; color: #6b7a99; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat .v { font-size: 1.05rem; font-weight: 900; color: #0E1C42; }
+  .gold { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 10px; padding: 9px 12px; font-size: 0.82rem; line-height: 1.5; }
+  .blue { background: #E8F6FB; border-radius: 10px; padding: 9px 12px; font-size: 0.83rem; line-height: 1.5; }
+  .blue ul { margin: 4px 0 0 18px; }
+  .blue li { margin-bottom: 3px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 4px; }
+  th, td { border-bottom: 1px solid #D0D9E8; padding: 5px 6px; text-align: center; }
+  th { color: #6b7a99; font-size: 0.7rem; text-transform: uppercase; }
+  td:first-child, th:first-child { text-align: left; }
+  td.sub { font-size: 0.74rem; color: #6b7a99; background: #F8FAFD; font-weight: 700; text-align: left; }
+  .muted { color: #6b7a99; font-size: 0.78rem; line-height: 1.45; }
+  .hidden { display: none; }
+  .cmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 8px; margin-top: 8px; }
+  .cmp > div { border: 1px solid #D0D9E8; border-radius: 8px; padding: 6px; background: #F8FAFD; }
+  .cmp .cap { font-size: 0.74rem; color: #1a2340; line-height: 1.4; text-align: center; }
+  @media (max-width: 480px) { .stats { grid-template-columns: repeat(2, 1fr); } body { padding: 8px; } .panel { padding: 10px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Sampling Distribution Explorer</h1>
+  <p class="subtitle">Every population and sample here is made up and simulated by your browser. Nothing is real data.</p>
+
+  <div class="panel">
+    <h2>1. Parent population</h2>
+    <div class="row">
+      <label class="field">Parent population
+        <select id="parent"></select>
+      </label>
+      <label class="field hidden" id="pWrap">Chance of &ldquo;Yes&rdquo; p: <span class="ro" id="pRead">30%</span>
+        <input type="range" id="pSlider" min="5" max="95" step="1" value="30">
+      </label>
+    </div>
+    <div id="parentBox"></div>
+    <div class="stats" id="parentStats" aria-live="polite"></div>
+    <p class="muted" id="parentNote" style="margin-top:6px"></p>
+  </div>
+
+  <div class="panel">
+    <h2>2. Choose a sample size and draw samples</h2>
+    <div class="row">
+      <label class="field" style="min-width:220px">Sample size n: <span class="ro" id="nRead">10</span>
+        <input type="range" id="nSlider" min="1" max="100" step="1" value="10">
+      </label>
+    </div>
+    <div class="btns" role="group" aria-label="Quick sample sizes" id="quickN" style="margin-bottom:8px">
+      <span class="muted">Quick n:</span>
+    </div>
+    <div class="btns">
+      <button class="btn gold" id="b1" type="button">Draw one sample</button>
+      <button class="btn" id="b10" type="button">Draw 10 samples</button>
+      <button class="btn" id="b100" type="button">Draw 100</button>
+      <button class="btn" id="b1000" type="button">Draw 1000</button>
+      <button class="btn red" id="bClear" type="button">Clear</button>
+      <button class="btn ghost" id="bReset" type="button">Reset</button>
+    </div>
+    <p class="muted" style="margin-top:6px">Changing the parent or n clears the samples so you never mix different sample sizes. Samples are drawn with replacement, and each draw is independent.</p>
+  </div>
+
+  <div class="panel">
+    <h2>3. The latest sample</h2>
+    <div id="sampleBox"></div>
+    <div class="legend">
+      <span><svg viewBox="0 0 18 14" aria-hidden="true"><circle cx="9" cy="7" r="4.5" fill="#fff" stroke="#0E1C42" stroke-width="2"/></svg>One value in the sample (hollow circle)</span>
+      <span><svg viewBox="0 0 18 14" aria-hidden="true"><path d="M9 1 L16 7 L9 13 L2 7 Z" fill="#C7922C" stroke="#0E1C42" stroke-width="1.5"/></svg>Mean of this sample (gold diamond)</span>
+    </div>
+    <div class="big" id="oneRead" aria-live="polite"></div>
+  </div>
+
+  <div class="panel">
+    <h2>4. Every sample mean so far</h2>
+    <div class="btns" style="margin-bottom:6px">
+      <label class="chk"><input type="checkbox" id="zoom"> Zoom to the means</label>
+      <label class="chk"><input type="checkbox" id="overlay"> Show the bell curve the theory predicts</label>
+    </div>
+    <div id="meansBox"></div>
+    <div class="legend" id="meansLegend"></div>
+    <p class="muted" id="meansAxisNote" style="margin-top:4px"></p>
+  </div>
+
+  <div class="panel">
+    <h2>5. The numbers: data versus theory</h2>
+    <div id="tableBox" aria-live="polite"></div>
+    <p class="muted" style="margin-top:6px">&ldquo;SD&rdquo; of the sample means uses the sample version (divide by one less than the number of means). Skewness is 0 for a perfectly symmetric shape and positive when the long tail points right. The theory column for skewness is only a rough guide: the parent&rsquo;s skewness divided by the square root of n.</p>
+  </div>
+
+  <div class="panel">
+    <h2>6. What to notice</h2>
+    <div class="blue" id="notice" aria-live="polite"></div>
+    <div class="gold" style="margin-top:8px"><b>Honest note.</b> The Central Limit Theorem is about the distribution of sample <b>means</b> (or sums) built from <b>independent</b> draws. It does <b>not</b> make the parent population bell-shaped, and it does not make any single sample bell-shaped. How large n must be depends on how skewed the parent is: a nearly symmetric parent needs a small n, a very lopsided one needs far more. There is no magic number. n = 30 is only a common rule of thumb, and you can test it yourself above.</div>
+  </div>
+
+  <div class="panel">
+    <h2>7. Compare sample sizes</h2>
+    <div class="btns"><button class="btn gold" id="bCompare" type="button">Compare n</button></div>
+    <p class="muted" style="margin-top:6px">Draws 1000 samples at each of n = 2, 10, 30 and 100 from the current parent and shows the four histograms on one shared axis (the same axis as the parent).</p>
+    <div id="cmpBox" aria-live="polite"></div>
+  </div>
+</div>
+
+<script>
+/*CORE-START*/
+function mulberry32(seed){ var a = seed >>> 0; return function(){ a = (a + 0x6D2B79F5) >>> 0; var t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function normal01(rng){ var u = 1 - rng(), v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+function meanOf(a){ var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; return s / a.length; }
+function sdOf(a, ddof){ var m = meanOf(a), s = 0; for (var i = 0; i < a.length; i++) s += (a[i] - m) * (a[i] - m); return Math.sqrt(s / (a.length - (ddof || 0))); }
+function skewOf(a){ var m = meanOf(a), m2 = 0, m3 = 0, d; for (var i = 0; i < a.length; i++){ d = a[i] - m; m2 += d * d; m3 += d * d * d; } m2 /= a.length; m3 /= a.length; return m2 > 1e-15 ? m3 / Math.pow(m2, 1.5) : 0; }
+
+var PRESETS = {
+  bell:    { label: 'Bell-shaped (symmetric)',           lo: 0, hi: 100, unit: 'value (made-up scores)',        seed: 1101, gen: function(r){ return 50 + 12 * normal01(r); } },
+  skew:    { label: 'Strongly right-skewed (waiting times)', lo: 0, hi: 60, unit: 'waiting time (made-up minutes)', seed: 2202, gen: function(r){ return -10 * Math.log(1 - r()); } },
+  uniform: { label: 'Uniform (flat)',                    lo: 0, hi: 100, unit: 'value (made up)',               seed: 3303, gen: function(r){ return 100 * r(); } },
+  bimodal: { label: 'Two clusters (bimodal)',            lo: 0, hi: 100, unit: 'value (made up)',               seed: 4404, gen: function(r){ return (r() < 0.5 ? 25 : 75) + 7 * normal01(r); } },
+  heavy:   { label: 'Lopsided with a heavy tail',        lo: 0, hi: 100, unit: 'value (made-up costs)',         seed: 5505, gen: function(r){ return Math.exp(Math.log(8) + 0.9 * normal01(r)); } }
+};
+var POP_SIZE = 20000;
+function buildPopulation(key, p){
+  if (key === 'yesno'){
+    var q = p, sg = Math.sqrt(q * (1 - q));
+    return { key: key, kind: 'binary', p: q, lo: -0.05, hi: 1.05, unit: 'sample proportion of Yes', mu: q, sigma: sg, skew: (1 - 2 * q) / sg, vals: null };
+  }
+  var pr = PRESETS[key], rng = mulberry32(pr.seed), v = new Float64Array(POP_SIZE), x;
+  for (var i = 0; i < POP_SIZE; i++){ do { x = pr.gen(rng); } while (!(x >= pr.lo && x <= pr.hi)); v[i] = x; }
+  return { key: key, kind: 'cont', lo: pr.lo, hi: pr.hi, unit: pr.unit, vals: v, mu: meanOf(v), sigma: sdOf(v, 0), skew: skewOf(v) };
+}
+function seTheory(pop, n){ return pop.sigma / Math.sqrt(n); }
+function drawSample(pop, n, rng){
+  var s = new Array(n), i;
+  if (pop.kind === 'binary'){ for (i = 0; i < n; i++) s[i] = rng() < pop.p ? 1 : 0; }
+  else { var L = pop.vals.length; for (i = 0; i < n; i++) s[i] = pop.vals[Math.floor(rng() * L)]; }
+  return s;
+}
+function sampleMeans(pop, n, count, rng){
+  var out = new Array(count);
+  for (var k = 0; k < count; k++){ var s = drawSample(pop, n, rng), t = 0; for (var i = 0; i < n; i++) t += s[i]; out[k] = t / n; }
+  return out;
+}
+function shareWithin(means, mu, se, k){ var c = 0; for (var i = 0; i < means.length; i++) if (Math.abs(means[i] - mu) <= k * se) c++; return c / means.length; }
+function histo(vals, lo, hi, nb){ var c = new Array(nb).fill(0), out = 0, w = (hi - lo) / nb; for (var i = 0; i < vals.length; i++){ var v = vals[i]; if (v < lo || v > hi){ out++; continue; } var b = Math.floor((v - lo) / w); if (b >= nb) b = nb - 1; c[b]++; } return { counts: c, outside: out }; }
+function normPdf(x, m, s){ var z = (x - m) / s; return Math.exp(-0.5 * z * z) / (s * Math.sqrt(2 * Math.PI)); }
+function niceTicks(lo, hi, target){
+  var span = hi - lo, raw = span / (target || 5), mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+  var step = (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * mag, t = [], v = Math.ceil(lo / step - 1e-9) * step;
+  for (; v <= hi + 1e-9; v += step) t.push(Math.round(v / step) * step);
+  return t;
+}
+/*CORE-END*/
+
+(function(){
+  var NS = 'http://www.w3.org/2000/svg';
+  var $ = function(id){ return document.getElementById(id); };
+  var NAVY = '#0E1C42', GOLD = '#C7922C', MUTED = '#6b7a99', BORDER = '#D0D9E8', TEAL = '#1F7A99';
+  var DEFAULTS = { parent: 'skew', p: 30, n: 10 };
+  var state = { pop: null, n: 10, means: [], latest: null, cmp: null };
+  var rng = Math.random;
+
+  function fmt(v, d){ if (!isFinite(v)) return 'n/a'; var s = v.toFixed(d == null ? 2 : d); return s.indexOf('.') >= 0 && d == null ? s.replace(/0+$/, '').replace(/\.$/, '') : s; }
+  function pct(v){ return (100 * v).toFixed(1) + '%'; }
+  function isBin(){ return state.pop.kind === 'binary'; }
+
+  /* ---------- parent select ---------- */
+  var sel = $('parent');
+  Object.keys(PRESETS).forEach(function(k){ var o = document.createElement('option'); o.value = k; o.textContent = PRESETS[k].label; sel.appendChild(o); });
+  (function(){ var o = document.createElement('option'); o.value = 'yesno'; o.textContent = 'Yes/No parent (proportion p)'; sel.appendChild(o); })();
+
+  /* ---------- quick n buttons ---------- */
+  [1, 2, 5, 10, 30, 100].forEach(function(v){
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'btn ghost'; b.textContent = 'n = ' + v; b.setAttribute('data-n', v); b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', function(){ $('nSlider').value = v; changeN(); });
+    $('quickN').appendChild(b);
+  });
+
+  /* ---------- svg helpers ---------- */
+  function el(name, attrs, parent){ var e = document.createElementNS(NS, name); for (var k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  function txt(parent, x, y, s, attrs){ var t = el('text', Object.assign({ x: x, y: y, 'font-size': 12, fill: MUTED, 'font-family': "'Segoe UI', Arial, sans-serif" }, attrs || {}), parent); t.textContent = s; return t; }
+  function newSvg(box, w, h, label){ box.textContent = ''; var s = el('svg', { viewBox: '0 0 ' + w + ' ' + h, role: 'img', 'aria-label': label }); box.appendChild(s); return s; }
+  function axisFmt(v){ return isBin() ? fmt(v, 1) : fmt(v); }
+
+  /* chart frame: returns scale functions */
+  function frame(svg, W, H, lo, hi, m, xlabel, noTicksLabelSize){
+    var x0 = m.l, x1 = W - m.r, y1 = H - m.b;
+    var sx = function(v){ return x0 + (v - lo) / (hi - lo) * (x1 - x0); };
+    el('line', { x1: x0, y1: y1, x2: x1, y2: y1, stroke: '#1a2340', 'stroke-width': 1.5 }, svg);
+    niceTicks(lo, hi, 6).forEach(function(t){
+      if (t < lo - 1e-9 || t > hi + 1e-9) return;
+      el('line', { x1: sx(t), y1: y1, x2: sx(t), y2: y1 + 4, stroke: '#1a2340' }, svg);
+      txt(svg, sx(t), y1 + 17, axisFmt(t), { 'text-anchor': 'middle', 'font-size': noTicksLabelSize || 12 });
+    });
+    if (xlabel) txt(svg, (x0 + x1) / 2, H - 4, xlabel, { 'text-anchor': 'middle', 'font-size': noTicksLabelSize || 12, fill: '#1a2340' });
+    return { sx: sx, x0: x0, x1: x1, y1: y1 };
+  }
+  function yAxis(svg, f, ymax, top, label){
+    var sy = function(v){ return f.y1 - v / ymax * (f.y1 - top); };
+    el('line', { x1: f.x0, y1: top, x2: f.x0, y2: f.y1, stroke: '#1a2340', 'stroke-width': 1 }, svg);
+    niceTicks(0, ymax, 4).forEach(function(t){
+      el('line', { x1: f.x0 - 4, y1: sy(t), x2: f.x0, y2: sy(t), stroke: '#1a2340' }, svg);
+      if (t > 0) el('line', { x1: f.x0, y1: sy(t), x2: f.x1, y2: sy(t), stroke: '#E6EBF4' }, svg);
+      txt(svg, f.x0 - 6, sy(t) + 4, String(t), { 'text-anchor': 'end', 'font-size': 11 });
+    });
+    return sy;
+  }
+  function muLine(svg, f, sy, top, mu){
+    el('line', { x1: f.sx(mu), y1: top, x2: f.sx(mu), y2: f.y1, stroke: TEAL, 'stroke-width': 2, 'stroke-dasharray': '6 4' }, svg);
+  }
+
+  /* ---------- parent chart ---------- */
+  function drawParent(){
+    var pop = state.pop, W = 560, H = 190, m = { l: 40, r: 12, t: 14, b: 40 };
+    var svg = newSvg($('parentBox'), W, H, 'Histogram of the parent population: ' + parentLabel() + '. Mean ' + fmt(pop.mu, 3) + ', standard deviation ' + fmt(pop.sigma, 3) + '.');
+    var f = frame(svg, W, H, pop.lo, pop.hi, m, pop.kind === 'binary' ? 'Value (No = 0, Yes = 1)' : 'Value: ' + pop.unit);
+    var top = m.t, ymax, sy;
+    if (pop.kind === 'binary'){
+      ymax = 1; sy = yAxis(svg, f, 1, top, ''); txt(svg, 14, (top + f.y1) / 2, 'Share', { transform: 'rotate(-90 14 ' + ((top + f.y1) / 2) + ')', 'text-anchor': 'middle', fill: '#1a2340' });
+      var bw = 0.1;
+      [[0, 1 - pop.p, 'No'], [1, pop.p, 'Yes']].forEach(function(b){
+        el('rect', { x: f.sx(b[0] - bw / 2), y: sy(b[1]), width: f.sx(bw) - f.sx(0), height: f.y1 - sy(b[1]), fill: NAVY, stroke: NAVY }, svg);
+        txt(svg, f.sx(b[0]), sy(b[1]) - 4, b[2] + ' ' + pct(b[1]), { 'text-anchor': b[0] === 0 ? 'start' : 'end', fill: '#1a2340', 'font-size': 12, dx: b[0] === 0 ? 4 : -4 });
+      });
+    } else {
+      var nb = 40, h = histo(pop.vals, pop.lo, pop.hi, nb), mx = Math.max.apply(null, h.counts);
+      var ymaxPct = Math.ceil(mx / POP_SIZE * 100 / 2) * 2 / 100; ymax = ymaxPct * POP_SIZE;
+      sy = yAxis(svg, f, ymax, top, '');
+      // y axis labels are counts of 20,000: relabel as percent
+      svg.querySelectorAll('text[text-anchor=end]').forEach(function(t){ t.textContent = ''; });
+      niceTicks(0, ymaxPct * 100, 4).forEach(function(t){ if (t > 0) txt(svg, f.x0 - 6, sy(t / 100 * POP_SIZE) + 4, t + '%', { 'text-anchor': 'end', 'font-size': 11 }); });
+      txt(svg, 12, (top + f.y1) / 2, 'Share of population per bar', { transform: 'rotate(-90 12 ' + ((top + f.y1) / 2) + ')', 'text-anchor': 'middle', fill: '#1a2340', 'font-size': 11 });
+      var w = (pop.hi - pop.lo) / nb;
+      h.counts.forEach(function(c, i){ if (!c) return; el('rect', { x: f.sx(pop.lo + i * w) + 0.5, y: sy(c), width: f.sx(pop.lo + w) - f.sx(pop.lo) - 1, height: f.y1 - sy(c), fill: NAVY }, svg); });
+    }
+    muLine(svg, f, sy, top, pop.mu);
+    txt(svg, f.sx(pop.mu) + 4, top + 10, 'mean μ = ' + fmt(pop.mu, 2), { fill: TEAL, 'font-size': 12, 'font-weight': 700 });
+    // sigma bracket
+    var by = f.y1 - 6;
+    el('line', { x1: f.sx(pop.mu - pop.sigma), y1: by, x2: f.sx(pop.mu + pop.sigma), y2: by, stroke: GOLD, 'stroke-width': 3 }, svg);
+    [pop.mu - pop.sigma, pop.mu + pop.sigma].forEach(function(v){ el('line', { x1: f.sx(v), y1: by - 5, x2: f.sx(v), y2: by + 5, stroke: GOLD, 'stroke-width': 3 }, svg); });
+    $('parentStats').innerHTML =
+      '<div class="stat"><div class="l">Parent mean μ</div><div class="v">' + fmt(pop.mu, 3) + '</div></div>' +
+      '<div class="stat"><div class="l">Parent SD σ</div><div class="v">' + fmt(pop.sigma, 3) + '</div></div>' +
+      '<div class="stat"><div class="l">Parent skewness</div><div class="v">' + fmt(pop.skew, 2) + '</div></div>';
+    $('parentNote').textContent = (pop.kind === 'binary'
+      ? 'Each person is a Yes (1) or a No (0). The mean of the 0s and 1s is the proportion p, and σ = √(p(1 − p)). A sample mean here is a sample proportion. '
+      : 'A made-up population of ' + POP_SIZE.toLocaleString() + ' values, generated the same way every time. ') +
+      'The gold bar under the chart spans μ ± σ (one SD each side of the mean).';
+  }
+  function parentLabel(){ var k = state.pop.key; return k === 'yesno' ? 'Yes/No with p = ' + Math.round(state.pop.p * 100) + '%' : PRESETS[k].label; }
+
+  /* ---------- latest sample strip ---------- */
+  function drawLatest(){
+    var pop = state.pop, W = 560, H = 120, m = { l: 40, r: 12, t: 8, b: 40 };
+    var box = $('sampleBox'), s = state.latest;
+    var svg = newSvg(box, W, H, s ? 'Dot plot of the latest sample of ' + s.length + ' values with their mean marked.' : 'No sample drawn yet.');
+    var f = frame(svg, W, H, pop.lo, pop.hi, m, 'Same axis as the parent: ' + (isBin() ? 'No = 0, Yes = 1' : pop.unit));
+    if (!s){ txt(svg, W / 2, 50, 'No sample yet. Press “Draw one sample”.', { 'text-anchor': 'middle', fill: MUTED, 'font-size': 13 }); return; }
+    var avail = f.y1 - m.t - 14;
+    var nb = isBin() ? 2 : 60, stack = {}, mx = 0, i, b, pos = [];
+    for (i = 0; i < s.length; i++){
+      b = isBin() ? s[i] : Math.min(nb - 1, Math.floor((s[i] - pop.lo) / (pop.hi - pop.lo) * nb));
+      stack[b] = (stack[b] || 0) + 1; pos.push([b, stack[b]]); if (stack[b] > mx) mx = stack[b];
+    }
+    var r = Math.max(1.8, Math.min(5, avail / (2 * mx) - 0.3));
+    for (i = 0; i < s.length; i++){
+      var cx = isBin() ? f.sx(s[i]) : f.sx(pop.lo + (pos[i][0] + 0.5) * (pop.hi - pop.lo) / nb);
+      el('circle', { cx: cx, cy: f.y1 - 2 - r - (pos[i][1] - 1) * 2 * r * 1.05, r: r, fill: '#fff', stroke: NAVY, 'stroke-width': 1.5 }, svg);
+    }
+    var mn = meanOf(s), mx2 = f.sx(mn);
+    el('line', { x1: mx2, y1: m.t + 8, x2: mx2, y2: f.y1, stroke: GOLD, 'stroke-width': 2 }, svg);
+    el('path', { d: 'M' + mx2 + ' ' + (m.t) + ' L' + (mx2 + 8) + ' ' + (m.t + 9) + ' L' + mx2 + ' ' + (m.t + 18) + ' L' + (mx2 - 8) + ' ' + (m.t + 9) + ' Z', fill: GOLD, stroke: NAVY, 'stroke-width': 1.5 }, svg);
+    var nYes = isBin() ? s.reduce(function(a, b2){ return a + b2; }, 0) : 0;
+    $('oneRead').innerHTML = isBin()
+      ? 'This sample of <b>' + s.length + '</b> has <b>' + nYes + ' Yes</b>, so the sample proportion is <b>' + fmt(mn, 3) + '</b> (parent p = ' + fmt(pop.mu, 3) + ').'
+      : 'The <b>' + s.length + '</b> values in this sample have mean <b>' + fmt(mn, 2) + '</b> (parent μ = ' + fmt(pop.mu, 2) + '). One sample, one mean. That mean is one point in the histogram below.';
+  }
+
+  /* ---------- means chart ---------- */
+  function meansRange(zoom){
+    var pop = state.pop;
+    if (!zoom) return [pop.lo, pop.hi];
+    var se = seTheory(pop, state.n), lo = pop.mu - 4 * se, hi = pop.mu + 4 * se;
+    return [Math.max(pop.lo, lo), Math.min(pop.hi, hi)];
+  }
+  function drawMeans(){
+    var pop = state.pop, W = 560, H = 230, m = { l: 40, r: 12, t: 14, b: 40 }, means = state.means, cnt = means.length;
+    var zoom = $('zoom').checked, over = $('overlay').checked, rg = meansRange(zoom), lo = rg[0], hi = rg[1];
+    var se = seTheory(pop, state.n);
+    var svg = newSvg($('meansBox'), W, H, cnt ? 'Histogram of ' + cnt + ' sample means at n = ' + state.n + '.' : 'No sample means yet.');
+    var f = frame(svg, W, H, lo, hi, m, 'Sample mean' + (isBin() ? ' (sample proportion of Yes)' : ' (' + pop.unit + ')'));
+    var nb = 40, h = histo(means, lo, hi, nb), bwid = (hi - lo) / nb, counts = h.counts, mx = Math.max.apply(null, counts.concat([1]));
+    var useDots = cnt > 0 && cnt <= 50;
+    var peakCurve = 0;
+    if (over && cnt > 0) peakCurve = cnt * bwid * normPdf(pop.mu, pop.mu, se);
+    var ymax;
+    if (useDots) ymax = Math.max(mx, 4); else ymax = Math.max(mx, peakCurve, 4);
+    ymax = niceTicks(0, ymax * 1.08, 4).slice(-1)[0] || ymax; if (ymax < mx) ymax = mx + 1;
+    var top = m.t, sy = yAxis(svg, f, ymax, top, '');
+    txt(svg, 12, (top + f.y1) / 2, 'Number of sample means', { transform: 'rotate(-90 12 ' + ((top + f.y1) / 2) + ')', 'text-anchor': 'middle', fill: '#1a2340', 'font-size': 11 });
+    if (!cnt){ txt(svg, W / 2, 100, 'No sample means yet. Draw some samples.', { 'text-anchor': 'middle', 'font-size': 13 }); }
+    else if (useDots){
+      var r = Math.max(2.5, Math.min(7, (f.y1 - top) / (2 * Math.max(mx, 1)) / 1.1));
+      counts.forEach(function(c, i){ for (var k = 0; k < c; k++) el('path', { d: diamond(f.sx(lo + (i + 0.5) * bwid), f.y1 - 2 - r - k * 2.1 * r, r + 0.5), fill: GOLD, stroke: NAVY, 'stroke-width': 1 }, svg); });
+    } else {
+      counts.forEach(function(c, i){ if (!c) return; el('rect', { x: f.sx(lo + i * bwid) + 0.5, y: sy(c), width: Math.max(1, f.sx(lo + bwid) - f.sx(lo) - 1), height: f.y1 - sy(c), fill: GOLD, stroke: NAVY, 'stroke-width': 1 }, svg); });
+    }
+    muLine(svg, f, sy, top, pop.mu);
+    txt(svg, f.sx(pop.mu) + 4, top + 10, 'μ = ' + fmt(pop.mu, 2), { fill: TEAL, 'font-weight': 700 });
+    if (over && cnt > 0){
+      var d = '', steps = 200, ok = false;
+      for (var i = 0; i <= steps; i++){
+        var xv = lo + (hi - lo) * i / steps, yv = cnt * bwid * normPdf(xv, pop.mu, se);
+        d += (i ? 'L' : 'M') + f.sx(xv).toFixed(1) + ' ' + Math.max(top, sy(yv)).toFixed(1) + ' ';
+      }
+      el('path', { d: d, fill: 'none', stroke: TEAL, 'stroke-width': 3, 'stroke-dasharray': '2 5', 'stroke-linecap': 'round' }, svg);
+      el('path', { d: d, fill: 'none', stroke: TEAL, 'stroke-width': 1.5 }, svg);
+    }
+    $('meansLegend').innerHTML =
+      '<span><svg viewBox="0 0 18 14" aria-hidden="true">' + (useDots ? '<path d="M9 1 L16 7 L9 13 L2 7 Z" fill="#C7922C" stroke="#0E1C42"/>' : '<rect x="3" y="3" width="12" height="9" fill="#C7922C" stroke="#0E1C42" stroke-width="1.5"/>') + '</svg>' + (useDots ? 'One sample mean (gold diamond)' : 'Sample means (gold bars)') + '</span>' +
+      '<span><svg viewBox="0 0 18 14" aria-hidden="true"><line x1="9" y1="0" x2="9" y2="14" stroke="#1F7A99" stroke-width="2" stroke-dasharray="4 3"/></svg>Parent mean μ</span>' +
+      (over ? '<span><svg viewBox="0 0 18 14" aria-hidden="true"><path d="M0 12 Q9 -6 18 12" fill="none" stroke="#1F7A99" stroke-width="2"/></svg>Bell curve: center μ, SD σ/√n</span>' : '');
+    var parts = [cnt + ' sample mean' + (cnt === 1 ? '' : 's') + ' at n = ' + state.n + '.'];
+    parts.push(zoom ? 'Zoomed: the axis now shows about μ ± 4 standard errors, so it is NOT the parent’s axis. Compare the scale numbers.' : 'This is the same horizontal axis as the parent chart, so spread is compared honestly.');
+    if (h.outside) parts.push(h.outside + ' mean' + (h.outside === 1 ? ' falls' : 's fall') + ' outside the zoomed axis.');
+    $('meansAxisNote').textContent = parts.join(' ');
+  }
+  function diamond(cx, cy, r){ return 'M' + cx + ' ' + (cy - r) + ' L' + (cx + r) + ' ' + cy + ' L' + cx + ' ' + (cy + r) + ' L' + (cx - r) + ' ' + cy + ' Z'; }
+
+  /* ---------- stats ---------- */
+  function computeStats(){
+    var pop = state.pop, n = state.n, means = state.means, c = means.length;
+    if (!c) return null;
+    var se = seTheory(pop, n), o = { count: c, mean: meanOf(means), sd: c > 1 ? sdOf(means, 1) : NaN, skew: skewOf(means), se: se };
+    o.w1 = shareWithin(means, pop.mu, se, 1); o.w2 = shareWithin(means, pop.mu, se, 2); o.w3 = shareWithin(means, pop.mu, se, 3);
+    return o;
+  }
+  function drawTable(st){
+    var pop = state.pop, n = state.n, se = seTheory(pop, n);
+    var seTxt = isBin() ? '√(p(1 − p)/n) = ' + fmt(se, 4) : 'σ/√n = ' + fmt(pop.sigma, 3) + '/√' + n + ' = ' + fmt(se, 4);
+    var h = '<table><thead><tr><th>Measure</th><th>From your samples</th><th>Theory says</th></tr></thead><tbody>';
+    h += row('Number of sample means', st ? st.count : 0, 'n = ' + n + ' per sample');
+    h += row('Mean of the sample means', st ? fmt(st.mean, 4) : '—', 'μ = ' + fmt(pop.mu, 4));
+    h += row('SD of the sample means (the standard error)', st ? fmt(st.sd, 4) : '—', seTxt);
+    h += row('Skewness of the sample means', st ? fmt(st.skew, 2) : '—', 'about ' + fmt(pop.skew / Math.sqrt(n), 2) + ' (parent ' + fmt(pop.skew, 2) + ' ÷ √n)');
+    h += '<tr><td class="sub" colspan="3">Bell check: share of sample means within k standard errors of μ</td></tr>';
+    h += row('Within 1 standard error', st ? pct(st.w1) : '—', 'bell curve: about 68%');
+    h += row('Within 2 standard errors', st ? pct(st.w2) : '—', 'bell curve: about 95%');
+    h += row('Within 3 standard errors', st ? pct(st.w3) : '—', 'bell curve: about 99.7%');
+    $('tableBox').innerHTML = h + '</tbody></table>';
+    function row(a, b, c2){ return '<tr><td>' + a + '</td><td><b>' + b + '</b></td><td>' + c2 + '</td></tr>'; }
+  }
+
+  /* ---------- notice ---------- */
+  function drawNotice(st){
+    var pop = state.pop, n = state.n, L = [];
+    if (!st || st.count < 30){
+      L.push('You have ' + (st ? st.count : 0) + ' sample mean' + (st && st.count === 1 ? '' : 's') + '. Draw a few hundred (try “Draw 100” a few times) before judging the shape. A handful of dots can look like anything.');
+    } else {
+      var se = st.se, diff = st.mean - pop.mu, tol = 3 * st.sd / Math.sqrt(st.count);
+      L.push('<b>Center.</b> The mean of the ' + st.count + ' sample means is ' + fmt(st.mean, 3) + ', and the parent mean is ' + fmt(pop.mu, 3) + ' (difference ' + fmt(diff, 3) + '). ' + (Math.abs(diff) <= tol ? 'That is about what chance alone gives, so sample means are centered on μ.' : 'That is a little farther than usual; more samples will usually pull it closer.'));
+      if (n === 1){
+        L.push('<b>Spread.</b> With n = 1 each “sample mean” is just one value, so the SD of the means (' + fmt(st.sd, 3) + ') matches the parent σ (' + fmt(pop.sigma, 3) + ') and the histogram copies the parent’s shape.');
+      } else {
+        L.push('<b>Spread.</b> The SD of the sample means is ' + fmt(st.sd, 3) + ', versus the parent σ of ' + fmt(pop.sigma, 3) + '. The means are about ' + fmt(pop.sigma / st.sd, 2) + ' times tighter. Theory predicts √n = ' + fmt(Math.sqrt(n), 2) + ' times tighter (standard error ' + fmt(se, 3) + ', observed ÷ theory = ' + fmt(st.sd / se, 2) + ').');
+      }
+      var shape = '<b>Shape.</b> Skewness of the sample means is ' + fmt(st.skew, 2) + ' (parent: ' + fmt(pop.skew, 2) + '). ';
+      if (n === 1) shape += 'Same shape as the parent, as expected.';
+      else if (Math.abs(pop.skew) < 0.3) shape += 'The parent is already close to symmetric, so the means stay symmetric.';
+      else if (Math.abs(st.skew) < 0.25) shape += 'That is close to symmetric: the parent’s lean has mostly faded at this n.';
+      else shape += 'The means still lean ' + (st.skew > 0 ? 'right' : 'left') + ' at this n. The lean shrinks as n grows, but it has not gone away yet.';
+      L.push(shape);
+      var good = Math.abs(st.w1 - 0.683) < 0.04 && Math.abs(st.w2 - 0.954) < 0.025 && Math.abs(st.w3 - 0.997) < 0.012;
+      L.push('<b>Bell check.</b> ' + pct(st.w1) + ' / ' + pct(st.w2) + ' / ' + pct(st.w3) + ' of the means are within 1 / 2 / 3 standard errors, compared with 68% / 95% / 99.7% for a bell curve. ' + (good ? 'This is close to the bell-curve pattern.' : 'This does not yet match the bell-curve pattern closely' + (n < 30 ? ' (try a larger n)' : '') + '. With few samples some wobble is also expected.'));
+    }
+    if (isBin()){
+      var np = n * pop.p, nq = n * (1 - pop.p);
+      if (np < 10 || nq < 10) L.push('<b>Proportion check.</b> With n = ' + n + ' and p = ' + Math.round(pop.p * 100) + '%, you expect ' + fmt(np, 1) + ' Yes and ' + fmt(nq, 1) + ' No per sample. A common rule of thumb wants both at least 10 before the bell shape is trustworthy, so expect a lopsided or lumpy histogram here.');
+      else L.push('<b>Proportion check.</b> Expected Yes = ' + fmt(np, 1) + ' and expected No = ' + fmt(nq, 1) + ' per sample, both at least 10, which is the common rule of thumb for a bell shape.');
+    }
+    $('notice').innerHTML = '<ul>' + L.map(function(x){ return '<li>' + x + '</li>'; }).join('') + '</ul>';
+  }
+
+  /* ---------- compare ---------- */
+  function drawCompare(){
+    var box = $('cmpBox'), pop = state.pop;
+    box.textContent = '';
+    if (!state.cmp) return;
+    var wrap = document.createElement('div'); wrap.className = 'cmp'; box.appendChild(wrap);
+    var ymaxAll = 0, nb = 60, hs = {};
+    state.cmp.forEach(function(c){ hs[c.n] = histo(c.means, pop.lo, pop.hi, nb); ymaxAll = Math.max(ymaxAll, Math.max.apply(null, hs[c.n].counts)); });
+    state.cmp.forEach(function(c){
+      var cell = document.createElement('div'), sb = document.createElement('div'), cap = document.createElement('div'); cap.className = 'cap';
+      cell.appendChild(sb); cell.appendChild(cap); wrap.appendChild(cell);
+      var W = 300, H = 160, m = { l: 8, r: 8, t: 10, b: 36 };
+      var se = seTheory(pop, c.n), sd = sdOf(c.means, 1), sk = skewOf(c.means);
+      var svg = newSvg(sb, W, H, 'Histogram of 1000 sample means at n = ' + c.n + ', SD ' + fmt(sd, 3) + ', skewness ' + fmt(sk, 2) + '.');
+      var f = frame(svg, W, H, pop.lo, pop.hi, m, '', 10);
+      var sy = function(v){ return f.y1 - v / (hs[c.n].counts.reduce(function(a, b){ return Math.max(a, b); }, 1) * 1.1) * (f.y1 - m.t); };
+      var w = (pop.hi - pop.lo) / nb;
+      hs[c.n].counts.forEach(function(k, i){ if (k) el('rect', { x: f.sx(pop.lo + i * w), y: sy(k), width: Math.max(1, f.sx(pop.lo + w) - f.sx(pop.lo)), height: f.y1 - sy(k), fill: GOLD, stroke: NAVY, 'stroke-width': 0.6 }, svg); });
+      el('line', { x1: f.sx(pop.mu), y1: m.t, x2: f.sx(pop.mu), y2: f.y1, stroke: TEAL, 'stroke-width': 1.5, 'stroke-dasharray': '5 3' }, svg);
+      txt(svg, W / 2, 30, 'n = ' + c.n, { 'text-anchor': 'middle', 'font-size': 14, fill: NAVY, 'font-weight': 700, transform: '' }).setAttribute('y', 24);
+      txt(svg, f.x0, H - 4, 'Same axis for all four', { 'font-size': 10 });
+      cap.innerHTML = '<b>n = ' + c.n + '</b>: SD of means ' + fmt(sd, 3) + ' (theory ' + fmt(se, 3) + ')<br>skewness ' + fmt(sk, 2) + ', within 2 SE: ' + pct(shareWithin(c.means, pop.mu, se, 2));
+    });
+    var note = document.createElement('p'); note.className = 'muted'; note.style.marginTop = '6px';
+    note.textContent = 'Each panel uses the same horizontal axis and the same vertical scale. Watch the spread shrink and the lean toward the long tail fade as n grows. Parent: ' + parentLabel() + ', skewness ' + fmt(pop.skew, 2) + '. These panels are simulated fresh each time you press Compare n.';
+    box.appendChild(note);
+  }
+
+  /* ---------- orchestration ---------- */
+  function refreshAll(){
+    $('nRead').textContent = state.n;
+    Array.prototype.forEach.call($('quickN').querySelectorAll('button'), function(b){ b.setAttribute('aria-pressed', String(+b.getAttribute('data-n') === state.n)); });
+    drawParent(); drawLatest(); drawMeans(); var st = computeStats(); drawTable(st); drawNotice(st); drawCompare();
+    if (!state.latest) $('oneRead').textContent = 'Press “Draw one sample” to take n values from the parent and mark their mean.';
+  }
+  function rebuildPop(){
+    var key = $('parent').value, p = +$('pSlider').value / 100;
+    $('pWrap').classList.toggle('hidden', key !== 'yesno');
+    $('pRead').textContent = Math.round(p * 100) + '%';
+    state.pop = buildPopulation(key, p);
+    state.means = []; state.latest = null; state.cmp = null;
+  }
+  function changeN(){ state.n = +$('nSlider').value; state.means = []; state.latest = null; refreshAll(); }
+  function draw(count){
+    var last = null;
+    for (var i = 0; i < count; i++){ last = drawSample(state.pop, state.n, rng); state.means.push(meanOf(last)); }
+    state.latest = last;
+    refreshAll();
+  }
+  function init(){
+    $('parent').value = DEFAULTS.parent; $('pSlider').value = DEFAULTS.p; $('nSlider').value = DEFAULTS.n; state.n = DEFAULTS.n;
+    $('zoom').checked = false; $('overlay').checked = false;
+    rebuildPop(); draw(100);
+  }
+  $('parent').addEventListener('change', function(){ rebuildPop(); refreshAll(); });
+  $('pSlider').addEventListener('input', function(){ rebuildPop(); refreshAll(); });
+  $('nSlider').addEventListener('input', changeN);
+  $('b1').addEventListener('click', function(){ draw(1); });
+  $('b10').addEventListener('click', function(){ draw(10); });
+  $('b100').addEventListener('click', function(){ draw(100); });
+  $('b1000').addEventListener('click', function(){ draw(1000); });
+  $('bClear').addEventListener('click', function(){ state.means = []; state.latest = null; refreshAll(); });
+  $('bReset').addEventListener('click', init);
+  $('zoom').addEventListener('change', drawMeans);
+  $('overlay').addEventListener('change', drawMeans);
+  $('bCompare').addEventListener('click', function(){
+    var pop = state.pop;
+    state.cmp = [2, 10, 30, 100].map(function(n){ return { n: n, means: sampleMeans(pop, n, 1000, rng) }; });
+    drawCompare();
+  });
+  init();
+})();
+</script>
+</body>
+</html>

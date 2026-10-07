@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sampling Simulator — Methods, Bias &amp; Representativeness</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; min-height: 100vh; padding: 14px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.35rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.85rem; margin-bottom: 12px; line-height: 1.45; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+  .panel h2 { font-size: 0.78rem; color: #C7922C; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  label, .lbl { font-size: 0.82rem; font-weight: 700; color: #0E1C42; }
+  select { font: inherit; font-size: 0.9rem; padding: 6px 8px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; max-width: 100%; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  .btn { padding: 8px 12px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font: inherit; font-size: 0.82rem; font-weight: 700; cursor: pointer; }
+  .btn.primary { background: #0E1C42; color: #fff; }
+  .btn.gold { background: #FDF3E3; border-color: #C7922C; }
+  .btn:hover { filter: brightness(0.95); }
+  .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  :focus-visible { outline: 3px solid #2196D0; outline-offset: 2px; }
+  .seg { display: inline-flex; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; background: #fff; flex-wrap: wrap; }
+  .seg button { border: none; background: #fff; color: #0E1C42; font: inherit; font-size: 0.8rem; font-weight: 700; padding: 7px 10px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  input[type=range] { width: 170px; max-width: 100%; accent-color: #0E1C42; }
+  .desc { background: #E8F6FB; border-left: 5px solid #0E1C42; border-radius: 8px; padding: 9px 12px; font-size: 0.86rem; line-height: 1.5; margin-top: 8px; }
+  .desc .weak { display: block; color: #6b7a99; margin-top: 2px; }
+  .gridwrap { position: relative; }
+  svg { display: block; width: 100%; height: auto; }
+  .dot { cursor: pointer; }
+  .dot circle.base { fill: #fff; stroke: #6b7a99; stroke-width: 1.6; }
+  .dot.sel circle.base { fill: #C7922C; stroke: #0E1C42; stroke-width: 3; }
+  .dot:focus { outline: none; }
+  .dot:focus circle.base { stroke: #2196D0; stroke-width: 3.5; }
+  .dot.sel:focus circle.base { stroke: #2196D0; }
+  .dot .tick { display: none; fill: none; stroke: #0E1C42; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .dot.sel .tick { display: block; }
+  .tip { position: absolute; pointer-events: none; background: #0E1C42; color: #fff; font-size: 0.75rem; line-height: 1.35; padding: 5px 8px; border-radius: 6px; display: none; z-index: 5; white-space: nowrap; }
+  .legend { font-size: 0.75rem; color: #6b7a99; margin-top: 6px; line-height: 1.5; }
+  .readout { background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 8px; padding: 10px 14px; font-size: 0.92rem; line-height: 1.6; min-height: 48px; }
+  .readout strong { color: #0E1C42; }
+  .readout .err { color: #C0392B; font-weight: 700; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
+  .stat { background: #F8FAFD; border: 1px solid #D0D9E8; border-radius: 8px; padding: 6px 10px; font-size: 0.78rem; color: #6b7a99; }
+  .stat b { display: block; font-size: 1.05rem; color: #0E1C42; }
+  .truth { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 10px; padding: 10px 12px; font-size: 0.86rem; line-height: 1.5; margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; }
+  th, td { border: 1px solid #D0D9E8; padding: 5px 7px; text-align: center; }
+  th { background: #0E1C42; color: #fff; font-size: 0.74rem; }
+  td.l, th.l { text-align: left; }
+  .scroll { overflow-x: auto; }
+  .note { background: linear-gradient(135deg, #0E1C42, #1a2f63); color: #fff; border-radius: 10px; padding: 12px 16px; font-size: 0.84rem; line-height: 1.6; margin-bottom: 12px; }
+  .note strong { color: #55C8E8; }
+  .small { font-size: 0.78rem; color: #6b7a99; line-height: 1.5; }
+  details summary { cursor: pointer; font-weight: 700; font-size: 0.85rem; color: #0E1C42; }
+  .plist { max-height: 180px; overflow-y: auto; margin-top: 8px; border: 1px solid #D0D9E8; border-radius: 8px; padding: 6px 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 2px 10px; font-size: 0.76rem; }
+  .plist label { font-weight: 400; font-size: 0.76rem; display: flex; gap: 5px; align-items: center; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  @media (max-width: 480px) { body { padding: 8px; } .panel { padding: 10px; } input[type=range] { width: 130px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>&#128101; Sampling Simulator</h1>
+<p class="subtitle">A made-up town of 200 people, drawn as dots. Sample it different ways, judge your estimate, then reveal the truth. All data here are simulated.</p>
+
+<div class="panel">
+  <h2>1. Choose how to sample</h2>
+  <div class="row">
+    <label for="method">Method</label>
+    <select id="method"></select>
+    <label for="nrange">Sample size n = <span id="nval">20</span></label>
+    <input type="range" id="nrange" min="5" max="60" value="20" step="1">
+  </div>
+  <div class="row">
+    <span class="lbl" id="statlbl">Track this estimate:</span>
+    <div class="seg" role="group" aria-labelledby="statlbl">
+      <button type="button" id="stat-mean" aria-pressed="true">Average minutes of homework</button>
+      <button type="button" id="stat-prop" aria-pressed="false">Share who support the bus route</button>
+    </div>
+  </div>
+  <div class="desc" id="desc" aria-live="polite"></div>
+</div>
+
+<div class="panel">
+  <h2>2. The town (200 people)</h2>
+  <div class="gridwrap" id="gridwrap">
+    <svg id="grid" viewBox="0 0 640 372" role="group" aria-label="Grid of 200 people in four neighborhoods. Use arrow keys to move between people."></svg>
+    <div class="tip" id="tip" role="presentation"></div>
+  </div>
+  <p class="legend" id="gridlegend"></p>
+  <div class="row" style="margin-top:8px">
+    <button class="btn primary" id="draw" type="button">Draw a sample</button>
+    <button class="btn" id="repeat" type="button">Repeat 100 times</button>
+    <button class="btn" id="clearpicks" type="button" style="display:none">Clear my picks</button>
+    <button class="btn" id="reset" type="button">Reset</button>
+  </div>
+  <details style="margin-top:8px">
+    <summary>List of all 200 people (keyboard and screen-reader option)</summary>
+    <p class="small" style="margin-top:6px">Each line shows ID, neighborhood and distance from the entrance. With the &ldquo;Pick people yourself&rdquo; method, the check boxes pick people. Otherwise they only show who is in the current sample.</p>
+    <div class="plist" id="plist"></div>
+  </details>
+</div>
+
+<div class="panel">
+  <h2>3. Your estimate</h2>
+  <div class="readout" id="readout" aria-live="polite"></div>
+  <div class="row" style="margin-top:10px">
+    <button class="btn gold" id="reveal" type="button" aria-pressed="false">Reveal the true values</button>
+  </div>
+  <div id="truthbox" style="display:none"></div>
+</div>
+
+<div class="panel">
+  <h2>4. Many samples (each dot is one estimate)</h2>
+  <svg id="strip" viewBox="0 0 640 200" role="img" aria-label="Dot strip of sample estimates"></svg>
+  <div class="stats" id="stats"></div>
+</div>
+
+<div class="note" id="notice" aria-live="polite"></div>
+
+<div class="panel">
+  <h2>5. Compare all methods</h2>
+  <div class="row">
+    <button class="btn primary" id="compare" type="button">Compare all methods</button>
+    <button class="btn gold" id="big" type="button">Try n = 60 with Convenience</button>
+  </div>
+  <div id="cmpbox"><p class="small">Runs 100 draws for each method at the current n and compares the estimates you are tracking.</p></div>
+  <div id="bigbox"></div>
+</div>
+
+<div class="panel">
+  <h2>Notes</h2>
+  <p class="small">Systematic sampling caution: it takes every k-th person from a list. If the list has a repeating pattern that lines up with k (for example, every 10th person on a roster is a team captain), the sample can be badly off. In this town, the ID order has no such cycle, but real lists sometimes do. Samples use fresh random numbers each time you draw, so your results will differ from a classmate&rsquo;s. The town itself is the same every time.</p>
+</div>
+</div>
+
+<script>
+/* ================= Pure functions (population and sampling) ================= */
+var NB = [
+  { name: 'Maple Hill',  shape: '●', tint: '#E8F6FB' },
+  { name: 'Oak Ridge',   shape: '■', tint: '#FDF3E3' },
+  { name: 'Cedar Park',  shape: '▲', tint: '#E9F5EA' },
+  { name: 'Harbor Lane', shape: '◆', tint: '#F1EAF7' }
+];
+var ENT = { x: 9.5, y: 10.5 };           /* entrance, below the middle of the front row */
+var BASE_MIN = [72, 86, 52, 62];          /* typical minutes of homework by neighborhood */
+var BASE_P   = [0.35, 0.50, 0.80, 0.65];  /* chance of supporting the bus route */
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function makePopulation(seed) {
+  var rng = mulberry32(seed), pop = [], id, row, col, blk, fromFront, mins, p, u1, u2, z;
+  for (id = 1; id <= 200; id++) {
+    row = Math.floor((id - 1) / 20); col = (id - 1) % 20;
+    blk = (row < 5 ? 0 : 2) + (col < 10 ? 0 : 1);
+    fromFront = 9 - row;
+    u1 = rng() || 1e-9; u2 = rng();
+    z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    mins = BASE_MIN[blk] + 1.5 * (fromFront - 4.5) + 12 * z;
+    mins = Math.max(10, Math.min(150, Math.round(mins)));
+    p = BASE_P[blk] - 0.02 * (fromFront - 4.5);
+    p = Math.max(0.05, Math.min(0.95, p));
+    pop.push({ id: id, row: row, col: col, block: blk, group: blk * 5 + Math.floor((col % 10) / 2),
+      dist: Math.hypot(col - ENT.x, row - ENT.y), minutes: mins, yes: rng() < p ? 1 : 0 });
+  }
+  return pop;
+}
+
+function mean(a) { var s = 0, i; for (i = 0; i < a.length; i++) s += a[i]; return a.length ? s / a.length : NaN; }
+function sd(a) { var m = mean(a), s = 0, i; for (i = 0; i < a.length; i++) s += (a[i] - m) * (a[i] - m); return a.length > 1 ? Math.sqrt(s / (a.length - 1)) : 0; }
+
+function popStats(pop) {
+  var out = { mean: mean(pop.map(function (p) { return p.minutes; })), prop: mean(pop.map(function (p) { return p.yes; })), blocks: [] }, b, sub;
+  for (b = 0; b < 4; b++) {
+    sub = pop.filter(function (p) { return p.block === b; });
+    out.blocks.push({ n: sub.length, mean: mean(sub.map(function (p) { return p.minutes; })), prop: mean(sub.map(function (p) { return p.yes; })) });
+  }
+  return out;
+}
+
+function shuffle(arr, rnd) {
+  var a = arr.slice(), i, j, t;
+  for (i = a.length - 1; i > 0; i--) { j = Math.floor(rnd() * (i + 1)); t = a[i]; a[i] = a[j]; a[j] = t; }
+  return a;
+}
+function ids(list) { return list.map(function (p) { return p.id; }); }
+function pickK(list, k, rnd) { return ids(shuffle(list, rnd).slice(0, k)); }
+
+function blockCounts(n, rnd) {          /* proportional split of n over four blocks of 50 */
+  var base = Math.floor(n / 4), extra = n - base * 4, order = shuffle([0, 1, 2, 3], rnd), c = [base, base, base, base], i;
+  for (i = 0; i < extra; i++) c[order[i]]++;
+  return c;
+}
+
+function sampleSRS(pop, n, rnd) { return pickK(pop, n, rnd); }
+function sampleStratified(pop, n, rnd) {
+  var c = blockCounts(n, rnd), out = [], b;
+  for (b = 0; b < 4; b++) out = out.concat(pickK(pop.filter(function (p) { return p.block === b; }), c[b], rnd));
+  return out;
+}
+function clusterGroups(n) { return Math.max(1, Math.round(n / 10)); }
+function sampleCluster(pop, n, rnd) {
+  var g = shuffle([].concat(Array.apply(null, Array(20)).map(function (_, i) { return i; })), rnd).slice(0, clusterGroups(n));
+  return ids(pop.filter(function (p) { return g.indexOf(p.group) >= 0; }));
+}
+function sampleSystematic(pop, n, rnd) {   /* every k-th from a random start, wrapping around the list */
+  var k = Math.floor(200 / n), start = Math.floor(rnd() * 200), out = [], i;
+  for (i = 0; i < n; i++) out.push((start + i * k) % 200 + 1);
+  return out;
+}
+function sampleConvenience(pop, n, rnd) {  /* nearest the entrance; tiny random tie-break */
+  var keyed = pop.map(function (p) { return { id: p.id, k: p.dist + rnd() * 0.9 }; });
+  keyed.sort(function (a, b) { return a.k - b.k; });
+  return keyed.slice(0, n).map(function (x) { return x.id; });
+}
+function sampleQuota(pop, n, rnd) {        /* quota per neighborhood, filled by whoever is first to come by the entrance */
+  var c = blockCounts(n, rnd), out = [], b, keyed;
+  for (b = 0; b < 4; b++) {
+    keyed = pop.filter(function (p) { return p.block === b; }).map(function (p) { return { id: p.id, k: p.dist + rnd() * 3 }; });
+    keyed.sort(function (a, b2) { return a.k - b2.k; });
+    out = out.concat(keyed.slice(0, c[b]).map(function (x) { return x.id; }));
+  }
+  return out;
+}
+var SAMPLERS = { srs: sampleSRS, strat: sampleStratified, cluster: sampleCluster, system: sampleSystematic, quota: sampleQuota, conv: sampleConvenience };
+
+function estimate(pop, idList) {
+  var sub = idList.map(function (i) { return pop[i - 1]; });
+  return { mean: mean(sub.map(function (p) { return p.minutes; })), prop: mean(sub.map(function (p) { return p.yes; })) * 100 };
+}
+
+function simulate(pop, method, n, reps, rnd) {
+  var out = [], i;
+  for (i = 0; i < reps; i++) out.push(estimate(pop, SAMPLERS[method](pop, n, rnd)));
+  return out;
+}
+
+function summarize(vals, truth) {   /* vals: numbers; truth: number or null */
+  var m = mean(vals), s = sd(vals), out = { count: vals.length, mean: m, sd: s, min: Math.min.apply(null, vals), max: Math.max.apply(null, vals), bias: null, verdict: null };
+  if (truth !== null && truth !== undefined) {
+    out.bias = m - truth;
+    var tol = 2 * s / Math.sqrt(Math.max(vals.length, 1));
+    out.verdict = vals.length < 2 ? 'single' : (Math.abs(out.bias) <= tol ? 'about right' : (out.bias > 0 ? 'on average too high' : 'on average too low'));
+  }
+  return out;
+}
+
+/* ================= Page state and rendering ================= */
+var POP = makePopulation(20260);
+var TRUE = popStats(POP);
+var METHODS = [
+  { key: 'srs', label: 'Simple random',
+    text: 'Every person has the same chance. Names come out of a hat, so any group of n is equally likely.',
+    weak: 'Weakness: a single sample can still miss a neighborhood by chance, especially when n is small.' },
+  { key: 'strat', label: 'Stratified (by neighborhood)',
+    text: 'Split the town into its 4 neighborhoods, then take a random sample from each, in proportion to its size.',
+    weak: 'Weakness: you need to know each person’s neighborhood first. It guarantees every neighborhood is represented.' },
+  { key: 'cluster', label: 'Cluster (whole groups of 10)',
+    text: 'The town is split into 20 groups of 10 neighbors (a strip of two columns). Pick whole groups at random and survey everyone in them. Stratified takes a few people from every neighborhood; cluster takes everyone from only a few groups.',
+    weak: 'Weakness: if the few groups chosen are alike, the sample misses the other neighborhoods. Sample size comes in tens, so n is rounded to a multiple of 10.' },
+  { key: 'system', label: 'Systematic (every kth)',
+    text: 'Make an ID list, find k = 200 ÷ n, pick a random start, then take every kth person (wrapping around the list).',
+    weak: 'Weakness: if the list repeats a pattern every k people, the sample can line up with it.' },
+  { key: 'judg', label: 'Pick people yourself (judgment)',
+    text: 'You click the dots you think look “typical” of the town. No random chance is involved.',
+    weak: 'Weakness: personal choices drift toward people who are close, familiar or easy to reach, and different pickers get different answers.' },
+  { key: 'quota', label: 'Quota (not random)',
+    text: 'An interviewer must collect a set number from each neighborhood (the quotas) but fills each quota with the first people who come by the entrance.',
+    weak: 'Weakness: the quotas look balanced, but who fills them is not random, so the near-entrance people are over-represented.' },
+  { key: 'conv', label: 'Convenience (nearest the entrance)',
+    text: 'Ask the n people closest to the entrance. Quick and easy.',
+    weak: 'Weakness: the people who are easiest to reach may differ systematically from everyone else.' }
+];
+var MLABEL = {}; METHODS.forEach(function (m) { MLABEL[m.key] = m.label; });
+
+var S = { method: 'srs', n: 20, stat: 'mean', revealed: false, sample: null, picks: [], est: [], cmp: null, big: null, drawn: false, lastPickKey: '', msg: '' };
+var $ = function (id) { return document.getElementById(id); };
+var SVGNS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent) {
+  var e = document.createElementNS(SVGNS, tag), k;
+  for (k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function px(p) { return 24 + p.col * 29 + (p.col >= 10 ? 14 : 0) + 14; }
+function py(p) { return (p.row >= 5 ? 180 : 24) + 32 + (p.row % 5) * 24; }
+function fmt(v, d) { return v.toFixed(d === undefined ? 1 : d); }
+function statName() { return S.stat === 'mean' ? 'average minutes of homework' : 'share who support the bus route'; }
+function unit() { return S.stat === 'mean' ? ' min' : '%'; }
+function truthVal() { return S.stat === 'mean' ? TRUE.mean : TRUE.prop * 100; }
+function isJudg() { return S.method === 'judg'; }
+
+var dotEls = [], focusIdx = 0;
+function buildGrid() {
+  var svg = $('grid'), b, p, i, g, c;
+  svg.innerHTML = '';
+  var bx = [[20, 30], [20 + 300 + 14 - 0 + 0, 30]];
+  for (b = 0; b < 4; b++) {
+    var x0 = 20 + (b % 2) * 314, y0 = b < 2 ? 24 : 180;
+    el('rect', { x: x0, y: y0, width: 296, height: 144, rx: 8, fill: NB[b].tint, stroke: '#D0D9E8', 'stroke-width': 1.5 }, svg);
+    var t = el('text', { x: x0 + 6, y: y0 + 14, 'font-size': 10.5, 'font-weight': 700, fill: '#0E1C42' }, svg);
+    t.textContent = NB[b].shape + ' ' + 'ABCD'.charAt(b) + ': ' + NB[b].name;
+  }
+  /* cluster group separators */
+  var sep = el('g', { id: 'seps', stroke: '#6b7a99', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0 }, svg);
+  for (b = 0; b < 4; b++) {
+    var xx = 20 + (b % 2) * 314, yy = b < 2 ? 24 : 180, k;
+    for (k = 1; k < 5; k++) el('line', { x1: xx + k * 29.6, y1: yy + 18, x2: xx + k * 29.6, y2: yy + 140 }, sep);
+  }
+  var bk = el('text', { x: 320, y: 14, 'text-anchor': 'middle', 'font-size': 10.5, fill: '#6b7a99' }, svg);
+  bk.textContent = 'BACK of town';
+  el('path', { d: 'M300 360 L320 344 L340 360 Z', fill: '#0E1C42' }, svg);
+  var en = el('text', { x: 320, y: 370, 'text-anchor': 'middle', 'font-size': 10.5, 'font-weight': 700, fill: '#0E1C42' }, svg);
+  en.textContent = 'ENTRANCE (front)';
+  dotEls = [];
+  POP.forEach(function (p, idx) {
+    g = el('g', { 'class': 'dot', tabindex: idx === 0 ? 0 : -1, role: 'button', 'data-i': idx, transform: 'translate(' + px(p) + ',' + py(p) + ')' }, svg);
+    el('circle', { 'class': 'base', r: 9, cx: 0, cy: 0 }, g);
+    el('path', { 'class': 'tick', d: 'M-4 0 L-1 3.5 L5 -4' }, g);
+    dotEls.push(g);
+    g.addEventListener('mouseenter', function () { showTip(idx); });
+    g.addEventListener('mouseleave', hideTip);
+    g.addEventListener('focus', function () { focusIdx = idx; showTip(idx); setRoving(idx); });
+    g.addEventListener('blur', hideTip);
+    g.addEventListener('click', function () { dotAct(idx); });
+    g.addEventListener('keydown', function (e) { dotKey(e, idx); });
+  });
+}
+function setRoving(idx) { dotEls.forEach(function (d, i) { d.setAttribute('tabindex', i === idx ? 0 : -1); }); }
+function dotKey(e, idx) {
+  var r = Math.floor(idx / 20), c = idx % 20, t = idx;
+  if (e.key === 'ArrowRight') c = Math.min(19, c + 1);
+  else if (e.key === 'ArrowLeft') c = Math.max(0, c - 1);
+  else if (e.key === 'ArrowDown') r = Math.min(9, r + 1);
+  else if (e.key === 'ArrowUp') r = Math.max(0, r - 1);
+  else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); dotAct(idx); return; }
+  else return;
+  e.preventDefault(); t = r * 20 + c; setRoving(t); dotEls[t].focus();
+}
+function describe(p) { return 'Person ' + p.id + ', ' + NB[p.block].name + ', ' + fmt(p.dist, 1) + ' steps from the entrance'; }
+function showTip(idx) {
+  var p = POP[idx], tip = $('tip'), wr = $('gridwrap').getBoundingClientRect(), r = dotEls[idx].getBoundingClientRect();
+  tip.textContent = 'ID ' + p.id + ' · ' + NB[p.block].shape + ' ' + NB[p.block].name + ' · ' + fmt(p.dist, 1) + ' from entrance';
+  tip.style.display = 'block';
+  var left = r.left - wr.left + r.width / 2 - tip.offsetWidth / 2;
+  left = Math.max(0, Math.min(wr.width - tip.offsetWidth, left));
+  var top = r.top - wr.top - tip.offsetHeight - 4;
+  if (top < 0) top = r.bottom - wr.top + 4;
+  tip.style.left = left + 'px'; tip.style.top = top + 'px';
+}
+function hideTip() { $('tip').style.display = 'none'; }
+
+function togglePick(id) {
+  var i = S.picks.indexOf(id);
+  if (i >= 0) S.picks.splice(i, 1);
+  else if (S.picks.length < S.n) S.picks.push(id);
+  else S.msg = 'You already have ' + S.n + ' people picked. Click a picked dot to remove it, or raise n.';
+  if (i >= 0 || S.picks.length <= S.n) { if (S.picks.length < S.n || i >= 0) S.msg = ''; }
+  S.sample = null;
+  renderAll();
+}
+function dotAct(idx) { if (isJudg()) togglePick(POP[idx].id); }
+
+function currentSel() { return isJudg() ? (S.sample || S.picks) : (S.sample || []); }
+
+function resetEst() { S.est = []; S.sample = null; S.cmp = null; S.big = null; S.drawn = false; S.lastPickKey = ''; S.msg = ''; }
+
+function doDraw() {
+  S.msg = '';
+  if (isJudg()) {
+    if (S.picks.length !== S.n) { S.msg = 'Pick exactly ' + S.n + ' people first (you have ' + S.picks.length + '). Click dots on the town, or use the list below the grid.'; renderAll(); return; }
+    S.sample = S.picks.slice();
+    var key = S.picks.slice().sort(function (a, b) { return a - b; }).join(',');
+    if (key !== S.lastPickKey) { S.est.push(estimate(POP, S.sample)); S.lastPickKey = key; }
+  } else {
+    S.sample = SAMPLERS[S.method](POP, S.n, Math.random);
+    S.est.push(estimate(POP, S.sample));
+  }
+  S.drawn = true;
+  renderAll();
+}
+function doRepeat() {
+  if (isJudg()) {
+    S.msg = 'Repeating is not meaningful for a judgment sample: your picks are the same every time, so 100 repeats would give 100 identical dots. Different people would pick differently, but a single person’s picks do not vary by chance. That is the point: the bias comes from the picker, not from luck.';
+    renderAll(); return;
+  }
+  S.est = simulate(POP, S.method, S.n, 100, Math.random);
+  S.sample = SAMPLERS[S.method](POP, S.n, Math.random);
+  S.drawn = true; S.msg = '';
+  renderAll();
+}
+
+function renderDesc() {
+  var m = METHODS.filter(function (x) { return x.key === S.method; })[0];
+  $('desc').innerHTML = '<strong>' + m.label + ':</strong> ' + m.text + '<span class="weak">' + m.weak + '</span>';
+}
+
+function renderGrid() {
+  var sel = currentSel(), judg = isJudg(), setSel = {}, i;
+  sel.forEach(function (id) { setSel[id] = true; });
+  var picksSet = {}; S.picks.forEach(function (id) { picksSet[id] = true; });
+  dotEls.forEach(function (d, idx) {
+    var p = POP[idx], on = judg ? !!picksSet[p.id] : !!setSel[p.id];
+    d.setAttribute('class', 'dot' + (on ? ' sel' : ''));
+    d.setAttribute('aria-label', describe(p) + (judg ? (on ? ', picked' : ', not picked') : (on ? ', in sample' : '')));
+    if (judg) d.setAttribute('aria-pressed', on ? 'true' : 'false'); else d.removeAttribute('aria-pressed');
+    d.style.cursor = judg ? 'pointer' : 'default';
+  });
+  $('seps').setAttribute('opacity', S.method === 'cluster' ? 0.9 : 0);
+  var cnt = judg ? S.picks.length : (S.sample ? S.sample.length : 0);
+  $('gridlegend').innerHTML = 'Gold dot with a check mark = in the sample. Hollow dot = not in it. Hover or focus a dot for its ID. Shapes ' + NB.map(function (n, i) { return n.shape + ' ' + 'ABCD'.charAt(i) + '=' + n.name; }).join(', ') + '. ' +
+    (judg ? '<strong>Picked ' + S.picks.length + ' of ' + S.n + '.</strong>' : (S.sample ? '<strong>' + cnt + ' people in this sample.</strong>' : ''));
+}
+
+function renderList() {
+  var host = $('plist');
+  if (!host.firstChild) {
+    POP.forEach(function (p) {
+      var lb = document.createElement('label'), cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.id = 'cb' + p.id;
+      cb.addEventListener('change', function () { if (isJudg()) togglePick(p.id); else cb.checked = !cb.checked; });
+      lb.appendChild(cb);
+      lb.appendChild(document.createTextNode(' ' + p.id + ' · ' + NB[p.block].shape + ' ' + NB[p.block].name + ' · ' + fmt(p.dist, 1)));
+      host.appendChild(lb);
+    });
+  }
+  var judg = isJudg(), set = {};
+  (judg ? S.picks : (S.sample || [])).forEach(function (id) { set[id] = true; });
+  POP.forEach(function (p) { var cb = $('cb' + p.id); cb.checked = !!set[p.id]; cb.disabled = !judg; });
+}
+
+function renderReadout() {
+  var h = '', lastN = S.est.length;
+  if (S.msg) h += '<div class="err">' + S.msg + '</div>';
+  if (S.sample && S.sample.length) {
+    var e = estimate(POP, S.sample), yes = Math.round(e.prop * S.sample.length / 100);
+    h += 'This sample (' + S.sample.length + ' people, ' + MLABEL[S.method].toLowerCase() + '):<br>' +
+      '<strong>Sample mean:</strong> ' + fmt(e.mean) + ' min of homework per night &nbsp; ' +
+      '<strong>Sample proportion:</strong> ' + yes + ' of ' + S.sample.length + ' = ' + fmt(e.prop) + '% support the bus route.';
+    if (S.revealed) {
+      var dm = e.mean - TRUE.mean, dp = e.prop - TRUE.prop * 100;
+      h += '<br><span class="err">Off by ' + (dm >= 0 ? '+' : '') + fmt(dm) + ' min and ' + (dp >= 0 ? '+' : '') + fmt(dp) + ' percentage points.</span>';
+    } else {
+      h += '<br><span class="small">Before you reveal: do you trust this estimate? Where might it be too high or too low?</span>';
+    }
+  } else if (!S.msg) {
+    h += isJudg() ? 'Click dots to pick ' + S.n + ' people who look typical of the town, then press &ldquo;Draw a sample&rdquo;.' : 'Press &ldquo;Draw a sample&rdquo; to take your first sample. The true values stay hidden until you reveal them.';
+  }
+  $('readout').innerHTML = h;
+  $('draw').textContent = S.drawn && !isJudg() ? 'Draw another' : (isJudg() ? 'Use my picks' : 'Draw a sample');
+  $('draw').setAttribute('aria-label', $('draw').textContent === 'Draw another' ? 'Draw another sample' : $('draw').textContent);
+  $('clearpicks').style.display = isJudg() ? '' : 'none';
+  $('repeat').disabled = false;
+}
+
+function renderTruth() {
+  var b = $('truthbox'), r = $('reveal');
+  r.setAttribute('aria-pressed', S.revealed ? 'true' : 'false');
+  r.textContent = S.revealed ? 'Hide the true values' : 'Reveal the true values';
+  if (!S.revealed) { b.style.display = 'none'; b.innerHTML = ''; return; }
+  var h = '<div class="truth"><strong>True values for all 200 people:</strong> average ' + fmt(TRUE.mean) + ' min of homework per night; ' + fmt(TRUE.prop * 100) + '% support the new bus route.' +
+    '<div class="scroll" style="margin-top:6px"><table><tr><th class="l">Neighborhood</th><th>People</th><th>Average minutes</th><th>% support</th></tr>';
+  TRUE.blocks.forEach(function (x, i) {
+    h += '<tr><td class="l">' + NB[i].shape + ' ' + NB[i].name + '</td><td>' + x.n + '</td><td>' + fmt(x.mean) + '</td><td>' + fmt(x.prop * 100) + '%</td></tr>';
+  });
+  h += '</table></div></div>';
+  b.style.display = ''; b.innerHTML = h;
+}
+
+function niceTicks(lo, hi) {
+  var span = hi - lo, step = Math.pow(10, Math.floor(Math.log(span / 5) / Math.LN10)), err = span / 5 / step;
+  step *= err >= 7 ? 10 : err >= 3 ? 5 : err >= 1.5 ? 2 : 1;
+  var t = [], v = Math.ceil(lo / step) * step;
+  for (; v <= hi + 1e-9; v += step) t.push(Math.round(v * 1000) / 1000);
+  return t;
+}
+
+function renderStrip() {
+  var svg = $('strip'); svg.innerHTML = '';
+  var vals = S.est.map(function (e) { return S.stat === 'mean' ? e.mean : e.prop; });
+  var tv = S.revealed ? truthVal() : null;
+  var L = 24, R = 616, base = 146;
+  if (!vals.length) {
+    var t0 = el('text', { x: 320, y: 90, 'text-anchor': 'middle', 'font-size': 13, fill: '#6b7a99' }, svg);
+    t0.textContent = 'Draw a sample (or repeat 100 times) to start the dot strip.';
+    return;
+  }
+  var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  if (tv !== null) { lo = Math.min(lo, tv); hi = Math.max(hi, tv); }
+  if (S.stat === 'prop') { lo = Math.max(0, lo); hi = Math.min(100, hi); }
+  var pad = Math.max((hi - lo) * 0.08, S.stat === 'mean' ? 2 : 4); lo -= pad; hi += pad;
+  if (S.stat === 'prop') { lo = Math.max(0, lo); hi = Math.min(100, hi); }
+  var X = function (v) { return L + (v - lo) / (hi - lo) * (R - L); };
+  var nb = 30, bw = (hi - lo) / nb, bins = {}, maxS = 1;
+  vals.forEach(function (v) { var k = Math.min(nb - 1, Math.floor((v - lo) / bw)); bins[k] = (bins[k] || 0) + 1; if (bins[k] > maxS) maxS = bins[k]; });
+  var d = Math.min(9, 110 / maxS), cnt = {};
+  el('line', { x1: L, y1: base, x2: R, y2: base, stroke: '#6b7a99', 'stroke-width': 1.5 }, svg);
+  niceTicks(lo, hi).forEach(function (v) {
+    el('line', { x1: X(v), y1: base, x2: X(v), y2: base + 5, stroke: '#6b7a99' }, svg);
+    var tt = el('text', { x: X(v), y: base + 17, 'text-anchor': 'middle', 'font-size': 10, fill: '#6b7a99' }, svg);
+    tt.textContent = S.stat === 'mean' ? v : v + '%';
+  });
+  var ax = el('text', { x: 320, y: 196, 'text-anchor': 'middle', 'font-size': 10.5, fill: '#1a2340' }, svg);
+  ax.textContent = 'Sample estimate: ' + statName() + (S.stat === 'mean' ? ' (minutes)' : ' (%)');
+  vals.forEach(function (v) {
+    var k = Math.min(nb - 1, Math.floor((v - lo) / bw)); cnt[k] = (cnt[k] || 0) + 1;
+    var cx = L + (k + 0.5) * bw / (hi - lo) * (R - L);
+    el('circle', { cx: cx, cy: base - d / 2 - (cnt[k] - 1) * d - 1, r: d / 2 - 0.5, fill: '#0E1C42', stroke: '#fff', 'stroke-width': 0.5 }, svg);
+  });
+  var m = mean(vals), mx = X(m);
+  el('path', { d: 'M' + (mx - 6) + ' ' + (base + 24) + ' L' + (mx + 6) + ' ' + (base + 24) + ' L' + mx + ' ' + (base + 12) + ' Z', fill: '#2196D0', stroke: '#0E1C42', 'stroke-width': 1 }, svg);
+  if (tv !== null) {
+    var tx = X(tv);
+    el('line', { x1: tx, y1: 14, x2: tx, y2: base, stroke: '#C7922C', 'stroke-width': 2.5, 'stroke-dasharray': '6 4' }, svg);
+    el('path', { d: 'M' + tx + ' 6 L' + (tx + 5) + ' 12 L' + tx + ' 18 L' + (tx - 5) + ' 12 Z', fill: '#C7922C', stroke: '#0E1C42' }, svg);
+    var lab = el('text', { x: tx + (tx > 480 ? -9 : 9), y: 14, 'text-anchor': tx > 480 ? 'end' : 'start', 'font-size': 11, 'font-weight': 700, fill: '#8a5f0f' }, svg);
+    lab.textContent = 'True value ' + fmt(tv) + (S.stat === 'mean' ? '' : '%');
+  } else {
+    var h = el('text', { x: R, y: 14, 'text-anchor': 'end', 'font-size': 10.5, fill: '#6b7a99' }, svg);
+    h.textContent = 'True value hidden until you reveal';
+  }
+  svg.setAttribute('aria-label', 'Dot strip of ' + vals.length + ' sample estimates of the ' + statName() + ', from ' + fmt(Math.min.apply(null, vals)) + ' to ' + fmt(Math.max.apply(null, vals)));
+}
+
+function renderStats() {
+  var vals = S.est.map(function (e) { return S.stat === 'mean' ? e.mean : e.prop; });
+  var tv = S.revealed ? truthVal() : null;
+  if (!vals.length) { $('stats').innerHTML = ''; return; }
+  var s = summarize(vals, tv), u = unit();
+  var h = '<div class="stat">Estimates<b>' + s.count + '</b></div>' +
+    '<div class="stat">Mean of the estimates<b>' + fmt(s.mean) + u + '</b></div>' +
+    '<div class="stat">Spread (std. deviation)<b>' + (s.count > 1 ? fmt(s.sd) + u : 'needs 2 or more') + '</b></div>';
+  if (tv !== null) {
+    h += '<div class="stat">Bias (mean of estimates minus true)<b>' + (s.bias >= 0 ? '+' : '') + fmt(s.bias) + u + '</b>' + (s.verdict === 'single' ? 'one estimate so far' : s.verdict) + '</div>';
+  } else {
+    h += '<div class="stat">Bias<b>hidden</b>reveal the true values to see it</div>';
+  }
+  $('stats').innerHTML = h;
+}
+
+function renderNotice() {
+  var vals = S.est.map(function (e) { return S.stat === 'mean' ? e.mean : e.prop; }), u = unit(), h = '<strong>What to notice:</strong> ';
+  if (!vals.length) { $('notice').innerHTML = h + 'Draw a sample, or press &ldquo;Repeat 100 times&rdquo;, and a comment based on your numbers will appear here.'; return; }
+  var s = summarize(vals, S.revealed ? truthVal() : null), name = MLABEL[S.method];
+  if (vals.length < 2) {
+    h += S.revealed ? 'One sample gave ' + fmt(vals[0]) + u + ' against a true value of ' + fmt(truthVal()) + u + '. One draw cannot show whether a method is biased. Repeat it 100 times to see where its estimates center.' :
+      'One sample gave ' + fmt(vals[0]) + u + '. One draw cannot tell you whether the method is fair. Draw more samples, then reveal the true values.';
+  } else if (!S.revealed) {
+    h += 'Across ' + s.count + ' samples the estimates ran from ' + fmt(s.min) + u + ' to ' + fmt(s.max) + u + ', centered near ' + fmt(s.mean) + u + '. Press &ldquo;Reveal the true values&rdquo; to see whether that center is the truth.';
+  } else {
+    var ab = Math.abs(s.bias);
+    h += 'With ' + name.toLowerCase() + ' at n = ' + S.n + ', your ' + s.count + ' estimates averaged ' + fmt(s.mean) + u + '. ';
+    if (s.verdict === 'about right') h += 'That is ' + fmt(ab) + u + ' ' + (s.bias >= 0 ? 'above' : 'below') + ' the true value (' + fmt(truthVal()) + u + '), a gap about the size chance alone would produce, so this method looks centered on the truth. Individual samples still wander by about ' + fmt(s.sd) + u + '.';
+    else h += 'That is ' + fmt(ab) + u + ' ' + (s.bias > 0 ? 'above' : 'below') + ' the true value (' + fmt(truthVal()) + u + '), more than chance alone explains: estimates are ' + s.verdict + '. This is bias, a systematic miss in one direction. Taking more samples does not remove it, and neither does a larger n: bias comes from how people were chosen, not from sample size. Try n = 60 and watch the center.';
+  }
+  if (isJudg()) h += ' (For a judgment sample, one person&rsquo;s picks do not vary by chance, so the dots show only the picks you have tried.)';
+  $('notice').innerHTML = h;
+}
+
+var CMP_METHODS = ['srs', 'strat', 'cluster', 'system', 'quota', 'conv'];
+function doCompare() {
+  var rows = [];
+  CMP_METHODS.forEach(function (m) {
+    var est = simulate(POP, m, S.n, 100, Math.random);
+    rows.push({ key: m, mean: summarize(est.map(function (e) { return e.mean; }), TRUE.mean), prop: summarize(est.map(function (e) { return e.prop; }), TRUE.prop * 100) });
+  });
+  S.cmp = { n: S.n, rows: rows };
+  renderCompare();
+}
+var SHAPES = ['circle', 'square', 'tri', 'diamond', 'cross', 'star'];
+function marker(svg, shape, x, y, col) {
+  var r = 6;
+  if (shape === 'circle') el('circle', { cx: x, cy: y, r: r, fill: col, stroke: '#fff' }, svg);
+  else if (shape === 'square') el('rect', { x: x - r, y: y - r, width: 2 * r, height: 2 * r, fill: col, stroke: '#fff' }, svg);
+  else if (shape === 'tri') el('path', { d: 'M' + x + ' ' + (y - r - 1) + ' L' + (x + r + 1) + ' ' + (y + r) + ' L' + (x - r - 1) + ' ' + (y + r) + ' Z', fill: col, stroke: '#fff' }, svg);
+  else if (shape === 'diamond') el('path', { d: 'M' + x + ' ' + (y - r - 1) + ' L' + (x + r + 1) + ' ' + y + ' L' + x + ' ' + (y + r + 1) + ' L' + (x - r - 1) + ' ' + y + ' Z', fill: col, stroke: '#fff' }, svg);
+  else if (shape === 'cross') el('path', { d: 'M' + (x - r) + ' ' + (y - r) + ' L' + (x + r) + ' ' + (y + r) + ' M' + (x + r) + ' ' + (y - r) + ' L' + (x - r) + ' ' + (y + r), stroke: col, 'stroke-width': 3.5, fill: 'none' }, svg);
+  else el('path', { d: 'M' + x + ' ' + (y - r - 1) + ' L' + (x + 2) + ' ' + (y - 2) + ' L' + (x + r + 1) + ' ' + (y - 1) + ' L' + (x + 3) + ' ' + (y + 2) + ' L' + (x + 4) + ' ' + (y + r + 1) + ' L' + x + ' ' + (y + 4) + ' L' + (x - 4) + ' ' + (y + r + 1) + ' L' + (x - 3) + ' ' + (y + 2) + ' L' + (x - r - 1) + ' ' + (y - 1) + ' L' + (x - 2) + ' ' + (y - 2) + ' Z', fill: col, stroke: '#fff' }, svg);
+}
+function renderCompare() {
+  var box = $('cmpbox');
+  if (!S.cmp) { if (box.querySelector('table')) box.innerHTML = '<p class="small">Runs 100 draws for each method at the current n and compares the estimates you are tracking.</p>'; return; }
+  var key = S.stat, u = unit(), rows = S.cmp.rows, tv = truthVal(), rv = S.revealed;
+  var h = '<p class="small" style="margin:8px 0 6px">100 draws per method at n = ' + S.cmp.n + ', tracking the ' + statName() + '. ' + (rv ? '' : 'Reveal the true values to see the bias column and the true line.') + '</p>' +
+    '<div class="scroll"><table><tr><th class="l">Method</th><th>Mean of estimates</th><th>Spread (SD)</th><th>Bias</th></tr>';
+  rows.forEach(function (r) {
+    var s = r[key];
+    h += '<tr><td class="l">' + MLABEL[r.key] + '</td><td>' + fmt(s.mean) + u + '</td><td>' + fmt(s.sd) + u + '</td><td>' + (rv ? (s.bias >= 0 ? '+' : '') + fmt(s.bias) + u + ' (' + s.verdict + ')' : 'hidden') + '</td></tr>';
+  });
+  h += '<tr><td class="l">Pick people yourself</td><td colspan="3">' + (S.est.length && S.method === 'judg' ? 'Your pick: ' + fmt(S.est[S.est.length - 1][key]) + u + (rv ? ' (' + (S.est[S.est.length - 1][key] - tv >= 0 ? '+' : '') + fmt(S.est[S.est.length - 1][key] - tv) + u + ' from the truth)' : '') : 'Repeats are not meaningful: your picks are the same each time. Choose that method and draw to see your pick.') + '</td></tr></table></div>' +
+    '<svg id="cmpsvg" viewBox="0 0 640 ' + (rows.length * 28 + 56) + '" role="img" style="margin-top:8px"></svg>';
+  if (rv) {
+    var ord = rows.slice().sort(function (a, b) { return Math.abs(a[key].bias) - Math.abs(b[key].bias); });
+    h += '<p class="small">Smallest miss: ' + MLABEL[ord[0].key] + ' (' + (ord[0][key].bias >= 0 ? '+' : '') + fmt(ord[0][key].bias) + u + '). Largest miss: ' + MLABEL[ord[ord.length - 1].key] + ' (' + (ord[ord.length - 1][key].bias >= 0 ? '+' : '') + fmt(ord[ord.length - 1][key].bias) + u + ').</p>';
+  }
+  box.innerHTML = h;
+  var svg = $('cmpsvg'), lo = Infinity, hi = -Infinity;
+  rows.forEach(function (r) { lo = Math.min(lo, r[key].mean - r[key].sd); hi = Math.max(hi, r[key].mean + r[key].sd); });
+  if (rv) { lo = Math.min(lo, tv); hi = Math.max(hi, tv); }
+  var pd = (hi - lo) * 0.06 || 1; lo -= pd; hi += pd;
+  var L = 150, R = 626, X = function (v) { return L + (v - lo) / (hi - lo) * (R - L); }, top = 20;
+  svg.setAttribute('aria-label', 'Mean of estimates plus and minus one standard deviation for each method');
+  niceTicks(lo, hi).forEach(function (v) {
+    el('line', { x1: X(v), y1: top - 4, x2: X(v), y2: top + rows.length * 28, stroke: '#E3E8F2' }, svg);
+    var tt = el('text', { x: X(v), y: top + rows.length * 28 + 14, 'text-anchor': 'middle', 'font-size': 10, fill: '#6b7a99' }, svg); tt.textContent = key === 'mean' ? v : v + '%';
+  });
+  rows.forEach(function (r, i) {
+    var y = top + 14 + i * 28, s = r[key];
+    var t = el('text', { x: 4, y: y + 4, 'font-size': 11, fill: '#1a2340' }, svg); t.textContent = MLABEL[r.key].replace(/ \(.*\)/, '');
+    el('line', { x1: X(s.mean - s.sd), y1: y, x2: X(s.mean + s.sd), y2: y, stroke: '#0E1C42', 'stroke-width': 2.5 }, svg);
+    marker(svg, SHAPES[i], X(s.mean), y, '#0E1C42');
+  });
+  if (rv) {
+    el('line', { x1: X(tv), y1: top - 6, x2: X(tv), y2: top + rows.length * 28, stroke: '#C7922C', 'stroke-width': 2.5, 'stroke-dasharray': '6 4' }, svg);
+    var lt = el('text', { x: X(tv), y: 10, 'text-anchor': 'middle', 'font-size': 10.5, 'font-weight': 700, fill: '#8a5f0f' }, svg); lt.textContent = 'True ' + fmt(tv);
+  }
+  var cap = el('text', { x: 320, y: rows.length * 28 + 50, 'text-anchor': 'middle', 'font-size': 10, fill: '#6b7a99' }, svg);
+  cap.textContent = 'Marker = mean of 100 estimates; bar = one standard deviation either side';
+}
+
+function doBig() {
+  S.method = 'conv'; $('method').value = 'conv'; S.revealed = true;
+  var a = simulate(POP, 'conv', 20, 100, Math.random), b = simulate(POP, 'conv', 60, 100, Math.random);
+  S.big = { a: a, b: b };
+  S.n = 60; $('nrange').value = 60; $('nval').textContent = 60;
+  S.est = b; S.sample = sampleConvenience(POP, 60, Math.random); S.drawn = true; S.cmp = null; S.picks = S.picks.slice(0, 60); S.msg = '';
+  renderAll(); $('cmpbox').innerHTML = '<p class="small">Compare-all results cleared because n changed. Press the button again if you want them at n = 60.</p>';
+}
+function renderBig() {
+  var box = $('bigbox');
+  if (!S.big) { box.innerHTML = ''; return; }
+  var key = S.stat, tv = truthVal(), u = unit();
+  var sa = summarize(S.big.a.map(function (e) { return e[key]; }), tv), sb = summarize(S.big.b.map(function (e) { return e[key]; }), tv);
+  var f = function (s) { return (s.bias >= 0 ? '+' : '') + fmt(s.bias) + u; };
+  box.innerHTML = '<div class="truth" style="margin-top:8px"><strong>Convenience sampling, 100 draws each (' + statName() + ', true value ' + fmt(tv) + u + ')</strong>' +
+    '<div class="scroll"><table style="margin-top:6px"><tr><th>Sample size</th><th>Mean of estimates</th><th>Spread (SD)</th><th>Bias</th></tr>' +
+    '<tr><td>n = 20</td><td>' + fmt(sa.mean) + u + '</td><td>' + fmt(sa.sd) + u + '</td><td>' + f(sa) + '</td></tr>' +
+    '<tr><td>n = 60</td><td>' + fmt(sb.mean) + u + '</td><td>' + fmt(sb.sd) + u + '</td><td>' + f(sb) + '</td></tr></table></div>' +
+    '<p class="small" style="margin-top:6px">' + (Math.abs(sb.bias) < 0.5 * Math.abs(sa.bias) ? 'Here the larger sample cut the bias by more than half, but compare the true value to the center before deciding what that means. ' : 'The bias did not go away with the larger sample (' + f(sa) + ' became ' + f(sb) + '). ') +
+    'Spread ' + (sb.sd < sa.sd ? 'shrank' : 'did not shrink') + ' (' + fmt(sa.sd) + u + ' to ' + fmt(sb.sd) + u + '): a bigger sample makes the guess steadier, not truer.</p></div>';
+}
+
+function renderAll() {
+  renderDesc(); renderGrid(); renderList(); renderReadout(); renderTruth(); renderStrip(); renderStats(); renderNotice(); renderCompare(); renderBig();
+}
+
+function init() {
+  var sel = $('method');
+  METHODS.forEach(function (m) { var o = document.createElement('option'); o.value = m.key; o.textContent = m.label; sel.appendChild(o); });
+  buildGrid();
+  sel.addEventListener('change', function () { S.method = sel.value; resetEst(); renderAll(); });
+  $('nrange').addEventListener('input', function () { S.n = +this.value; $('nval').textContent = S.n; resetEst(); renderAll(); });
+  function setStat(k) { S.stat = k; $('stat-mean').setAttribute('aria-pressed', k === 'mean'); $('stat-prop').setAttribute('aria-pressed', k === 'prop'); renderAll(); }
+  $('stat-mean').addEventListener('click', function () { setStat('mean'); });
+  $('stat-prop').addEventListener('click', function () { setStat('prop'); });
+  $('draw').addEventListener('click', doDraw);
+  $('repeat').addEventListener('click', doRepeat);
+  $('clearpicks').addEventListener('click', function () { S.picks = []; S.sample = null; S.msg = ''; renderAll(); });
+  $('reveal').addEventListener('click', function () { S.revealed = !S.revealed; renderAll(); });
+  $('compare').addEventListener('click', doCompare);
+  $('big').addEventListener('click', doBig);
+  $('reset').addEventListener('click', function () {
+    S = { method: 'srs', n: 20, stat: 'mean', revealed: false, sample: null, picks: [], est: [], cmp: null, big: null, drawn: false, lastPickKey: '', msg: '' };
+    $('method').value = 'srs'; $('nrange').value = 20; $('nval').textContent = 20;
+    $('stat-mean').setAttribute('aria-pressed', 'true'); $('stat-prop').setAttribute('aria-pressed', 'false');
+    $('cmpbox').innerHTML = '<p class="small">Runs 100 draws for each method at the current n and compares the estimates you are tracking.</p>';
+    renderAll();
+  });
+  renderAll();
+}
+init();
+</script>
+</body>
+</html>

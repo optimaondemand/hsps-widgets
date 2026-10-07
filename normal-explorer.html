@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Normal Explorer — Shade the Bell</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #EEF1F8; color: #1a2340; padding: 8px; }
+  h1 { text-align: center; color: #0E1C42; font-size: 1.3rem; margin-bottom: 2px; }
+  .subtitle { text-align: center; color: #6b7a99; font-size: 0.82rem; margin-bottom: 10px; }
+  .wrap { max-width: 700px; margin: 0 auto; }
+  .panel { background: #fff; border: 2px solid #D0D9E8; border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  .lab { font-size: 0.72rem; font-weight: 700; color: #C7922C; text-transform: uppercase; letter-spacing: 0.05em; }
+  .btn { font-family: inherit; padding: 5px 10px; border: 2px solid #0E1C42; border-radius: 8px; background: #fff; color: #0E1C42; font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+  .btn:hover { background: #F8FAFD; }
+  .btn[aria-pressed="true"] { background: #0E1C42; color: #fff; }
+  .seg { display: flex; flex-wrap: wrap; border: 2px solid #0E1C42; border-radius: 8px; overflow: hidden; }
+  .seg .btn { border: none; border-radius: 0; }
+  .seg .btn + .btn { border-left: 2px solid #0E1C42; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #55C8E8; outline-offset: 2px; }
+  select, input[type=number] { font-family: inherit; padding: 4px 6px; border: 2px solid #D0D9E8; border-radius: 6px; font-size: 0.82rem; color: #1a2340; background: #fff; }
+  input[type=number] { width: 78px; }
+  .field { display: flex; align-items: center; gap: 5px; font-size: 0.82rem; font-weight: 700; color: #0E1C42; }
+  .sl { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 0.82rem; font-weight: 700; color: #0E1C42; }
+  .sl input[type=range] { flex: 1; min-width: 120px; }
+  .sl .val { min-width: 150px; text-align: right; font-weight: 600; color: #1a2340; font-variant-numeric: tabular-nums; }
+  svg { width: 100%; height: auto; display: block; touch-action: none; }
+  .readout { background: #FDF3E3; border: 2px solid #C7922C; border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+  .readout .big { font-size: 1.5rem; font-weight: 800; color: #0E1C42; font-variant-numeric: tabular-nums; }
+  .readout .small { font-size: 0.82rem; color: #1a2340; line-height: 1.5; }
+  code { font-family: Consolas, 'Courier New', monospace; background: #E8F6FB; border-radius: 4px; padding: 1px 5px; font-size: 0.8rem; color: #0E1C42; }
+  .note { font-size: 0.78rem; color: #6b7a99; line-height: 1.45; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  th, td { border: 1px solid #D0D9E8; padding: 4px 6px; text-align: center; }
+  th { background: #E8F6FB; color: #0E1C42; }
+  .hide { display: none !important; }
+  .hint { background: #E8F6FB; border-left: 4px solid #55C8E8; border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Normal Explorer</h1>
+  <div class="subtitle">Shade areas under the bell curve. All scenarios and datasets here are made up for practice.</div>
+
+  <div class="panel">
+    <div class="row">
+      <span class="lab">Mode</span>
+      <div class="seg" role="group" aria-label="Mode">
+        <button class="btn" id="m-area" aria-pressed="true">Shade an area</button>
+        <button class="btn" id="m-rule" aria-pressed="false">Empirical rule</button>
+        <button class="btn" id="m-fit" aria-pressed="false">Fit check</button>
+      </div>
+    </div>
+    <div class="row" id="paramRow">
+      <label class="field" for="scen">Scenario
+        <select id="scen">
+          <option value="quiz">Quiz scores (made up)</option>
+          <option value="fill">Cereal box fill, grams (made up)</option>
+          <option value="height">Heights, cm (made up)</option>
+          <option value="custom">My own numbers</option>
+        </select>
+      </label>
+      <label class="field" for="mu">Mean <input type="number" id="mu" step="any" value="75"></label>
+      <label class="field" for="sd">SD <input type="number" id="sd" step="any" min="0.0001" value="10"></label>
+    </div>
+    <div class="row hide" id="dataRow">
+      <label class="field" for="dset">Dataset (simulated, n = 200)
+        <select id="dset">
+          <option value="bell">Set 1</option>
+          <option value="skew">Set 2</option>
+          <option value="two">Set 3</option>
+          <option value="heavy">Set 4</option>
+        </select>
+      </label>
+      <button class="btn" id="reveal" aria-pressed="false">Show what kind of data this is</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <svg id="chart" viewBox="0 0 700 300" role="img" aria-label="Normal curve chart"></svg>
+  </div>
+
+  <!-- AREA MODE CONTROLS -->
+  <div class="panel" id="areaCtl">
+    <div class="row">
+      <span class="lab">Shade</span>
+      <div class="seg" role="group" aria-label="Shade type">
+        <button class="btn" id="s-below" aria-pressed="true">Below a</button>
+        <button class="btn" id="s-above" aria-pressed="false">Above a</button>
+        <button class="btn" id="s-between" aria-pressed="false">Between a and b</button>
+      </div>
+    </div>
+    <div class="row">
+      <label class="sl" for="ra">a <input type="range" id="ra" min="-80" max="80" step="1" value="-20"> <span class="val" id="va"></span></label>
+    </div>
+    <div class="row" id="rbRow">
+      <label class="sl" for="rb">b <input type="range" id="rb" min="-80" max="80" step="1" value="20"> <span class="val" id="vb"></span></label>
+    </div>
+    <div class="note">You can also drag the gold handles on the curve. Sliders move in steps of 0.05 standard deviations.</div>
+  </div>
+
+  <div class="readout" id="areaOut" aria-live="polite"></div>
+
+  <div class="panel" id="pctPanel">
+    <div class="row">
+      <span class="lab">Work backward</span>
+      <label class="field" for="pct">Percent of values below <input type="number" id="pct" min="0.01" max="99.99" step="any" value="90"> %</label>
+      <button class="btn" id="pctGo">Find the cutoff</button>
+    </div>
+    <div class="small note" id="pctOut" aria-live="polite"></div>
+  </div>
+
+  <!-- RULE MODE -->
+  <div class="panel hide" id="ruleCtl">
+    <div class="row">
+      <span class="lab">Bands</span>
+      <label class="field"><input type="checkbox" id="b1" checked> within 1 SD</label>
+      <label class="field"><input type="checkbox" id="b2" checked> within 2 SD</label>
+      <label class="field"><input type="checkbox" id="b3" checked> within 3 SD</label>
+    </div>
+  </div>
+  <div class="readout hide" id="ruleOut"></div>
+
+  <!-- FIT MODE -->
+  <div class="panel hide" id="fitOut"></div>
+
+  <div class="panel note" id="foot">
+    The spreadsheet function that does the same job as the shaded area is <code>NORM.DIST</code>. The readout shows the exact formula for the numbers on screen.
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- math ----------
+  function phi(z) { return Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI); }
+  // Standard normal CDF by Maclaurin series (accurate to ~1e-12 for |z| <= 8)
+  function Phi(z) {
+    if (z < -8) return 0;
+    if (z > 8) return 1;
+    var term = z, sum = z, n = 0;
+    while (Math.abs(term) > 1e-16 && n < 400) {
+      n++;
+      term = term * z * z / (2 * n + 1);
+      sum += term;
+    }
+    return 0.5 + phi(z) * sum;
+  }
+  function PhiInv(p) {
+    var lo = -8, hi = 8, mid;
+    for (var i = 0; i < 80; i++) {
+      mid = (lo + hi) / 2;
+      if (Phi(mid) < p) lo = mid; else hi = mid;
+    }
+    return (lo + hi) / 2;
+  }
+  function fmt(x, d) {
+    if (!isFinite(x)) return '—';
+    var s = x.toFixed(d);
+    if (/^-0(\.0*)?$/.test(s)) s = s.slice(1);
+    return s;
+  }
+  function pct(p, d) { return fmt(p * 100, d === undefined ? 2 : d) + '%'; }
+  function niceDigits(sd) { return sd >= 10 ? 1 : sd >= 1 ? 2 : sd >= 0.1 ? 3 : 4; }
+
+  // ---------- seeded simulated datasets ----------
+  function rng(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function gauss(r) {
+    var u = 0, v = 0;
+    while (u === 0) u = r();
+    v = r();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+  var DATASETS = {
+    bell: { what: 'Simulated from a true normal model (mean 100, SD 15). A bell fits because it was built as one.', unit: 'value',
+      make: function (r) { var a = [], i; for (i = 0; i < 200; i++) a.push(100 + 15 * gauss(r)); return a; } },
+    skew: { what: 'Simulated income-like values: a few very large ones stretch a long right tail (made-up, in thousands of dollars).', unit: 'value',
+      make: function (r) { var a = [], i; for (i = 0; i < 200; i++) a.push(Math.exp(3.6 + 0.65 * gauss(r))); return a; } },
+    two: { what: 'Simulated from two different groups mixed together: one centered near 40, one near 80.', unit: 'value',
+      make: function (r) { var a = [], i; for (i = 0; i < 200; i++) a.push(r() < 0.5 ? 40 + 6 * gauss(r) : 80 + 6 * gauss(r)); return a; } },
+    heavy: { what: 'Simulated: mostly bell-shaped (mean 50, SD 6), but about 1 value in 12 comes from a much wider spread, so some extreme values appear.', unit: 'value',
+      make: function (r) { var a = [], i; for (i = 0; i < 200; i++) a.push(r() < 0.085 ? 50 + 30 * gauss(r) : 50 + 6 * gauss(r)); return a; } }
+  };
+  var dataCache = {};
+  function getData(key) {
+    if (!dataCache[key]) {
+      var seeds = { bell: 11, skew: 23, two: 37, heavy: 41 };
+      dataCache[key] = DATASETS[key].make(rng(seeds[key]));
+    }
+    return dataCache[key];
+  }
+
+  // ---------- state ----------
+  var SC = { quiz: [75, 10, 'score'], fill: [500, 4, 'grams'], height: [170, 8, 'cm'] };
+  var S = { mode: 'area', mu: 75, sd: 10, shade: 'below', ka: -20, kb: 20, dset: 'bell', reveal: false };
+  var $ = function (id) { return document.getElementById(id); };
+  var svg = $('chart');
+
+  // ---------- chart helpers ----------
+  var W = 700, H = 300, ML = 30, MR = 20, MT = 24, MB = 42;
+  function sx(x, lo, hi) { return ML + (x - lo) / (hi - lo) * (W - ML - MR); }
+  function sy(y) { return H - MB - y * (H - MB - MT); }   // y in 0..1
+  function curvePath(mu, sd, lo, hi, x1, x2, ymax) {
+    var pts = [], n = 160, i, x, y;
+    for (i = 0; i <= n; i++) {
+      x = x1 + (x2 - x1) * i / n;
+      y = phi((x - mu) / sd) / sd / ymax;
+      pts.push([sx(x, lo, hi), sy(y)]);
+    }
+    return pts;
+  }
+  function pathStr(pts) { return pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' '); }
+  function areaPath(mu, sd, lo, hi, x1, x2, ymax) {
+    var pts = curvePath(mu, sd, lo, hi, x1, x2, ymax);
+    return pathStr(pts) + ' L' + sx(x2, lo, hi).toFixed(1) + ' ' + sy(0).toFixed(1) + ' L' + sx(x1, lo, hi).toFixed(1) + ' ' + sy(0).toFixed(1) + ' Z';
+  }
+  function axis(mu, sd, lo, hi, ticksZ, labelZ) {
+    var s = '<line x1="' + ML + '" y1="' + sy(0) + '" x2="' + (W - MR) + '" y2="' + sy(0) + '" stroke="#0E1C42" stroke-width="1.5"/>';
+    var d = niceDigits(sd);
+    ticksZ.forEach(function (z) {
+      var x = mu + z * sd;
+      if (x < lo || x > hi) return;
+      var px = sx(x, lo, hi);
+      s += '<line x1="' + px + '" y1="' + sy(0) + '" x2="' + px + '" y2="' + (sy(0) + 5) + '" stroke="#0E1C42"/>';
+      s += '<text x="' + px + '" y="' + (sy(0) + 18) + '" text-anchor="middle" font-size="11" fill="#1a2340">' + fmt(x, d) + '</text>';
+      if (labelZ) s += '<text x="' + px + '" y="' + (sy(0) + 32) + '" text-anchor="middle" font-size="10" fill="#6b7a99">z = ' + fmt(z, 0) + '</text>';
+    });
+    return s;
+  }
+  var ZT = [-4, -3, -2, -1, 0, 1, 2, 3, 4];
+
+  // ---------- AREA MODE ----------
+  function xOf(k) { return S.mu + k / 20 * S.sd; }
+  function renderArea() {
+    var mu = S.mu, sd = S.sd, lo = mu - 4 * sd, hi = mu + 4 * sd, ymax = 1 / (sd * Math.sqrt(2 * Math.PI));
+    var ka = S.ka, kb = S.kb;
+    var a = xOf(ka), b = xOf(kb), za = ka / 20, zb = kb / 20;
+    var x1, x2, p, lines = '';
+    if (S.shade === 'below') { x1 = lo; x2 = a; p = Phi(za); }
+    else if (S.shade === 'above') { x1 = a; x2 = hi; p = 1 - Phi(za); }
+    else {
+      var l = Math.min(a, b), h = Math.max(a, b);
+      x1 = l; x2 = h; p = Math.abs(Phi(zb) - Phi(za));
+    }
+    var out = '';
+    out += '<path d="' + areaPath(mu, sd, lo, hi, Math.max(lo, Math.min(x1, x2)), Math.min(hi, Math.max(x1, x2)), ymax) + '" fill="#55C8E8" fill-opacity="0.55"/>';
+    out += '<path d="' + pathStr(curvePath(mu, sd, lo, hi, lo, hi, ymax)) + '" fill="none" stroke="#0E1C42" stroke-width="2.5"/>';
+    out += axis(mu, sd, lo, hi, ZT, true);
+    // mean line
+    out += '<line x1="' + sx(mu, lo, hi) + '" y1="' + sy(0) + '" x2="' + sx(mu, lo, hi) + '" y2="' + sy(1) + '" stroke="#6b7a99" stroke-dasharray="4 4"/>';
+    out += '<text x="' + (sx(mu, lo, hi) + 4) + '" y="' + (MT - 8) + '" font-size="11" fill="#6b7a99">mean</text>';
+    function handle(name, x, k) {
+      var px = sx(x, lo, hi), py = sy(phi((x - mu) / sd) / sd / ymax);
+      return '<line x1="' + px + '" y1="' + sy(0) + '" x2="' + px + '" y2="' + py + '" stroke="#C7922C" stroke-width="2"/>' +
+        '<circle class="h" data-h="' + name + '" cx="' + px + '" cy="' + py + '" r="9" fill="#C7922C" stroke="#fff" stroke-width="2" style="cursor:ew-resize"/>' +
+        '<text x="' + px + '" y="' + (py - 13) + '" text-anchor="middle" font-size="13" font-weight="700" fill="#8a5f12">' + name + '</text>';
+    }
+    out += handle('a', a, ka);
+    if (S.shade === 'between') out += handle('b', b, kb);
+    svg.innerHTML = out;
+
+    var d = niceDigits(sd), ex = '', pw = '';
+    var m = fmt(mu, 4).replace(/\.?0+$/, ''), s = fmt(sd, 4).replace(/\.?0+$/, '');
+    var A = fmt(a, d), B = fmt(b, d);
+    var txt, formula;
+    if (S.shade === 'below') {
+      txt = 'P(X &lt; ' + A + ')'; formula = '=NORM.DIST(' + A + ', ' + m + ', ' + s + ', TRUE)';
+    } else if (S.shade === 'above') {
+      txt = 'P(X &gt; ' + A + ')'; formula = '=1-NORM.DIST(' + A + ', ' + m + ', ' + s + ', TRUE)';
+    } else {
+      var lA = fmt(Math.min(a, b), d), hB = fmt(Math.max(a, b), d);
+      txt = 'P(' + lA + ' &lt; X &lt; ' + hB + ')';
+      formula = '=NORM.DIST(' + hB + ', ' + m + ', ' + s + ', TRUE)-NORM.DIST(' + lA + ', ' + m + ', ' + s + ', TRUE)';
+    }
+    var zs = 'z<sub>a</sub> = (' + A + ' − ' + m + ') ÷ ' + s + ' = <b>' + fmt(za, 2) + '</b>';
+    if (S.shade === 'between') zs += ' &nbsp;&nbsp; z<sub>b</sub> = (' + B + ' − ' + m + ') ÷ ' + s + ' = <b>' + fmt(zb, 2) + '</b>';
+    $('areaOut').innerHTML =
+      '<div class="small">Shaded area (the fraction of values in the shaded region)</div>' +
+      '<div class="big">' + txt + ' = ' + fmt(p, 4) + ' &nbsp;(' + pct(p, 2) + ')</div>' +
+      '<div class="small">' + zs + '</div>' +
+      '<div class="small">Spreadsheet: <code>' + formula + '</code></div>';
+    $('va').textContent = 'x = ' + A + ' (z = ' + fmt(za, 2) + ')';
+    $('vb').textContent = 'x = ' + B + ' (z = ' + fmt(zb, 2) + ')';
+  }
+
+  function doPct() {
+    var v = parseFloat($('pct').value);
+    var o = $('pctOut');
+    if (!(v > 0 && v < 100)) { o.textContent = 'Enter a percent between 0 and 100 (not including either end).'; return; }
+    var z = PhiInv(v / 100), x = S.mu + z * S.sd, d = niceDigits(S.sd);
+    var m = fmt(S.mu, 4).replace(/\.?0+$/, ''), s = fmt(S.sd, 4).replace(/\.?0+$/, '');
+    o.innerHTML = v + '% of values fall below <b>' + fmt(x, d) + '</b> (z = ' + fmt(z, 3) + '). Spreadsheet: <code>=NORM.INV(' + fmt(v / 100, 4).replace(/\.?0+$/, '') + ', ' + m + ', ' + s + ')</code>';
+    if (Math.abs(z) <= 4) {
+      S.shade = 'below'; S.ka = Math.round(z * 20); syncShadeButtons(); $('ra').value = S.ka;
+      renderArea();
+      o.innerHTML += ' The chart now shades below the nearest slider step.';
+    } else {
+      o.innerHTML += ' That cutoff is beyond 4 standard deviations, off the chart.';
+    }
+  }
+
+  // ---------- RULE MODE ----------
+  function renderRule() {
+    var mu = S.mu, sd = S.sd, lo = mu - 4 * sd, hi = mu + 4 * sd, ymax = 1 / (sd * Math.sqrt(2 * Math.PI));
+    var out = '', d = niceDigits(sd);
+    var bands = [[3, '#D0D9E8', 'b3'], [2, '#9fdcef', 'b2'], [1, '#55C8E8', 'b1']];
+    bands.forEach(function (b) {
+      if ($(b[2]).checked) out += '<path d="' + areaPath(mu, sd, lo, hi, mu - b[0] * sd, mu + b[0] * sd, ymax) + '" fill="' + b[1] + '" fill-opacity="0.8"/>';
+    });
+    out += '<path d="' + pathStr(curvePath(mu, sd, lo, hi, lo, hi, ymax)) + '" fill="none" stroke="#0E1C42" stroke-width="2.5"/>';
+    out += axis(mu, sd, lo, hi, ZT, true);
+    [[1, '68%', 0.62], [2, '95%', 0.30], [3, '99.7%', 0.10]].forEach(function (b, i) {
+      if (!$('b' + b[0]).checked) return;
+      var y = sy(b[2]);
+      out += '<line x1="' + sx(mu - b[0] * sd, lo, hi) + '" y1="' + y + '" x2="' + sx(mu + b[0] * sd, lo, hi) + '" y2="' + y + '" stroke="#C7922C" stroke-width="2"/>' +
+        '<text x="' + sx(mu, lo, hi) + '" y="' + (y - 4) + '" text-anchor="middle" font-size="12" font-weight="700" fill="#8a5f12">about ' + b[1] + '</text>';
+    });
+    svg.innerHTML = out;
+    var rows = '';
+    [1, 2, 3].forEach(function (k) {
+      var ex = Phi(k) - Phi(-k);
+      rows += '<tr><td>' + k + ' SD</td><td>' + fmt(mu - k * sd, d) + ' to ' + fmt(mu + k * sd, d) + '</td><td>' + ['68%', '95%', '99.7%'][k - 1] + '</td><td>' + pct(ex, 2) + '</td></tr>';
+    });
+    $('ruleOut').innerHTML =
+      '<table><tr><th>Within</th><th>Values from … to</th><th>Rule says about</th><th>Exact for a normal model</th></tr>' + rows + '</table>' +
+      '<div class="small" style="margin-top:6px">The rule is a rounded version of the exact areas. The leftover (the tails) is split evenly on both sides.</div>';
+  }
+
+  // ---------- FIT MODE ----------
+  function renderFit() {
+    var data = getData(S.dset), n = data.length, i;
+    var mean = 0, v = 0, mn = Infinity, mx = -Infinity;
+    for (i = 0; i < n; i++) { mean += data[i]; mn = Math.min(mn, data[i]); mx = Math.max(mx, data[i]); }
+    mean /= n;
+    for (i = 0; i < n; i++) v += (data[i] - mean) * (data[i] - mean);
+    var sd = Math.sqrt(v / (n - 1));
+    var lo = Math.min(mn, mean - 3.5 * sd), hi = Math.max(mx, mean + 3.5 * sd);
+    var nb = 22, bw = (hi - lo) / nb, counts = [], k;
+    for (k = 0; k < nb; k++) counts.push(0);
+    data.forEach(function (x) { var j = Math.min(nb - 1, Math.floor((x - lo) / bw)); counts[j]++; });
+    var dens = counts.map(function (c) { return c / n / bw; });
+    var ymax = Math.max(Math.max.apply(null, dens), 1 / (sd * Math.sqrt(2 * Math.PI))) * 1.1;
+    var out = '';
+    dens.forEach(function (dv, j) {
+      var x1 = sx(lo + j * bw, lo, hi), x2 = sx(lo + (j + 1) * bw, lo, hi);
+      out += '<rect x="' + (x1 + 1) + '" y="' + sy(dv / ymax) + '" width="' + (x2 - x1 - 2) + '" height="' + (sy(0) - sy(dv / ymax)) + '" fill="#9fdcef" stroke="#2a8fb0"/>';
+    });
+    var pts = curvePath(mean, sd, lo, hi, lo, hi, 1);
+    var cp = [], m = 160;
+    for (i = 0; i <= m; i++) { var x = lo + (hi - lo) * i / m; cp.push([sx(x, lo, hi), sy(phi((x - mean) / sd) / sd / ymax)]); }
+    out += '<path d="' + pathStr(cp) + '" fill="none" stroke="#C0392B" stroke-width="2.5"/>';
+    out += axis(mean, sd, lo, hi, [-4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, -5, -6], false);
+    out += '<text x="' + (W - MR) + '" y="' + (MT - 6) + '" text-anchor="end" font-size="12" fill="#C0392B" font-weight="700">red: normal curve with this data\'s mean and SD</text>';
+    svg.innerHTML = out;
+
+    var rows = '';
+    [1, 2, 3].forEach(function (kk) {
+      var c = 0;
+      data.forEach(function (x) { if (Math.abs(x - mean) <= kk * sd) c++; });
+      var pred = [0.6827, 0.9545, 0.9973][kk - 1];
+      var diff = c / n - pred;
+      rows += '<tr><td>within ' + kk + ' SD</td><td>' + c + ' of ' + n + ' (' + pct(c / n, 1) + ')</td><td>' + pct(pred, 1) + '</td><td>' + (diff >= 0 ? '+' : '−') + fmt(Math.abs(diff) * 100, 1) + ' pts</td></tr>';
+    });
+    // skewness (moment) for a hint
+    var m3 = 0; data.forEach(function (x) { m3 += Math.pow((x - mean) / sd, 3); }); m3 /= n;
+    var median = data.slice().sort(function (a, b) { return a - b; });
+    median = (median[n / 2 - 1] + median[n / 2]) / 2;
+    var html = '<div class="row"><span class="lab">Does the bell fit?</span></div>' +
+      '<div class="small" style="font-size:0.82rem">mean = <b>' + fmt(mean, 1) + '</b>, median = <b>' + fmt(median, 1) + '</b>, SD = <b>' + fmt(sd, 1) + '</b>, smallest = ' + fmt(mn, 1) + ', largest = ' + fmt(mx, 1) + '</div>' +
+      '<table style="margin:6px 0"><tr><th></th><th>Actual in the data</th><th>Normal model predicts</th><th>Gap</th></tr>' + rows + '</table>' +
+      '<div class="hint">Look at the shape first, then the table. A normal curve can match the mean and SD of a dataset and still be the wrong picture of it. Ask: is the histogram roughly symmetric? Is it one hump? Do the percentages above agree with the model?</div>';
+    if (S.reveal) html += '<div class="hint" style="margin-top:6px;background:#FDF3E3;border-color:#C7922C"><b>What this was:</b> ' + DATASETS[S.dset].what + '</div>';
+    $('fitOut').innerHTML = html;
+  }
+
+  // ---------- wiring ----------
+  function syncShadeButtons() {
+    ['below', 'above', 'between'].forEach(function (k) { $('s-' + k).setAttribute('aria-pressed', S.shade === k ? 'true' : 'false'); });
+    $('rbRow').classList.toggle('hide', S.shade !== 'between');
+  }
+  function setMode(m) {
+    S.mode = m;
+    ['area', 'rule', 'fit'].forEach(function (k) { $('m-' + k).setAttribute('aria-pressed', S.mode === k ? 'true' : 'false'); });
+    $('paramRow').classList.toggle('hide', m === 'fit');
+    $('dataRow').classList.toggle('hide', m !== 'fit');
+    $('areaCtl').classList.toggle('hide', m !== 'area');
+    $('areaOut').classList.toggle('hide', m !== 'area');
+    $('pctPanel').classList.toggle('hide', m !== 'area');
+    $('ruleCtl').classList.toggle('hide', m !== 'rule');
+    $('ruleOut').classList.toggle('hide', m !== 'rule');
+    $('fitOut').classList.toggle('hide', m !== 'fit');
+    $('foot').classList.toggle('hide', m === 'fit');
+    render();
+  }
+  function render() {
+    if (S.mode === 'area') renderArea();
+    else if (S.mode === 'rule') renderRule();
+    else renderFit();
+  }
+  function readParams() {
+    var m = parseFloat($('mu').value), s = parseFloat($('sd').value);
+    if (isFinite(m)) S.mu = m;
+    if (isFinite(s) && s > 0) S.sd = s;
+  }
+
+  $('m-area').onclick = function () { setMode('area'); };
+  $('m-rule').onclick = function () { setMode('rule'); };
+  $('m-fit').onclick = function () { setMode('fit'); };
+  ['below', 'above', 'between'].forEach(function (k) {
+    $('s-' + k).onclick = function () { S.shade = k; syncShadeButtons(); render(); };
+  });
+  $('ra').oninput = function () { S.ka = parseInt(this.value, 10); render(); };
+  $('rb').oninput = function () { S.kb = parseInt(this.value, 10); render(); };
+  $('mu').oninput = function () { $('scen').value = 'custom'; readParams(); render(); };
+  $('sd').oninput = function () { $('scen').value = 'custom'; readParams(); render(); };
+  $('scen').onchange = function () {
+    var v = this.value;
+    if (SC[v]) { $('mu').value = SC[v][0]; $('sd').value = SC[v][1]; }
+    readParams(); render();
+  };
+  ['b1', 'b2', 'b3'].forEach(function (id) { $(id).onchange = render; });
+  $('dset').onchange = function () { S.dset = this.value; render(); };
+  $('reveal').onclick = function () {
+    S.reveal = !S.reveal; this.setAttribute('aria-pressed', S.reveal ? 'true' : 'false'); render();
+  };
+  $('pctGo').onclick = doPct;
+  $('pct').addEventListener('keydown', function (e) { if (e.key === 'Enter') doPct(); });
+
+  // dragging the handles
+  var dragging = null;
+  function svgPoint(e) {
+    var r = svg.getBoundingClientRect();
+    return (e.clientX - r.left) / r.width * W;
+  }
+  svg.addEventListener('pointerdown', function (e) {
+    if (S.mode !== 'area') return;
+    var t = e.target;
+    if (t && t.getAttribute && t.getAttribute('data-h')) {
+      dragging = t.getAttribute('data-h');
+      svg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }
+  });
+  svg.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var lo = S.mu - 4 * S.sd, hi = S.mu + 4 * S.sd;
+    var px = svgPoint(e);
+    var x = lo + (px - ML) / (W - ML - MR) * (hi - lo);
+    var k = Math.max(-80, Math.min(80, Math.round((x - S.mu) / S.sd * 20)));
+    if (dragging === 'a') { S.ka = k; $('ra').value = k; } else { S.kb = k; $('rb').value = k; }
+    renderArea();
+  });
+  function endDrag() { dragging = null; }
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+
+  syncShadeButtons();
+  render();
+})();
+</script>
+</body>
+</html>
