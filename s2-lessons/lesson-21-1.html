@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 21.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 7</div>
+        <div style="font-size: 12px; color: #666;">Data &amp; Data Displays</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 21.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">Honesty</div>
+        <div style="font-size: 12px; color: #666;">Representing data truthfully</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 21.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Bivariate Displays</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Two numbers for every individual &mdash; and two new pictures to see how they relate.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Scatter plots, line graphs, and the language of association</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work the examples alongside the text, practice the Desmos entries, and complete the three activities at the bottom. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> identify the explanatory and response variables in a question about two numerical variables.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> draw a scatter plot and describe it by direction, form, strength, and unusual points.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> draw a line graph for a quantity measured over time and describe how it changes.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain, in a sentence, why an association in data does not by itself show causation.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook, pencil, and graph paper.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128279; WHEN EACH INDIVIDUAL HAS TWO NUMBERS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Until now every display has described <em>one</em> variable at a time. But some of the best questions in statistics involve two: Do students who study more score higher? Does a drink cool at a steady rate? Is a higher price tied to fewer sales? These questions need <strong>bivariate</strong> data &mdash; two variables recorded for each individual &mdash; and two new displays: the <strong>scatter plot</strong> and the <strong>line graph</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Bivariate data raises a new kind of question. With one variable we ask <em>what is typical and what is spread out</em>. With two we ask <em>how are they related</em>? Today you learn to <em>see</em> a relationship; Module 10 teaches you to measure and model it.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; EXPLANATORY AND RESPONSE VARIABLES</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When we suspect that one variable helps explain another, we call the first the <strong>explanatory variable</strong> and the second the <strong>response variable</strong>. In &ldquo;Do students who study more score higher?&rdquo;, hours studied is the explanatory variable and the quiz score is the response. The explanatory variable goes on the <strong>horizontal</strong> axis and the response on the <strong>vertical</strong> axis &mdash; always, so that readers know which way to look.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">A word of care, because it is this module's honesty at work: calling a variable <em>explanatory</em> is a statement about how we are <em>asking the question</em>. It does not claim that it <em>causes</em> the response. We return to that gap below.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128309; THE SCATTER PLOT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>scatter plot</strong> draws one point for each individual: its position across is the explanatory value, its height up is the response. Here is a small, <strong>made-up</strong> dataset &mdash; hours studied and quiz score (out of 100) for ten students:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Student</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">1</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">2</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">3</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">5</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">6</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">7</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">8</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">9</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">10</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Hours studied</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Quiz score</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">52</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">60</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">58</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">66</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">70</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">68</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">76</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">80</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">79</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">88</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed example for teaching &mdash; not real survey results.</em> Each column is one student: student 1 studied 1 hour and scored 52.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Hours Studied and Quiz Score (constructed data)</strong></div>
+<div style="display: flex; justify-content: center;"><div style="width: 56px; position: relative; height: 190px;"><div style="position: absolute; right: 6px; bottom: 0.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">40</div><div style="position: absolute; right: 6px; bottom: 33.3%; transform: translateY(50%); font-size: 12px; color: #1a2340;">60</div><div style="position: absolute; right: 6px; bottom: 66.7%; transform: translateY(50%); font-size: 12px; color: #1a2340;">80</div><div style="position: absolute; right: 6px; bottom: 100.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">100</div></div><div><div style="position: relative; width: 380px; height: 190px; border-left: 2px solid #0E1C42; border-bottom: 2px solid #0E1C42; background: #FAFBFD;"><div style="position: absolute; left: 14.3%; bottom: 20.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 14.3%; bottom: 33.3%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 28.6%; bottom: 30.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 35.7%; bottom: 43.3%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 42.9%; bottom: 50.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 50.0%; bottom: 46.7%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 57.1%; bottom: 60.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 64.3%; bottom: 66.7%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 71.4%; bottom: 65.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 85.7%; bottom: 80.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div></div><div style="position: relative; width: 380px; height: 18px;"><div style="position: absolute; left: 0.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">0</div><div style="position: absolute; left: 14.3%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">1</div><div style="position: absolute; left: 28.6%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">2</div><div style="position: absolute; left: 42.9%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">3</div><div style="position: absolute; left: 57.1%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">4</div><div style="position: absolute; left: 71.4%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">5</div><div style="position: absolute; left: 85.7%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">6</div><div style="position: absolute; left: 100.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">7</div></div></div></div><div style="font-size: 13px; color: #666; text-align: center;">Horizontal: hours studied &middot; Vertical: quiz score (out of 100)</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>How to describe a scatter plot.</strong> Use four words, in this order:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Direction.</strong> Do the points rise from left to right (<strong>positive association</strong>), fall (<strong>negative association</strong>), or show no clear tilt?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Form.</strong> Do they follow a straight line, a curve, or no shape?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Strength.</strong> How tightly do they cling to that form &mdash; closely (strong), loosely (weak)?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Unusual points.</strong> Is any point far from the pattern (an <strong>outlier</strong>), or are there clusters?</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Here: the points rise from left to right, they follow a roughly straight line, and they cling to it fairly closely &mdash; a <strong>positive, roughly linear, fairly strong</strong> association, with no obvious outliers. (Week 28 gives &ldquo;strong&rdquo; a number.) Two other patterns for comparison:</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127912; TWO MORE PATTERNS</div>
+        <div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Price and Number Sold (constructed data)</strong></div>
+<div style="display: flex; justify-content: center;"><div style="width: 56px; position: relative; height: 190px;"><div style="position: absolute; right: 6px; bottom: 0.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">20</div><div style="position: absolute; right: 6px; bottom: 25.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">40</div><div style="position: absolute; right: 6px; bottom: 50.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">60</div><div style="position: absolute; right: 6px; bottom: 75.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">80</div><div style="position: absolute; right: 6px; bottom: 100.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">100</div></div><div><div style="position: relative; width: 380px; height: 190px; border-left: 2px solid #0E1C42; border-bottom: 2px solid #0E1C42; background: #FAFBFD;"><div style="position: absolute; left: 20.0%; bottom: 93.8%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 30.0%; bottom: 85.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 40.0%; bottom: 75.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 50.0%; bottom: 63.7%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 60.0%; bottom: 57.5%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 70.0%; bottom: 40.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 80.0%; bottom: 33.8%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 90.0%; bottom: 22.5%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div></div><div style="position: relative; width: 380px; height: 18px;"><div style="position: absolute; left: 0.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">0</div><div style="position: absolute; left: 20.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">2</div><div style="position: absolute; left: 40.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">4</div><div style="position: absolute; left: 60.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">6</div><div style="position: absolute; left: 80.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">8</div><div style="position: absolute; left: 100.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">10</div></div></div></div><div style="font-size: 13px; color: #666; text-align: center;">Horizontal: price in dollars &middot; Vertical: number sold</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Negative, roughly linear, strong:</strong> as the price rises, the number sold falls steadily.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Two Unrelated Quantities (constructed data)</strong></div>
+<div style="display: flex; justify-content: center;"><div style="width: 56px; position: relative; height: 190px;"><div style="position: absolute; right: 6px; bottom: 0.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">0</div><div style="position: absolute; right: 6px; bottom: 50.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">5</div><div style="position: absolute; right: 6px; bottom: 100.0%; transform: translateY(50%); font-size: 12px; color: #1a2340;">10</div></div><div><div style="position: relative; width: 380px; height: 190px; border-left: 2px solid #0E1C42; border-bottom: 2px solid #0E1C42; background: #FAFBFD;"><div style="position: absolute; left: 11.1%; bottom: 50.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 22.2%; bottom: 20.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 33.3%; bottom: 70.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 44.4%; bottom: 30.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 55.6%; bottom: 80.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 66.7%; bottom: 40.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 77.8%; bottom: 60.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 88.9%; bottom: 50.0%; width: 10px; height: 10px; margin: 0 0 -5px -5px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div></div><div style="position: relative; width: 380px; height: 18px;"><div style="position: absolute; left: 0.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">0</div><div style="position: absolute; left: 33.3%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">3</div><div style="position: absolute; left: 66.7%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">6</div><div style="position: absolute; left: 100.0%; transform: translateX(-50%); font-size: 12px; color: #1a2340; padding-top: 2px;">9</div></div></div></div><div style="font-size: 13px; color: #666; text-align: center;">Horizontal: first quantity &middot; Vertical: second quantity</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>No clear association:</strong> the points scatter without a tilt, so knowing the first quantity tells us almost nothing about the second.</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#9888;&#65039; ASSOCIATION IS NOT CAUSATION</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">Seeing a pattern in a scatter plot shows that two variables are <strong>associated</strong>. It does <strong>not</strong> by itself show that one <em>causes</em> the other. In the study-hours plot it is very plausible that studying helps &mdash; but the plot alone cannot rule out a third factor, such as how motivated each student is. A famous classroom example: in a (made-up) town, monthly ice-cream sales and monthly swimming-pool visits rise and fall together. Neither causes the other; hot weather lifts both. Whenever you describe a relationship in this course, say &ldquo;is associated with,&rdquo; not &ldquo;causes,&rdquo; unless the data came from a carefully designed experiment (Module 11).</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; THE LINE GRAPH</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When the explanatory variable is <strong>time</strong> &mdash; the same thing measured again and again &mdash; we usually connect the points in time order. The result is a <strong>line graph</strong>, and its purpose is to show <em>change</em>. A cup of tea is measured every 2 minutes after it is poured (<em>constructed</em> values):</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Minutes</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">0</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">2</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">6</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">8</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">10</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Temperature (&deg;C)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">90</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">78</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">70</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">64</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">60</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">57</td></tr>
+</tbody></table></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Tea Temperature After Pouring (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 420 200" width="420" height="200" role="img" aria-label="Tea Temperature After Pouring (constructed data)" style="max-width: 100%; height: auto;"><line x1="48" y1="12" x2="48" y2="170" stroke="#0E1C42" stroke-width="2"/><line x1="48" y1="170" x2="406" y2="170" stroke="#0E1C42" stroke-width="2"/><text x="43" y="174.0" font-size="11" text-anchor="end" fill="#1a2340">40</text><line x1="48" y1="170.0" x2="406" y2="170.0" stroke="#E3E8F2"/><text x="43" y="121.3" font-size="11" text-anchor="end" fill="#1a2340">60</text><line x1="48" y1="117.3" x2="406" y2="117.3" stroke="#E3E8F2"/><text x="43" y="68.7" font-size="11" text-anchor="end" fill="#1a2340">80</text><line x1="48" y1="64.7" x2="406" y2="64.7" stroke="#E3E8F2"/><text x="43" y="16.0" font-size="11" text-anchor="end" fill="#1a2340">100</text><line x1="48" y1="12.0" x2="406" y2="12.0" stroke="#E3E8F2"/><text x="48.0" y="184" font-size="11" text-anchor="middle" fill="#1a2340">0</text><text x="119.6" y="184" font-size="11" text-anchor="middle" fill="#1a2340">2</text><text x="191.2" y="184" font-size="11" text-anchor="middle" fill="#1a2340">4</text><text x="262.8" y="184" font-size="11" text-anchor="middle" fill="#1a2340">6</text><text x="334.4" y="184" font-size="11" text-anchor="middle" fill="#1a2340">8</text><text x="406.0" y="184" font-size="11" text-anchor="middle" fill="#1a2340">10</text><polyline points="48.0,38.3 119.6,69.9 191.2,91.0 262.8,106.8 334.4,117.3 406.0,125.2" fill="none" stroke="#2196D0" stroke-width="2.5"/><circle cx="48.0" cy="38.3" r="3.5" fill="#0E1C42"/><circle cx="119.6" cy="69.9" r="3.5" fill="#0E1C42"/><circle cx="191.2" cy="91.0" r="3.5" fill="#0E1C42"/><circle cx="262.8" cy="106.8" r="3.5" fill="#0E1C42"/><circle cx="334.4" cy="117.3" r="3.5" fill="#0E1C42"/><circle cx="406.0" cy="125.2" r="3.5" fill="#0E1C42"/></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Horizontal: minutes since poured &middot; Vertical: temperature in &deg;C</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Reading it.</strong> The temperature falls the whole time, but not at a steady rate: it drops 12&deg; in the first two minutes and only 3&deg; in the last two (the drops are 12, 8, 6, 4, 3). The line is steep at first, then flattens &mdash; the <em>shape</em> of the cooling, which no single number would show.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Two rules for honest line graphs.</strong> First, connect points only when the order matters and in-between values make sense (time, distance). Do not connect the points of a scatter plot like the study-hours data &mdash; there is no &ldquo;in between&rdquo; student. Second, space the points by the <strong>true</strong> time gaps; Lesson 21.2 shows what goes wrong when they are not.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; A SHORT WEEK FOR CALCULATORS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            Desmos Scientific does not draw scatter plots, so today's plots are drawn by hand on graph paper (or in the Excel lab in Lesson 21.3). Use Desmos for the arithmetic that describes them. The tea fell from 90&deg; to 57&deg; in 10 minutes: the average drop per minute is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(57-90)/10</code> &rarr; &minus;3.3. And the drop between two readings is a subtraction you can see: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">78-90</code> &rarr; &minus;12.<br /><br /><strong>Excel</strong> will draw the plots for you in Lesson 21.3; the skill there is not the button-clicking but checking that the chart is honest.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Paste the table of hours studied and quiz scores above into an AI tool and ask it to describe the pattern in the scatter plot: direction, form, strength, and any unusual points.<br />
+            <strong>Predict.</strong> Sketch the plot first (or use the picture above) and write your own four-word description before you read the AI's.<br />
+            <strong>Verify.</strong> Compare. Does the AI say <em>positive</em>? Does it say anything about form and strength? Look hard for the moment it slips from &ldquo;is associated with&rdquo; to &ldquo;causes&rdquo; or &ldquo;leads to&rdquo; &mdash; and mark it. A language tool cannot see the plot unless you give it the numbers, so ask it to say which numbers it used.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Plot and Describe</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Eight summer days (<em>constructed</em>): temperature in &deg;F and cups of lemonade sold &mdash; 60&deg;F, 20 cups; 65&deg;F, 28 cups; 70&deg;F, 31 cups; 75&deg;F, 45 cups; 80&deg;F, 52 cups; 85&deg;F, 60 cups; 90&deg;F, 71 cups; 95&deg;F, 75 cups. Identify the explanatory and response variables, then draw the scatter plot on graph paper with labeled axes.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Describe it in four words: direction, form, strength, and unusual points. Then write one sentence on why the plot alone does not prove that heat <em>causes</em> lemonade sales.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Explanatory: temperature (horizontal). Response: cups sold (vertical). The points rise left to right and follow a roughly straight line closely: positive, roughly linear, strong, no obvious outliers. The plot shows association; it cannot rule out other factors (a festival on the hottest days, for instance), and a lemonade stand is not an experiment.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Draw the Growth Line</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A seedling's height in centimeters, measured weekly (<em>constructed</em>): week 0: 2, week 1: 4, week 2: 7, week 3: 11, week 4: 14, week 5: 16, week 6: 17. Draw the line graph with time on the horizontal axis.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute the growth in each week (week-to-week differences) and say, in one sentence, when the seedling grew fastest and when it slowed.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Weekly growth: 2, 3, 4, 3, 2, 1 centimeters. It grew fastest in week 3 (4 cm, from week 2 to week 3) and slowed after that, so the line is steepest in the middle and flatter at the end.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Which Display?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Choose scatter plot, line graph, or neither (and name a better display) for each: (a) hours of sleep and reaction time for 40 students; (b) the price of a stock each day for a month; (c) favorite music genre for 40 students; (d) the heights of 40 students; (e) a town's population every 10 years.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For (a), say which variable is explanatory and why you chose it.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) Scatter plot (two numerical variables, each individual measured on both). (b) Line graph (one quantity over time). (c) Neither: a bar chart (categorical). (d) Neither: a histogram or stem-and-leaf plot (one numerical variable). (e) Line graph (over time), with points spaced by the true 10-year gaps. For (a), sleep is the natural explanatory variable and reaction time the response; the choice reflects the question, not a claim of cause.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 21.1 &mdash; Plot the Pairs</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: scatter plots, a line graph, describing associations, and the association-versus-causation habit. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 21.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on scatter plots, line graphs, and the language of association.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 21.2 &mdash; Misleading Displays</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Every display so far was drawn honestly. Tomorrow you learn to spot the ones that are not.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 21.1 &middot; Bivariate Displays</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

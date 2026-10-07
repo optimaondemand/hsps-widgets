@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 26.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 9</div>
+        <div style="font-size: 12px; color: #666;">The Normal Distribution</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 26.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Wonder</div>
+        <div style="font-size: 12px; color: #666;">Order emerging from randomness</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 26.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">When the Normal Model Is the Wrong Model</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A beautiful model is still only a model, and a model can be wrong.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Checking a normal model: shape, mean versus median, the 68&ndash;95&ndash;99.7 comparison, impossible values, outliers and heavy tails; why matching the mean and SD proves nothing</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example before you open its check, explore the widget (and commit to your guesses before the reveal), follow the Excel steps, and complete the four activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> check whether a normal model fits a dataset by looking at its shape, comparing the mean with the median, and comparing the actual percents within 1, 2, and 3 SD with 68, 95, and 99.7.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> spot the warning signs that a normal model is the wrong model: impossible values, outliers and heavy tails, skew, and two clusters.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why matching a dataset&rsquo;s mean and SD does not make it normal, and why these checks are judgments rather than a pass-or-fail test.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use Excel (AVERAGE, MEDIAN, STDEV.S, COUNTIFS) to run the checks on a list of values.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil. Sketch the histogram you imagine whenever a problem describes a dataset.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; WONDER: THE MODEL THAT IS TOO BEAUTIFUL TO TRUST BLINDLY</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Last week you met something remarkable. Give a normal model a mean and an SD and it hands back percents, cutoffs, and counts: 68, 95, 99.7, and everything in between. The same curve describes fill weights, measurement errors, and quiz scores. It is one of the most beautiful ideas in statistics, and it is easy to fall in love with it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the discipline that love requires. <strong>A model is a claim about the data, and a claim can be false.</strong> The normal curve does not govern every list of numbers; it describes the lists that arise when many small, independent nudges add up. A list of repair bills, waiting times, or earnings in which a few people are far above the rest arose some other way, and a bell curve will describe it wrongly while sounding perfectly confident. A normal model fitted to such data can predict negative amounts, can claim that a range holds 95% of the values when it does not, or can name a center where almost no values sit.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">So wonder here has two halves. First, awe that the normal model fits as often as it does. Second, the honesty to ask, <em>every time</em>: does it fit <em>this</em> data? Today you will learn five ways to ask, and you will find that none of them is a mechanical test. They are the habits of a careful scholar looking at evidence. All datasets in this lesson are <strong>constructed</strong> (made up) to teach the ideas, and the widget&rsquo;s datasets are <strong>simulated</strong>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; FIVE WAYS TO ASK &ldquo;DOES THE NORMAL MODEL FIT?&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Treat these as five questions you put to the data, in roughly this order. Sketch or view a histogram first, because it often answers the whole question at a glance.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>1. Shape.</strong> Is the histogram single-humped and roughly symmetric, with the tails thinning out evenly on both sides? A pile-up at one end with a long tail on the other (skew), or two separate humps, is a strong warning.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>2. Mean versus median.</strong> In a symmetric distribution the mean and median are close. A mean well above the median suggests a long right tail pulling the mean up; a mean well below it suggests a long left tail. &ldquo;Close&rdquo; and &ldquo;well above&rdquo; are judged against the SD, not against a fixed number.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>3. The Empirical Rule check.</strong> Count the values within 1, 2, and 3 SD of the mean and turn them into percents. Compare with 68, 95, and 99.7. Small gaps are normal; large, systematic gaps are a warning.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>4. Impossible values.</strong> Compute <strong>mean &minus; 2 &times; SD</strong>. If the quantity cannot be negative (a time, a price, a count) and that number is below 0, a normal model is predicting values that cannot occur.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>5. Outliers and heavy tails.</strong> A normal model expects about 0.3% of values beyond 3 SD. If a dataset has noticeably more than that, or a value that is wildly far from the rest, the tails are heavier than the model allows.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Two cautions before the examples. <strong>No single check settles it:</strong> a dataset can pass one check and fail another, as you will see. And <strong>small datasets wobble:</strong> with 20 values, one value is 5% of the data, so percents jump in big steps even when the model is fine.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: A RIGHT-SKEWED DATASET FAILS THE CHECKS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Constructed data.</strong> A made-up list of 24 repair-bill amounts, in dollars, sorted from smallest to largest:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>8, 10, 11, 12, 12, 14, 15, 15, 16, 18, 19, 20, 22, 24, 27, 30, 34, 40, 48, 60, 75, 95, 130, 160</strong></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Question: does a normal model fit? Work the five questions.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Shape.</strong> Picture the histogram: most bills sit between 8 and 40, then a thin tail stretches out to 130 and 160. Single hump at the left, long tail to the right: <strong>right-skewed</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Mean versus median.</strong> The total is 915 and there are 24 values, so the mean is 915 &divide; 24 = 38.125, about <strong>38.1</strong>. With 24 values the median is the average of the 12th and 13th: (20 + 22) &divide; 2 = <strong>21</strong>. The mean is more than 17 above the median, a big gap next to a typical spread of about 40: a long right tail is pulling the mean up.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The rule check.</strong> The sample SD is about <strong>39.66</strong> (Excel: STDEV.S). The table below counts values within each band.</div><div style="overflow-x: auto; margin: 0 0 14px 0;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Band</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Interval (mean &plusmn; k SD)</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Values inside</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Percent inside</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #0e1c42;">Within 1 SD</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;1.5 to 77.8</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">21 of 24</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">87.5% (rule: 68%)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #0e1c42;">Within 2 SD</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;41.2 to 117.4</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">22 of 24</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">91.7% (rule: 95%)</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #0e1c42;">Within 3 SD</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;80.9 to 157.1</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">23 of 24</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">95.8% (rule: 99.7%)</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Impossible values.</strong> mean &minus; 2 &times; SD = 38.125 &minus; 2(39.66) = <strong>&minus;41.2</strong>. A repair bill cannot be negative, so a normal model with this mean and SD would assign a real share of bills to negative dollar amounts.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Outliers.</strong> The largest bill, 160, is (160 &minus; 38.125) &divide; 39.66 = about <strong>3.07 SD</strong> above the mean, beyond the 3 SD band, and 130 is about 2.3 SD above.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Verdict.</strong> Four of the five checks sound an alarm: shape, mean far above median, impossible values below zero, and a value past 3 SD. Notice that the rule check is <em>not</em> the loudest one. The percents inside 2 and 3 SD (91.7%, 95.8%) are only a few points under 95 and 99.7. The skew shows up more in the &ldquo;within 1 SD&rdquo; row (87.5%, far above 68%) and in the negative lower endpoints. This is why you ask all five questions instead of trusting one.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: A BELL-SHAPED DATASET THAT PASSES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Constructed data.</strong> Twenty-five made-up quiz scores, sorted:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>62, 66, 68, 69, 70, 71, 72, 72, 73, 74, 74, 75, 75, 76, 77, 78, 78, 79, 81, 82, 84, 86, 88, 90, 94</strong></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Shape.</strong> The scores pile up around 72 to 79, thin out on both sides, and run from 62 to 94. One hump, close to symmetric.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Mean versus median.</strong> The sum is 1,914, so the mean is 1,914 &divide; 25 = <strong>76.56</strong>. The 13th value in order is <strong>75</strong>. A gap of about 1.6 next to an SD near 7.7 is small.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The rule check.</strong> The sample SD is about <strong>7.69</strong>. Within 1 SD (68.9 to 84.3): 18 of 25, or <strong>72%</strong>. Within 2 SD (61.2 to 91.9): 24 of 25, or <strong>96%</strong>. Within 3 SD (53.5 to 99.6): 25 of 25, or <strong>100%</strong>. Compared with 68, 95, 99.7, every gap is a few points or less. With 25 values, each value is worth 4%, so 72% versus 68% is exactly one value.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Impossible values.</strong> mean &minus; 2 &times; SD = 76.56 &minus; 2(7.69) = 61.2, well above 0, so nothing here is bounded in a way the bell curve would violate.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Outliers.</strong> The smallest score, 62, is about 1.9 SD below the mean and the largest, 94, about 2.3 SD above. Nothing is wildly far from the rest.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Verdict.</strong> A normal model is a fair description of this dataset. Note the honest wording: <em>fair</em>, not <em>proven</em>. We have not shown the data are normal; we have found no evidence against the model. That is the most these checks can give you.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: TWO CLUSTERS, AND A WARNING ABOUT SUMMARY NUMBERS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Constructed data.</strong> Twenty made-up values, sorted:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>22, 24, 25, 26, 27, 28, 29, 30, 31, 32, 66, 68, 69, 70, 71, 72, 73, 74, 76, 78</strong></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Imagine the histogram first: ten values between 22 and 32, then <em>nothing</em> from 33 to 65, then ten values between 66 and 78. Two humps with a gap between them. Now the summary numbers.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Mean versus median.</strong> The sum is 991, so the mean is 991 &divide; 20 = <strong>49.55</strong>. The median is the average of the 10th and 11th values, (32 + 66) &divide; 2 = <strong>49</strong>. They nearly agree, so check 2 passes.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The rule check.</strong> The sample SD is about <strong>22.97</strong>. Within 1 SD (26.6 to 72.5): 12 of 20, or <strong>60%</strong>. Within 2 SD (3.6 to 95.5): <strong>100%</strong>. Within 3 SD: <strong>100%</strong>. The 2 SD and 3 SD rows look healthy, and 60% is not wildly far from 68%.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Impossible values.</strong> mean &minus; 2 &times; SD = 49.55 &minus; 2(22.97) = 3.6, which is above 0. Check 4 passes too.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Three of the numeric checks look fine, and the dataset is still plainly not a bell. The shape check catches it. Here is the sharpest way to see the failure: a normal model with mean 49.55 and SD 22.97 puts about <strong>34%</strong> of its values within 10 of the mean (between 39.55 and 59.55), which for 20 values is about <strong>6 or 7</strong> values. This dataset has <strong>none</strong> there. The model puts the most values exactly where this data has the fewest.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Verdict.</strong> The normal model does not fit, and the mean is not a typical value at all: it describes a spot where no one lives. The honest description is two groups, each worth its own summary.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C0392B; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; MATCHING THE MEAN AND SD DOES NOT MAKE DATA NORMAL</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Look at Examples 2 and 3 together. Example 3 has a mean of 49.55 and an SD of 22.97, and you can draw a normal curve with exactly that mean and SD over it. The curve will have the right center and the right width, and it will still be wrong, because the <em>shape</em> is wrong. The mean and SD are two numbers; the shape of a dataset is far more than two numbers. Many different shapes share the same mean and SD.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">It follows that these diagnostics can never <em>prove</em> a dataset is normal. Real data are never exactly normal. What we ask is a more modest and more useful question: <strong>is the normal model a good enough description for what I want to do with it?</strong> There is no cutoff such as &ldquo;the rule check must come within 3 points.&rdquo; Three checks might pass and one fail; a small dataset may wobble; a model that is fine for estimating the middle 68% might be bad for claims about extreme values. That judgment is yours, and it should be written down with its reasons.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>And then what?</strong> If the normal model does not fit, you do not give up on the data; you stop using the wrong tool. For skewed data you describe the center with the median and the spread with the IQR, as in Module 8, and you describe the shape in words. For two clusters you ask what separates the groups and describe each. Statistics has other models and methods built for data like this. We will not teach them here. Today the skill is the honest first step: noticing that the bell curve is the wrong model.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Normal Explorer, Fit Check</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Click the third button at the top, <em>Fit check</em>.</strong> You will see four simulated datasets, <em>Set 1</em> through <em>Set 4</em>, each with 200 values, a red normal curve, and a table comparing the actual percent within 1, 2, and 3 SD with the percent the normal model predicts. <strong>Before you press <em>Show what kind of data this is</em>:</strong> for each set, write &ldquo;bell fits&rdquo; or &ldquo;does not fit,&rdquo; with a reason that uses at least two of the five checks. For numbers beyond those in this lesson, read them from the widget. <strong>Then press the reveal button</strong> and see what each set was built to be. All data in this widget are simulated.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/normal-explorer.html" width="100%" height="900" style="border: none; display: block;" title="Normal Explorer, Fit Check" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/normal-explorer.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128161; WHAT THE REVEAL SHOWS (READ AFTER YOU HAVE COMMITTED)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When you press the reveal button, the widget tells you what each set was built to be:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Set 1</strong> is a true normal sample (mean 100, SD 15). Even so, its percents will not match 68, 95, and 99.7 exactly, because 200 values are a random sample. A few points of wobble is what a good fit <em>looks like</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Set 2</strong> is an income-like right-skewed set: mean 43.4, median 37.3, SD 27.8. Within 1, 2, and 3 SD it has <strong>78.5%</strong>, <strong>95.5%</strong>, and <strong>97.5%</strong>. Notice what that does and does not say. Within 2 SD, 95.5% is almost exactly the 95% the rule predicts, yet the model is wrong: the mean is well above the median, and mean &minus; 2 &times; SD = 43.4 &minus; 2(27.8) = <strong>&minus;12.2</strong> is below zero for a quantity that cannot be negative. The 78.5% inside 1 SD is far above 68%, and 97.5% inside 3 SD is below 99.7%. Skew pushes more values near the center and leaves a thin tail beyond.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Set 3</strong> is two clusters, near 40 and near 80. This is Example 3 again: read the mean and median from the widget and see whether they say anything about where the data actually are.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Set 4</strong> is mostly bell-shaped with heavy tails. It looks fine in the middle. Read its table and look at the red curve in the far left and right of the histogram to see where it disagrees.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A good record for this activity is not &ldquo;I got four out of four.&rdquo; It is &ldquo;here is what I noticed and why I guessed as I did, and here is what I missed.&rdquo; Misses are where you learn which check to rely on.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: RUN THE CHECKS ON A LIST, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will enter the 24 repair-bill amounts from Worked Example 1 and have Excel run the mean, median, SD, and the rule check. Keep this page open beside Excel. This workbook is practice; you do not upload it. If you keep it, save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk26_L1_YourName</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Amount</code>, press Enter. In <strong>A2</strong> type the first value, 8, press Enter, and continue down column A with the rest of the list in order: 10, 11, 12, 12, 14, 15, 15, 16, 18, 19, 20, 22, 24, 27, 30, 34, 40, 48, 60, 75, 95, 130, 160. The last value, 160, should land in <strong>A25</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code>, press Tab, then type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A25)</code> in D1 and press Enter. You should see <strong>38.125</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Median</code>, Tab, then <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(A2:A25)</code> in D2, Enter. You should see <strong>21</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C3</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">SD</code>, Tab, then <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(A2:A25)</code> in D3, Enter. You should see about <strong>39.66</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C5</strong> and type these headings across row 5, pressing Tab after each: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">k</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lower</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Upper</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Count inside</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Percent inside</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Rule says</code>. Press Enter.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>C6</strong>, <strong>C7</strong>, <strong>C8</strong> type 1, 2, 3 (one per cell). In <strong>H6</strong>, <strong>H7</strong>, <strong>H8</strong> type 68, 95, 99.7.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D6</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$D$1-C6*$D$3</code>, Enter. Click <strong>E6</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$D$1+C6*$D$3</code>, Enter. You should see about <strong>&minus;1.53</strong> and <strong>77.78</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>F6</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS($A$2:$A$25,"&gt;="&amp;D6,$A$2:$A$25,"&lt;="&amp;E6)</code>, Enter. You should see <strong>21</strong>. (COUNTIFS counts the cells in A2:A25 that are at least the lower end <em>and</em> at most the upper end.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>G6</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F6/COUNT($A$2:$A$25)</code>, Enter. You should see <strong>0.875</strong>. The percent is a decimal until you format it: after the next step, select G6:G8 and click the <strong>%</strong> button in the Number group of the Home tab (then Increase Decimal once if you want 87.5%).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Select <strong>D6:G6</strong> (click D6, hold Shift, click G6) and drag the small square at the bottom-right corner of the selection down through row 8. Rows 7 and 8 should show counts <strong>22</strong> and <strong>23</strong>, and about <strong>91.7%</strong> and <strong>95.8%</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Read it like a scholar.</strong> Compare column G with column H. Compare D1 with D2. Look at the Lower values in D7 and D8: negative. Those three observations are checks 3, 2, and 4.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Why the dollar signs?</strong> They lock the mean cell, the SD cell, and the data range so that they stay put when you copy the formulas down. <strong>Why the quotation marks and ampersands?</strong> Inside COUNTIFS, a condition such as &ldquo;at least this number&rdquo; is written as text, and the ampersand joins the symbol to the cell&rsquo;s value. Menu names differ a little between desktop Excel and Excel for the web, but typing a formula into a cell works the same in both.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; THE FIT CHECKS IN EXCEL AND DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel</strong> does the list work. With your values in A2:A25: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A25)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(A2:A25)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(A2:A25)</code>. To count the values within one SD of the mean, with the mean in D1 and the SD in D3: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS(A2:A25,"&gt;="&amp;D1-D3,A2:A25,"&lt;="&amp;D1+D3)</code>, then divide by <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A25)</code>. Change the 1 to a 2 or a 3 (type D1-2*D3 and D1+2*D3) for the wider bands.<br /><br />
+            <strong>Desmos Scientific</strong> only does plain arithmetic here, so type the numbers yourself. To test for impossible values with mean 38.125 and SD 39.66, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">38.125-2*39.66</code> and read about &minus;41.2: below zero, so a normal model predicts impossible bills. To find how far an extreme value is from the mean in SDs, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(160-38.125)/39.66</code> and read about 3.07.
+        </div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127760; WHERE THIS MATTERS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            Skewed data, such as incomes, home prices, and waiting times, are often described with the <strong>median</strong> rather than the mean, because a few very large values pull the mean upward and a normal model often fits such data poorly. When someone reports an &ldquo;average&rdquo; for this kind of data, a careful reader asks which average they meant and what the histogram looks like. The questions in this lesson are the ones a careful reader asks.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Paste this exact constructed list into an AI tool and ask: <em>&ldquo;Here are 20 measured values: 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 12, 14, 18, 25, 40, 64, 90, 120. Does a normal model fit this data? Explain how you decided.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide yourself. Picture the histogram: most values are under 20, with a long tail to 120, so <strong>right-skewed</strong>. The mean is 457 &divide; 20 = <strong>22.85</strong> and the median is (8 + 9) &divide; 2 = <strong>8.5</strong>, a huge gap. The sample SD is about <strong>32.08</strong>, so mean &minus; 2 &times; SD is about <strong>&minus;41.3</strong>: if these values cannot be negative, the model predicts impossible values. Within 1, 2, and 3 SD there are 17, 18, and 19 values: <strong>85%, 90%, 95%</strong>, versus 68, 95, 99.7. The largest value, 120, is about 3.03 SD above the mean. <strong>My diagnosis: a normal model does not fit.</strong><br />
+            <strong>Verify and grade.</strong> Did the AI look at the <em>shape</em>? Compare the <em>mean and median</em>? Run the <em>rule check</em> with actual counts? Check for <em>impossible values</em>? Or did it just say &ldquo;yes, it looks roughly normal&rdquo;? Recompute any numbers it quotes in Excel or Desmos. A weak answer says yes without checking or invents numbers; a better answer names several diagnostics and gets the arithmetic right; even a good answer should say that the checks are a judgment. Write two or three sentences grading the AI&rsquo;s diagnostic and say what you would ask next.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 55 minutes total)</div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Read the Clues</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Four constructed datasets are described below. For each, decide <strong>bell fits</strong>, <strong>does not fit</strong>, or <strong>fits in the middle but not the tails</strong>, and name the check or checks that decided it.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> A single, symmetric hump; mean 15, median 14, SD 3; about 70% within 1 SD, 95% within 2 SD, 100% within 3 SD.<br /><strong>(b)</strong> A quantity that cannot be negative; mean 60, median 35, SD 45.<br /><strong>(c)</strong> Two separate humps near 30 and 70; mean 50, median 50, SD 20.<br /><strong>(d)</strong> A symmetric hump with mean 100 and SD 15, but 6 of 200 values lie more than 3 SD from the mean.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Speak it: explain aloud to someone why check (c) cannot be settled by the mean and median alone.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) <strong>Fits</strong>: one symmetric hump, mean near median, rule check close to 68/95/99.7, and mean &minus; 3 SD = 6 is above 0. (b) <strong>Does not fit</strong>: the mean is far above the median (skew) and mean &minus; 2 &times; SD = 60 &minus; 90 = &minus;30 is impossible for a quantity that cannot be negative. (c) <strong>Does not fit</strong>: two humps, so the shape check fails; the mean and median agree only because the humps are symmetric about 50, where there are few values. (d) <strong>Fits in the middle, not in the tails</strong>: a normal model expects about 0.0027 &times; 200 = 0.54, so about 1, value beyond 3 SD, and the data have 6, so the tails are heavier than the model allows. A reasonable answer says the model is acceptable for the middle but not for claims about extremes.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Run the Check by Hand</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A constructed list of 12 values: 20, 22, 23, 24, 25, 25, 26, 27, 28, 30, 34, 46. A spreadsheet reports mean = 27.5 and sample SD = 6.91. Find the median. How does it compare with the mean?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write the intervals for 1, 2, and 3 SD (mean &plusmn; k SD). Count the values inside each and write the percents. Compare with 68, 95, 99.7.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute mean &minus; 2 &times; SD with Desmos. Then state a verdict (fits, fits roughly, or does not fit), a reason, and one caution about having only 12 values.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        The sorted values give a median of (25 + 26) &divide; 2 = <strong>25.5</strong>, a gap of 2 below the mean, small next to an SD of about 6.9. Intervals: 1 SD is 20.59 to 34.41 (10 of 12 values, <strong>83.3%</strong>; 20 falls just below and 46 above); 2 SD is 13.68 to 41.32 (11 of 12, <strong>91.7%</strong>; only 46 is outside); 3 SD is 6.77 to 48.23 (12 of 12, <strong>100%</strong>). Mean &minus; 2 &times; SD = 27.5 &minus; 2(6.91) = <strong>13.7</strong>, above zero. A reasonable verdict is <strong>fits roughly</strong>: nothing is impossible and the mean and median are close, but the value 46 is a bit isolated, so a histogram check would help. With 12 values, one value is 8.3% of the data, so the percents move in steps of about 8 points, and 83.3% versus 68% is only two values&rsquo; difference.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Commit, Then Reveal</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open the widget in <em>Fit check</em> mode. For each of Set 1 through Set 4, write your call (bell fits or does not fit) and a reason using at least two of the five checks. Use the table of actual versus predicted percents and look for where the histogram and the red curve disagree.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Only then press <em>Show what kind of data this is</em>. For each set, note whether you were right and which check you should have trusted more.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For Set 2, compute mean &minus; 2 &times; SD from the numbers in this lesson (mean 43.4, SD 27.8) in Desmos and say what it implies for a quantity that cannot be negative.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Set 1: true normal, so the model fits, and the percents will be close to the predictions but not exact. Set 2: right-skewed, so it does not fit: mean 43.4 is above median 37.3, and 43.4 &minus; 2(27.8) = <strong>&minus;12.2</strong>, so the model would predict values below zero. Set 3: two clusters near 40 and 80; the histogram shows it, while the mean can sit in the gap between the clusters. Set 4: mostly bell with heavy tails; the middle is fine and the tails are where the model fails. It is easy to call Set 4 a good fit from the histogram alone. Honest answers record what they noticed and what they missed.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Report It Honestly</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A constructed report on made-up neighborhood home sale prices says: mean $410 thousand, median $330 thousand, SD $260 thousand. Prices cannot be negative. Use two of the five checks to decide whether a normal model with this mean and SD is sensible.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate says: &ldquo;Normal models fit everything, so I will tell people 95% of prices are between mean &minus; 2 SD and mean + 2 SD.&rdquo; Write two or three sentences replying, and say what you would report instead.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Optional: a normal model with this mean and SD would put about 5.7% of homes below zero. Check that with a z-score, z = (0 &minus; 410) &divide; 260, and Excel&rsquo;s <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.DIST(-1.58,TRUE)</code>.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Mean ($410k) is far above median ($330k): a right-skewed pattern. Mean &minus; 2 &times; SD = 410 &minus; 520 = <strong>&minus;110</strong> thousand dollars, an impossible price. So the normal model is not sensible here. Reply: the 95% claim is false because the interval would begin below zero, and the data are probably skewed. Report the median and describe the spread with the IQR (and the shape in words) rather than a normal interval. For the optional part, z = &minus;410 &divide; 260 = &minus;1.577, and the exact share below zero is about 5.7%, so a normal model would put about 1 home in 17 at a negative price; NORM.S.DIST(&minus;1.58, TRUE) is about 0.057.
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 26.1 &mdash; Does the Bell Fit?</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Diagnosing fit from descriptions and numbers, a rule check on a constructed list, an Excel part answered as text, an applied report, and an AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 26.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the mean-versus-median clue, the rule check, impossible values, two clusters, and what matching a mean and SD does and does not show.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 26.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will see where a bell shape can come from, by connecting counting successes to the normal curve.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 26.1 &middot; When the Normal Model Is the Wrong Model</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

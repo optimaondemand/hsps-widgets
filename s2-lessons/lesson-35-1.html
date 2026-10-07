@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 35.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 35.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Using numbers to help a community decide</div>
+    </div></div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 35.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">The Logic of Hypothesis Testing: Two Schools Revisited</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A hypothesis test is a decision rule you write down before you see the data, and every rule can fail in exactly two ways.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">The null and alternative hypotheses, the significance level, the p-value, the language of &ldquo;reject&rdquo; and &ldquo;fail to reject,&rdquo; Type I and Type II errors, power, and how the frequentist and Bayesian schools ask different questions</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, follow the Excel steps, and complete the three activities at the bottom. The reading and Excel steps take about 40 minutes and the activities about 35 more, so plan on about 75 minutes in all.</div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> state a null and an alternative hypothesis, fix the significance level before looking at data, and report a decision in the correct language: <strong>reject</strong> or <strong>fail to reject</strong> the null, never &ldquo;accept&rdquo; and never &ldquo;prove.&rdquo;</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> define a <strong>Type I error</strong> (a false alarm) and a <strong>Type II error</strong> (a miss), and compute the Type I rate and the <strong>power</strong> of a coin-flip decision rule with exact binomial arithmetic or Excel.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain how sample size, the size of the real effect, and the significance level change the power of a test.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> say what a frequentist test and a Bayesian analysis each answer, and why the two can disagree, as in Lindley&rsquo;s paradox.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will grade its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Before the season starts, a made-up school referee, Ms. Okoro, must decide whether to keep using the old school coin. She cannot flip forever, so she writes a rule on an index card <em>before</em> she flips: &ldquo;Flip 100 times. If I see 61 or more heads, or 39 or fewer, I will replace the coin. Otherwise I keep it.&rdquo; Then she flips and gets 60 heads. Keep the coin or replace it? By her own card, she keeps it, even though 60 heads looks suspicious. Why did she write the rule first? And how often will this rule lead her to throw away a perfectly good coin, or to keep a bad one?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Those two questions are the heart of today. In Week 34 you asked, <em>how surprising is this result if nothing is going on?</em> You did it by shuffling and by simulating fair coins. Today we put that habit into its formal skeleton, with names for each part, a rule fixed in advance, and an honest count of the ways the rule can fail. Then we step back and ask what the test does <em>not</em> tell us, and how that connects to the two schools of probability you met in Semester 1.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, shows up in the rule on the card. A rule written in advance protects the people who depend on your decision (a team, a council, a clinic) from a decision bent by what you hoped to find. And knowing the two ways a rule can fail lets you tell them honestly what a &ldquo;keep&rdquo; or a &ldquo;replace&rdquo; is worth.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every coin, spinner, group, and study in this lesson is <strong>constructed</strong> (made up) to teach the idea. Nothing here is real data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; THE SKELETON OF A HYPOTHESIS TEST</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A hypothesis test is the same set of moves you used in Week 34, with each part given a name and the rule fixed ahead of time. Here is the whole skeleton.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>1. State the claims.</strong> The <strong>null hypothesis</strong> (written H<sub>0</sub>) is the boring world: no difference, no effect, a fair coin. The <strong>alternative hypothesis</strong> (written H<sub>a</sub>) is what you suspect instead: the coin is not fair, the treatment does change something.<br />&#9654; <strong>2. Fix the rule before the data.</strong> Choose the <strong>significance level</strong> (the usual 5%), and whether you will count extremes on one side or both, <em>before</em> you look. The significance level is the false-alarm rate you are willing to accept.<br />&#9654; <strong>3. Collect the data and compute the statistic.</strong> A count of heads, a difference of means. (The data must come from a random sample or a random assignment, or the test has nothing to stand on.)<br />&#9654; <strong>4. Find the p-value.</strong> By simulation, as you did in Week 34, or by exact arithmetic with the binomial. It is the share of boring worlds at least as extreme as your data.<br />&#9654; <strong>5. Decide.</strong> If the p-value is below the significance level, <strong>reject the null</strong>. If not, <strong>fail to reject the null</strong>.<br />&#9654; <strong>6. Say it in words,</strong> with the size of the effect, not only the verdict.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Setting</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Null hypothesis (boring world)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Alternative hypothesis</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Statistic</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A coin (the referee)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The coin is fair: heads has chance 0.5</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The coin is not fair: heads has some other chance</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Number of heads in 100 flips</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The made-up plant experiment from Week 34</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The fertilizer does nothing, so the group labels are arbitrary</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The fertilizers lead to different mean growth</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Observed difference in means (B minus A)</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">For the plant data you found a shuffle share of about 0.001. With the level fixed at 5% in advance, that is below the level, so the decision is <em>reject the null</em>. In words: if the fertilizer did nothing, shuffling alone would almost never produce a gap this big, so chance alone is a poor explanation for the 1.39 cm gap.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The p-value rule and the cutoff rule are the same rule.</strong> For 100 flips of a fair coin, 60 heads (or 40) has a two-sided p-value of 0.0569, which is not below 0.05. But 61 heads (or 39) has a two-sided p-value of 0.0352, which is below it. So the 5% test for 100 flips is exactly the card the referee wrote: <em>reject if 61 or more heads, or 39 or fewer.</em> A cutoff rule is just a p-value rule written as a count you can check in advance. The referee&rsquo;s 60 heads fails to reach it, which matches the p-value of 0.057 you saw in Week 34.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; THE LANGUAGE OF A DECISION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The two possible verdicts are worded with care, and the care matters.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Reject the null</strong> means: the data would be very surprising in the boring world, so we have good reason to doubt it. It does <em>not</em> mean the null is proved false.<br />&#9654; <strong>Fail to reject the null</strong> means: the data are not surprising enough in the boring world to rule it out. It does <em>not</em> mean the null is true. A small or noisy study often fails to reject a null that is really false.<br />&#9654; <strong>Never say &ldquo;accept the null&rdquo; and never say &ldquo;prove.&rdquo;</strong> A test of one dataset can only be strong or weak evidence, never a proof in either direction.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Think of a courtroom verdict of &ldquo;not guilty.&rdquo; It says the evidence did not clear the bar. It does not say the person is innocent. &ldquo;Fail to reject&rdquo; is the same kind of statement.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>What the p-value is, in one more line.</strong> You met this in Week 17 and again in Week 34: it is how often boring randomness alone would produce a result at least this extreme. It is <em>not</em> the probability that the null is true, not the probability that you are wrong, and not the size of the effect. Hold on to that sentence; it comes back when we compare the two schools.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10060; TWO KINDS OF MISTAKES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Any rule that decides from a random sample can fail in exactly two ways. Look at the two things that might be true about the world and the two things you might decide.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Decision: reject the null</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Decision: fail to reject the null</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>The null is really true</strong> (the coin is fair)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Type I error:</strong> a false alarm. You reject a true null.</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Correct: you keep a good coin.</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>The null is really false</strong> (the coin is biased)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Correct: you catch the biased coin. The chance of this is the <strong>power</strong>.</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Type II error:</strong> a miss. You fail to reject a false null.</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; The long-run rate of Type I errors, <em>when the null is true</em>, is the chance that the rule rejects. If you fix the significance level at 5%, this rate is at most 5%. (For coins it is often a little under, because heads come in whole numbers.) This is why the level is called the false-alarm rate.<br />&#9654; The <strong>Type II rate</strong> is the chance the rule misses a real effect. The <strong>power</strong> of a test is 1 minus the Type II rate: the chance it rejects when the null is false.<br />&#9654; Power is not one number for a test. It depends on <em>how</em> the null is false. A coin that favors heads a lot is easy to catch; a coin that favors heads a little is hard. So we compute power for a particular true value.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">You cannot see the Type I or Type II rate from your data. They describe how the <em>rule</em> would behave over many possible samples, which is why we compute them from the model, before collecting anything.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: THE REFEREE&rsquo;S RULE AND ITS FALSE-ALARM RATE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The referee&rsquo;s rule: flip 100 times; reject the fair-coin null if there are 61 or more heads or 39 or fewer. Find the Type I error rate, and decide what to do with 60 heads and with 62 heads.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> The Type I rate is the chance the rule rejects <em>when the coin is fair</em>. So we use p = 0.5. The rule rejects on two tails: 61 or more heads, or 39 or fewer. By exact binomial arithmetic, the chance of 61 or more heads is 0.0176, and by symmetry the chance of 39 or fewer is also 0.0176. Add them: the Type I rate is <strong>0.0352</strong>, about 3.5 in 100. In Excel: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-BINOM.DIST(60,100,0.5,TRUE)+BINOM.DIST(39,100,0.5,TRUE)</code>. Read it in two pieces: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1-BINOM.DIST(60,100,0.5,TRUE)</code> is the chance of 61 or more, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">BINOM.DIST(39,100,0.5,TRUE)</code> is the chance of 39 or fewer.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">For the two observed results: <strong>60 heads</strong> is not in the rejection region, so <em>fail to reject</em>: this evidence is not strong enough to call the coin unfair. <strong>62 heads</strong> is in the region (the two-sided p-value is 0.0210), so <em>reject the null</em>: a fair coin would do this only about 2 times in 100.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Notice.</strong> The rule is allowed under a 5% level because its Type I rate, 0.0352, is below 0.05. Widening the region to 60 or more or 40 or fewer would give a Type I rate of 0.0569, which is above 5%, so that card would break the referee&rsquo;s own limit.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: HOW GOOD IS THE RULE AT CATCHING A BAD COIN?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Use the same rule (61 or more heads or 39 or fewer in 100 flips). Find the chance it rejects if the coin&rsquo;s true chance of heads is 0.55, 0.6, and 0.7. Give the power and the Type II rate for 0.6 and 0.7.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Same rule, same two tails, but now we compute the rejection chance with the <em>true</em> heads chance in place of 0.5. Excel pattern: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-BINOM.DIST(60,100,0.6,TRUE)+BINOM.DIST(39,100,0.6,TRUE)</code> for a true chance of 0.6. Here are the exact results.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">True chance of heads</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Chance the rule rejects</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">What that number is called</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.50 (fair coin)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0352</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Type I rate (the null is true)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.55</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.1352</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Power against a small bias</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.60</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.4621</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Power; the Type II rate is 1 &minus; 0.4621 = 0.5379</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.70</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.9790</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Power; the Type II rate is 1 &minus; 0.9790 = 0.0210</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Read the table honestly. If the coin really lands heads 70% of the time, the rule almost always catches it (power 0.979). If the coin lands heads 60% of the time, the rule misses it more than half the time (a Type II rate of 0.5379). A 60% coin is clearly biased, yet 100 flips and this rule fail to detect it more often than not. <strong>Power depends on the size of the real effect:</strong> the bigger the real gap from the null, the easier it is to catch.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: MORE FLIPS, MORE POWER</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Compare three rules, each built to keep the Type I rate near 4%: 25 flips (reject at 18 or more heads or 7 or fewer), 100 flips (61 or more or 39 or fewer), and 400 flips (221 or more or 179 or fewer). How does the number of flips change the power against a coin with heads chance 0.6 and against one with 0.7?</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 640px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Flips</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Rejection rule</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Type I rate (fair coin)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Power if true chance is 0.6</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Power if true chance is 0.7</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">25</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">18 or more, or 7 or fewer</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0433</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.1548</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.5119</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">61 or more, or 39 or fewer</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0352</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.4621</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.9790</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">400</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">221 or more, or 179 or fewer</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0402</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.9762</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">essentially 1 (0.9999999998)</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><em>Teacher&rsquo;s voice:</em> The false-alarm rate stays near 4% in every row, because we built the rules that way. Only the power moves. With 25 flips, a 60% coin is caught only about 15 times in 100. With 100 flips, about 46 in 100. With 400 flips, about 98 in 100. More flips means less chance scatter in the percent of heads, so a real gap stands out. This is the same shrinking-spread pattern you saw with standard error. It is why planning a study means choosing <em>n</em> large enough to have decent power for an effect worth finding, before collecting data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 4: THE TRADE BETWEEN THE TWO ERRORS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Keep 100 flips and the true chance of heads at 0.6. What happens to power if the referee demands fewer false alarms, or accepts more?</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 600px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Rejection rule (100 flips)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Type I rate (fair coin)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Power if true chance is 0.6</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Type II rate at 0.6</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">64 or more, or 36 or fewer (stricter)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0066</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.2386</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.7614</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">61 or more, or 39 or fewer (the 5% rule)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0352</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.4621</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.5379</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60 or more, or 40 or fewer (looser)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0569</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.5433</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.4567</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><em>Teacher&rsquo;s voice:</em> Read down the table. A stricter rule makes false alarms rarer (0.0066) but misses more real bias (power drops to 0.2386). A looser rule catches more bias (0.5433) but raises false alarms to 0.0569, above the 5% limit. You cannot lower both errors at once with the same data. To lower both, you need more data. So the level is a <em>judgment about costs</em>: if a false alarm is very costly (replacing something expensive, or approving a bad treatment), choose a stricter level; if a miss is very costly, accept a looser one and plan a bigger sample. That is a decision for the people the test serves, and it has to be made before the flipping starts.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; TWO SCHOOLS, REVISITED</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Semester 1 you met two ways of understanding probability. The <strong>frequentist</strong> school treats probability as a long-run frequency; a hypothesis is either true or false, so it does not get a probability. The <strong>Bayesian</strong> school treats probability as a degree of belief; a hypothesis can get a probability, but only after you choose a <strong>prior</strong> to start from. A hypothesis test as we have built it today is a frequentist tool. Put the two side by side and the difference is plain.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">The frequentist test</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">The Bayesian analysis</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>The question it answers</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">How surprising are these data if the boring world were true?</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">How probable is the hypothesis, given the data and what I believed before?</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>What it needs</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A null model and a rule fixed in advance</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A prior, and a model for the alternatives too</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>What it reports</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A p-value, a decision, and the error rates of the rule</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A probability for the hypothesis (a posterior)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>What it cannot say</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The probability that the null is true</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Anything that does not depend on the prior you chose</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">So when a p-value is 0.03, the frequentist can say only: <em>if nothing were going on, results this extreme would occur about 3 times in 100.</em> The sentence &ldquo;there is a 3% chance that nothing is going on&rdquo; is a Bayesian-style claim, and it needs a prior to make. A p-value cannot supply one.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Where they can disagree: Lindley&rsquo;s paradox.</strong> Recall the florist and her tulip bulbs from Week 17. The shipment is either the 25%-red kind or the 50%-red kind, equally likely before looking. She plants 48 bulbs and 36 come up red. Test the 25% hypothesis: the expected count is 12 with standard deviation 3, and 36 is 8 standard deviations above, so a significance test rejects it. Test the 50% hypothesis: the expected count is 24 with standard deviation about 3.46, and 36 is about 3.5 standard deviations above, so a significance test rejects that one too. A faithful use of the test at the 1% level rejects <em>both</em> possible shipments. The Bayesian compares them instead: the data are about 5 hundred million times (5 &times; 10<sup>8</sup>) more probable under the 50% hypothesis, and with equal priors that puts the probability of the 50% shipment above 0.999999998. The test asked, &ldquo;is this surprising under this one hypothesis?&rdquo; The Bayesian asked, &ldquo;which of the possibilities explains the data better?&rdquo; Those are different questions, and they can give different answers.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The honest conclusion is not that one school wins.</strong> They ask different questions. A test gives you a disciplined rule with known error rates and needs no prior, which makes it easy to share and check. A Bayesian analysis answers the question people usually <em>want</em> answered (how likely is the hypothesis?) but its answer depends on a prior that reasonable people may set differently. Both are honest when used honestly: when you say which question you asked, what you assumed, and what the answer does not tell you.</div>
+    </div>
+    <div style="background: #E8F6FB; border-left: 5px solid #2196D0; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #1B6A94; margin-bottom: 8px;">&#128220; A MOMENT IN THE HISTORY OF MATHEMATICS &middot; TESTING AS A DECISION RULE: NEYMAN AND PEARSON</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.6;">In the 1930s, Jerzy Neyman and Egon Pearson wrote about testing as a <em>decision rule</em>. In their way of thinking, you fix the rule and the two kinds of error before collecting data, and you judge the rule by how often it goes wrong in the long run. That is the Type I and Type II language you used today. It differs from the view of Ronald Fisher, whom you met with the lady tasting tea in Week 17, who treated the p-value as a measure of the strength of evidence against the null rather than as part of a decision rule. Historians describe the three men as having disagreed about how testing should be understood. Today the two approaches are often mixed: a p-value is reported (a Fisher-style idea) and compared with a fixed cutoff such as 5%, while talk of false alarms and power comes from the decision-rule side. Many courses present the blend as one method, which can hide that it began as different ideas answering different questions. This is a short sketch only; historians would add many names and details.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A TYPE I AND POWER TABLE, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build a small table that computes the false-alarm rate and the power of a coin-flip rule, then change the rule and watch the numbers move. Everything here is made up. This is a practice build; you do not upload it (Assignment 35.1 is answered in Canvas). Excel behavior in this section has not been tested against the live program by the course team, so if a step does not work, tell your teacher which step it was.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk35_L1_YourName</code>. Rename the first sheet <strong>RulePower</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The rule.</strong> In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Flips n</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">100</code>. In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Upper cutoff</code> and in <strong>B2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">61</code>. In <strong>A3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lower cutoff</code> and in <strong>B3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1-B2</code> (it should show 39; a symmetric rule keeps the two tails balanced).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The table.</strong> In <strong>A5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">True chance of heads</code>, in <strong>B5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Chance the rule rejects</code>, and in <strong>C5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Type II rate</code>. In <strong>A6:A9</strong> type the four numbers <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.5</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.55</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.6</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.7</code> (one per cell).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The exact tail formula.</strong> Click <strong>B6</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-BINOM.DIST($B$2-1,$B$1,A6,TRUE)+BINOM.DIST($B$3,$B$1,A6,TRUE)</code>, then press <strong>Enter</strong>. The first piece is the chance of at least the upper cutoff (one less than the cutoff goes inside, because <strong>BINOM.DIST</strong> with <strong>TRUE</strong> gives &ldquo;that many or fewer&rdquo;). The second piece is the chance of at most the lower cutoff. The dollar signs keep the rule cells fixed when you copy down.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>B6</strong>, then drag its small square handle (bottom right corner) down to <strong>B9</strong> to copy the formula. Click <strong>C7</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-B7</code>; copy it down to <strong>C9</strong>. (Row 6 is the null world, so it has a Type I rate, not a Type II rate; leave C6 empty.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check yourself.</strong> No random numbers are involved, so everyone&rsquo;s results should match. B6 &asymp; 0.0352 (the Type I rate); B7 &asymp; 0.1352; B8 &asymp; 0.4621 (C8 &asymp; 0.5379); B9 &asymp; 0.9790 (C9 &asymp; 0.0210). If B6 is far off, the usual culprits are putting 61 instead of 60 inside the first <strong>BINOM.DIST</strong>, or leaving out <strong>TRUE</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Change the rule.</strong> Set <strong>B1</strong> to <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">400</code> and <strong>B2</strong> to <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">221</code>. B3 becomes 179. You should get B6 &asymp; 0.0402 and B8 &asymp; 0.9762. Then set <strong>B1</strong> to <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">25</code> and <strong>B2</strong> to <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">18</code> (B3 becomes 7): B6 &asymp; 0.0433 and B8 &asymp; 0.1548. Last, return to 100 and try <strong>B2</strong> = 64 (B6 &asymp; 0.0066, B8 &asymp; 0.2386) and <strong>B2</strong> = 60 (B6 &asymp; 0.0569, B8 &asymp; 0.5433). These are the rows of Worked Examples 3 and 4.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXACT TAIL PROBABILITIES IN EXCEL; HAND-LOGIC ARITHMETIC IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(k, n, p, TRUE)</code> gives the chance of <em>k or fewer</em> successes. So the chance of <em>at least k</em> is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-BINOM.DIST(k-1, n, p, TRUE)</code> (one less than <em>k</em> inside). For a two-tail rejection rule with upper cutoff <em>u</em> and lower cutoff <em>l</em>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-BINOM.DIST(u-1,n,p,TRUE)+BINOM.DIST(l,n,p,TRUE)</code>. With <em>p</em> = 0.5 this is the Type I rate; with another true <em>p</em> it is the power.<br />
+            <strong>Desmos Scientific</strong> handles plain arithmetic only here. For a tiny hand-countable rule, the Type I rate is a count divided by a power of 2: type 22 &divide; 1024 to get 0.0215 (Activity 2). A Type II rate is one minus the power: type 1 &minus; 0.4621 to get 0.5379. Desmos Scientific does not give binomial tail areas in this course, so we use Excel for those.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK FOR TWO EXPLANATIONS OF ONE TEST, THEN GRADE BOTH</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A coin landed heads 62 times in 100 flips. Explain what a hypothesis test says about whether the coin is fair, first the way a frequentist would, and then the way a Bayesian would. Keep each explanation to four sentences.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write your own two explanations in two sentences each. For the frequentist one, use a boring world and the words &ldquo;if the coin were fair.&rdquo; For the Bayesian one, say what the analysis needs before it can give a probability (a prior). Recall that the exact two-sided p-value for 62 of 100 is 0.0210.<br />
+            <strong>Verify.</strong> Grade each of the AI&rsquo;s two explanations from 0 to 3, one point for each of these checks. <strong>Frequentist:</strong> (1) it describes the p-value as how surprising the data are if the coin is fair, (2) it does <em>not</em> call the p-value the probability that the coin is fair, (3) it uses the language &ldquo;reject&rdquo; or &ldquo;fail to reject,&rdquo; never &ldquo;prove&rdquo; or &ldquo;accept.&rdquo; <strong>Bayesian:</strong> (1) it names a prior, (2) it says the answer is a probability for the hypothesis (not a p-value), (3) it admits that the answer changes with the prior. Notice whether the AI blends the two schools into one muddled paragraph, or quotes a single number such as &ldquo;98% chance the coin is biased&rdquo; without naming a prior; ask it what prior it assumed. Rewrite the weakest sentence so that it is true. <strong>Verdict.</strong> Two fluent explanations are not two correct ones; your checklist is the referee.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 35 minutes, plus the reading and the Excel steps above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Correct or Misconception?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up lab runs a 5% test on a coin. For each statement write <strong>C</strong> if it is correct or <strong>M</strong> if it is a misconception.<br /><strong>(a)</strong> &ldquo;We failed to reject the null, so we have shown the coin is fair.&rdquo;<br /><strong>(b)</strong> &ldquo;The significance level is chosen before the data are collected.&rdquo;<br /><strong>(c)</strong> &ldquo;A p-value of 0.03 means there is a 3% chance that the null is true.&rdquo;<br /><strong>(d)</strong> &ldquo;If the coin is really fair and we use a 5% rule, the rule will raise a false alarm in at most about 5 of every 100 such tests.&rdquo;<br /><strong>(e)</strong> &ldquo;A Type II error means we rejected a true null.&rdquo;<br /><strong>(f)</strong> &ldquo;Power is the chance a test rejects the null when a particular alternative is really true.&rdquo;<br /><strong>(g)</strong> &ldquo;We rejected the null, so the null is proved false.&rdquo;<br /><strong>(h)</strong> &ldquo;With a real bias in the coin, more flips usually means more power.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each M, rewrite the statement so that it is correct.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. (a) M: failing to reject only means the evidence was not strong enough; the null is not shown true. (b) C. (c) M: the p-value is computed assuming the null, so it cannot be the probability the null is true. (d) C: that is the meaning of the significance level as a false-alarm rate. (e) M: that describes a Type I error; a Type II error is failing to reject a false null. (f) C. (g) M: rejection is strong evidence against the null, not a proof. (h) C: see the 25, 100, and 400 flip rows in Worked Example 3. 2. Example rewrite of (a): &ldquo;We failed to reject the null, so these data do not give strong enough evidence that the coin is unfair; the coin may still be slightly biased.&rdquo;</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Type I and Power from a Rule</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>By hand logic.</strong> A made-up game tosses a fair coin 10 times and rejects &ldquo;the coin is fair&rdquo; if it sees 9 or 10 heads, or 0 or 1 heads. There are 1,024 equally likely sequences of 10 tosses. Using the counts 1 sequence with 10 heads and 10 sequences with exactly 9 heads (and the mirror images for 0 and 1 heads), find the Type I rate. Give it as a fraction and a decimal.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Power by hand.</strong> If the coin truly lands heads with chance 0.9, the chance of 10 heads is 0.9<sup>10</sup> = 0.3487 and of exactly 9 heads is 10 &times; 0.9<sup>9</sup> &times; 0.1 = 0.3874. The chance of 0 or 1 heads is under 0.0000001, so ignore it. Estimate the power and the Type II rate.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>With Excel.</strong> A made-up spinner is supposed to land on red half the time. The rule for 40 spins is: reject if 27 or more reds, or 13 or fewer. Use your RulePower sheet (B1 = 40, B2 = 27) to find the Type I rate and the power if the true chance of red is 0.7. State the Type II rate. Then try B2 = 26 and say why that rule would break a 5% limit.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. The sequences with 9 or 10 heads number 10 + 1 = 11, and the sequences with 0 or 1 heads number 1 + 10 = 11, so 22 of 1,024 sequences reject: <strong>22/1024 = 0.0215</strong>. 2. Power &asymp; 0.3487 + 0.3874 = <strong>0.7361</strong> (exact 0.7361), so the Type II rate is 1 &minus; 0.7361 = <strong>0.2639</strong>: the rule misses a 90% coin about 26 times in 100. 3. Type I rate = <strong>0.0385</strong> (about 4 in 100); power at 0.7 = <strong>0.7033</strong>; Type II rate = 1 &minus; 0.7033 = <strong>0.2967</strong>, so about 3 in 10 real 70% spinners are missed. With B2 = 26 (B3 becomes 14) the Type I rate is 0.0807, which is above 0.05, so that rule would break a 5% limit even though it catches more (power 0.8075 at 0.7).</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Two Schools, One Result</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up coin gives 62 heads in 100 flips. The exact two-sided p-value for a fair coin is 0.0210. Write <strong>one sentence a frequentist would stand behind</strong> about what 0.0210 means.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A Bayesian wants to say how probable it is that the coin is biased. Name <strong>two things</strong> the Bayesian needs to decide before giving a number.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Error analysis.</strong> A student writes: &ldquo;The p-value of 0.0210 means a 2.1% chance the coin is fair, so both schools agree the coin is 97.9% likely to be biased.&rdquo; Find <strong>two mistakes</strong> and say why a test and a Bayesian analysis can answer differently.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. If the coin were fair, 100 flips would give 62 or more heads, or 38 or fewer, only about 2 times in 100 (0.0210). 2. A prior (how plausible a biased coin was before flipping) and what &ldquo;biased&rdquo; means (which heads chances count, and how likely each one was). 3. Mistake one: the p-value is not the probability that the coin is fair; it is computed assuming the coin is fair. Mistake two: the Bayesian answer is not 97.9% by default; it depends on the prior and on what alternatives are being compared, so the two schools are not giving the same number. They ask different questions, which is why Lindley&rsquo;s paradox can arise: a test can reject a hypothesis that a Bayesian comparison still finds far more believable than the alternative.</div>
+</details>
+            </div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 35.1 &mdash; Rules, Errors, and Power</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded items (two numeric entries, five multiple choice) on Type I rates, power, decision language, and the two schools, plus one short written item with three parts. Everything is answered in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 35.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on false-alarm rates, kinds of error, power, and the language of a decision.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Looking ahead</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">The next lesson turns these habits into a reader&rsquo;s checklist for evaluating data-based reports.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 35.1 &middot; The Logic of Hypothesis Testing: Two Schools Revisited</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

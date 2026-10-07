@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 29.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 29.2</div>
+        
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42;"><span style="font-style: italic;">Embedded in this lesson</span></div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 29.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Two-Way Frequency Tables: Joint and Marginal</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Two categories at once, one table, and every count accounted for.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Tallying raw records into a two-way table; joint cells and marginal totals; checking that the totals add up; joint and marginal relative frequencies; reading &ldquo;what share of everyone&hellip;&rdquo; questions; finding a missing cell from the totals; why a table shows association and not cause</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Two-Way Table Explorer, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> organize two categorical variables from a list of raw records into a two-way table by tallying.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> read joint cell counts and the marginal totals (row totals, column totals, and the grand total), and check that they add up.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> convert counts to joint relative frequencies (cell &divide; grand total) and marginal relative frequencies, and answer &ldquo;what share of everyone&hellip;&rdquo; questions from them.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> recognize a two-way table as a summary of two categorical variables (unlike a scatter plot, which pairs two numbers), and find a missing cell from the marginals.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every scatter plot you have drawn this module pairs two <em>numbers</em> for each person or thing: hours studied and a score, practice days and free throws. But much of what we want to know is not a number at all. Which lunch do you pick? Which study method did you use? Did you sign up or not? These are <strong>categories</strong>, and they come in pairs too: lunch <em>and</em> grade, study method <em>and</em> result.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">There is no line to fit through categories, and no slope. Instead there is something quieter and very useful: a grid that counts how many fall into each combination. The remarkable thing is how much a small grid of counts can tell you, if you read it patiently and make sure every count is accounted for. Careful accounting is this module's virtue, <strong>responsibility</strong>, in its plainest form.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Semester 1 you used two-way tables to find probabilities. Today you step back and treat the table as what it first is: a <em>summary of data</em>. The next lesson will use it to compare groups.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every student, record, and count in this lesson is <strong>constructed</strong> to teach the idea. None of it is real data about real people.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128209; TWO CATEGORIES AT ONCE: WHAT A TWO-WAY TABLE IS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A variable that sorts people into groups (lunch choice, grade level, yes or no) is a <strong>categorical variable</strong>. When each person in a data set has a value for <em>two</em> categorical variables, the data are <strong>bivariate categorical</strong> data. A <strong>two-way table</strong> (also called a two-way frequency table) shows how many fall into each combination.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Rows</strong> list the categories of one variable; <strong>columns</strong> list the categories of the other.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Each inner <strong>cell</strong> holds a <strong>joint frequency</strong>: the number of individuals who have <em>both</em> that row category <em>and</em> that column category.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; The <strong>row totals</strong> and <strong>column totals</strong>, written in the margins of the table, are the <strong>marginal frequencies</strong>: how many are in each row, or each column, ignoring the other variable.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; The number in the bottom right corner is the <strong>grand total</strong>: how many individuals there are altogether.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Two checks that always work.</strong> (1) The row totals must add to the grand total. (2) The column totals must add to the grand total. If either fails, a count is wrong somewhere. These two checks are the table's built-in honesty test.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>How this differs from a scatter plot.</strong> A scatter plot needs two <em>numerical</em> variables and shows each individual as a point. A two-way table is for two <em>categorical</em> variables and shows <em>counts</em>, not individuals. Different kinds of data, different display. Choosing the display that fits the data is part of telling the truth about it.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: FROM RAW RECORDS TO A TWO-WAY TABLE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up survey asked 24 students how they get lunch and what grade they are in. Here are the 24 records, one per student. Organize them into a two-way table with all the totals.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">#</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Lunch</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">#</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Lunch</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">13</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">14</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">15</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">17</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">18</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">19</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">8</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">20</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">21</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">22</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">23</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">12</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">24</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Grade 11</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> First I decide the layout: lunch choice goes down the side (three rows: Cafeteria, Packed, Off-campus) and grade goes across the top (three columns: Grade 9, 10, 11). That gives nine cells. Then I take the records <em>one at a time, in order</em>, and make one tally stroke in the cell where that student belongs. Student 1 is a Packed / Grade 9 record, so that cell gets a stroke. Working through the list in order means no record is skipped or counted twice.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When all 24 records are tallied, I count the strokes in each cell and then add the margins:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Lunch \ Grade</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade 9</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade 10</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade 11</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Total</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">8</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td></tr><tr style="background: #EEF1F8;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Total</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>9</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>8</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>7</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>24</strong></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Row totals:</strong> 10 + 8 + 6 = <strong>24</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Column totals:</strong> 9 + 8 + 7 = <strong>24</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>Check.</strong> Both sums equal the number of records, 24. The table accounts for every student.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Reading it.</strong> The joint frequency in the Packed row and Grade 10 column is <strong>4</strong>: four students bring a packed lunch <em>and</em> are in Grade 10. The marginal frequency for the Cafeteria row is <strong>10</strong>: ten students eat in the cafeteria, whatever their grade. The marginal frequency for the Grade 11 column is <strong>7</strong>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; RELATIVE FREQUENCIES: WHAT SHARE OF EVERYONE?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Counts depend on how many people were surveyed. A <strong>relative frequency</strong> turns a count into a share of the whole, so you can talk about &ldquo;what fraction&rdquo; or &ldquo;what percent&rdquo; of everyone.</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;"><strong>joint relative frequency</strong> = <em>cell count</em> &divide; <em>grand total</em> &nbsp;&nbsp;&nbsp;&nbsp; <strong>marginal relative frequency</strong> = <em>row (or column) total</em> &divide; <em>grand total</em></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Both use the <strong>grand total</strong> as the denominator. That is what makes them answer &ldquo;what share of <em>everyone</em>&hellip;?&rdquo; The joint relative frequency is the share who are in one particular combination; the marginal relative frequency is the share who are in one whole row or column.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Percent rounding.</strong> When you round each percent, the rounded numbers may not add to exactly 100. That is not a mistake in the table; it is a side effect of rounding. If your rounded percents total 99.9 or 100.1, check that the <em>fractions</em> add to 1 and then move on.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: THE LUNCH TABLE AS RELATIVE FREQUENCIES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Using the 24-student lunch table, find each joint and marginal relative frequency (percent, to the nearest tenth of a percent). Then answer: what share of all students (a) are in Grade 11 <em>and</em> eat off-campus, (b) eat in the cafeteria, (c) are in Grade 10?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> Every denominator is 24, the grand total. I divide each count by 24 and multiply by 100. For example, Cafeteria and Grade 9: 5 &divide; 24 = 0.2083&hellip;, which is 20.8%.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 640px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Lunch \ Grade</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade 9</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade 10</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Grade 11</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Total</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Cafeteria</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5/24 &asymp; 20.8%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3/24 &asymp; 12.5%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2/24 &asymp; 8.3%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10/24 &asymp; 41.7%</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Packed</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3/24 &asymp; 12.5%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4/24 &asymp; 16.7%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1/24 &asymp; 4.2%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">8/24 &asymp; 33.3%</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Off-campus</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1/24 &asymp; 4.2%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1/24 &asymp; 4.2%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4/24 &asymp; 16.7%</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6/24 &asymp; 25.0%</td></tr><tr style="background: #EEF1F8;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Total</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>9/24 &asymp; 37.5%</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>8/24 &asymp; 33.3%</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>7/24 &asymp; 29.2%</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>24/24 = 100%</strong></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>(a)</strong> Off-campus and Grade 11 is a joint cell: 4 &divide; 24 = <strong>16.7%</strong> of all students.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>(b)</strong> Cafeteria is a marginal (row total): 10 &divide; 24 = <strong>41.7%</strong> of all students.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>(c)</strong> Grade 10 is a marginal (column total): 8 &divide; 24 = <strong>33.3%</strong> of all students.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Check the totals.</strong> The three row marginals add to 41.7 + 33.3 + 25.0 = 100.0%, and the three column marginals to 37.5 + 33.3 + 29.2 = 100.0%. The nine joint percents, however, add to 100.1%, not 100%. That is the rounding effect described above: for instance, three cells are really 4.1666&hellip;% and were each rounded to 4.2%. The fractions themselves, 24 &divide; 24, add to exactly 1.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>One caution.</strong> These percents each answer &ldquo;what share of <em>all 24</em>?&rdquo; They do not tell you, say, how likely a Grade 9 student is to eat in the cafeteria. That is a different question, with a different denominator, and it is the subject of the next lesson.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: A MISSING CELL FROM THE MARGINALS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up class of 50 students was split into a morning group (30 students) and an afternoon group (20 students). Altogether, 26 students visited the library and 24 did not. Seventeen of the morning students visited the library. Fill in the rest of the table.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> I draw the empty table first and write in everything I know, then I use the rule that every row and every column must add to its total.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Group \ Library</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Visited</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Did not visit</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Total</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Morning</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">17</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">?</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Afternoon</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">?</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">?</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">20</td></tr><tr style="background: #EEF1F8;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Total</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>26</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>24</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>50</strong></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Morning, did not visit.</strong> The morning row must add to 30: 17 + ? = 30, so ? = 30 &minus; 17 = <strong>13</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Afternoon, visited.</strong> The Visited column must add to 26: 17 + ? = 26, so ? = 26 &minus; 17 = <strong>9</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Afternoon, did not visit.</strong> The afternoon row must add to 20: 9 + ? = 20, so ? = 20 &minus; 9 = <strong>11</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>Check with the last column.</strong> The Did not visit column should add to 24: 13 + 11 = 24. It does, so every cell is consistent.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Group \ Library</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Visited</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Did not visit</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Total</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Morning</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">17</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">13</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Afternoon</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">20</td></tr><tr style="background: #EEF1F8;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Total</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>26</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>24</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>50</strong></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Notice what made this possible: the margins and the grand total carry a lot of information. Once the totals are known, a single cell can unlock the rest. The last check, using a total you did not use to find the numbers, is the one that catches mistakes.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Two-Way Table Explorer (Counts and Joint views)</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Use only the Counts and Joint buttons today.</strong> The two Conditional views, and the bars panel under the table, belong to the next lesson, so you may ignore them. All the data are made up. <strong>(1) Marginals.</strong> Stay on <em>Study method &times; Exam result</em> in <em>Counts</em> view. The totals are in the margins and the grand total is in the corner; check that the row totals and the column totals each add to the grand total. Click the <em>Flashcards</em> row total and read the readout: it should say 60 out of 120 (0.5, or 50.0%). Click the <em>Passed</em> column total: 73 out of 120. <strong>(2) Joint.</strong> Press <em>Joint (share of everyone)</em>. Each cell now shows its share of all 120. Click the Flashcards and Passed cell and read it: 45 &divide; 120 (37.5%). Find the other three cell shares and check that they add to 100%. <strong>(3) Edit.</strong> Change the Rereading and Passed count from 28 to 38 by typing in the cell. Predict the new row total, column total, and grand total <em>before</em> you look (70, 83, and 130), then confirm. Change it back to 28. <strong>(4) A second table.</strong> Press <em>App version &times; Signed up (A/B test)</em>. In Joint view, click the Version B and Signed up cell (89 out of 1000, 8.9%), then the <em>Signed up</em> column total (151 out of 1000, 15.1%). In one sentence, say the difference between those two numbers. Write down what you found.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/two-way-table.html" width="100%" height="900" style="border: none; display: block;" title="The Two-Way Table Explorer" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/two-way-table.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: TALLY RAW RECORDS WITH COUNTIFS, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will tally the 24 raw records into a two-way table with a formula, add the totals, and turn the counts into joint and marginal relative frequencies.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk29_L2_YourName</code> (practice; you do not upload it).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> to <strong>C1</strong> type the headings <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Student</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lunch</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Grade</code>, pressing <strong>Tab</strong> after each. Type the 24 records from Worked Example 1 in rows 2 to 25: student numbers 1 to 24 in column A, the lunch in column B, the grade in column C. Type the grade exactly the same way every time (for example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Grade 9</code>), because the counting formula treats different spellings as different categories.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Build the empty table to the right. Leave <strong>E1</strong> blank; in <strong>F1</strong> to <strong>H1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Grade 9</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Grade 10</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Grade 11</code>, and in <strong>I1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Total</code>. In <strong>E2</strong> to <strong>E4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Cafeteria</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Packed</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Off-campus</code>, and in <strong>E5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Total</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>F2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS($B$2:$B$25,$E2,$C$2:$C$25,F$1)</code>, then press <strong>Enter</strong>. This counts the records whose Lunch matches the row label in column E <em>and</em> whose Grade matches the column label in row 1. It should show <strong>5</strong>. (The dollar signs lock the ranges and labels so the formula can be filled into the other cells.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>F2</strong>, drag the small square at the bottom right corner of the cell across to <strong>H2</strong>, then, with <strong>F2:H2</strong> still selected, drag that square down to row 4 (this is called <strong>filling</strong>). All nine joint counts appear. Compare them with the table in Worked Example 1.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>I2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(F2:H2)</code>, press <strong>Enter</strong>, and fill down to <strong>I4</strong>. Click <strong>F5</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(F2:F4)</code>, press <strong>Enter</strong>, and fill right to <strong>I5</strong>. The corner cell <strong>I5</strong> is the grand total and should show 24; also check that <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(I2:I4)</code> gives 24.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; For the joint relative frequencies, click <strong>F7</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F2/$I$5</code>, press <strong>Enter</strong>. The <strong>$I$5</strong> keeps the denominator fixed on the grand total as you fill. Fill right to <strong>H7</strong> and then down to row <strong>9</strong>. Select <strong>F7:H9</strong>, click the <strong>Home</strong> tab, and in the <strong>Number</strong> group click the <strong>%</strong> button (Percent Style). Use the <strong>Increase Decimal</strong> button once so each percent shows one decimal place.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Add the marginal relative frequencies the same way: in <strong>I7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=I2/$I$5</code> and fill down to <strong>I9</strong>; in <strong>F10</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F5/$I$5</code> and fill right to <strong>H10</strong>; format all of them as percents. Check that the column marginals add to 100% (use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(F10:H10)</code>).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Optional.</strong> Excel can also build a count table for you with <strong>Insert</strong> &gt; <strong>PivotTable</strong>. You are not required to use it; the formulas above show you exactly where each number comes from.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Honest note.</strong> Menu names and button positions differ a little between desktop Excel and Excel for the web. If a percent in your sheet differs from this lesson in the last digit, check how many decimals are shown; Excel stores the full value and only displays a rounded one.</div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C;  border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#9878;&#65039; RESPONSIBILITY: A TABLE SHOWS ASSOCIATION, NOT CAUSE</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<div style="margin-bottom: 14px;">When a two-way table compares groups, such as students who used flashcards and students who reread, it is tempting to read a gap as proof that one thing <em>caused</em> the other. A table of counts cannot say that. It shows which combinations occurred and how often. Whether a difference means cause depends on <em>how the data were collected</em>: students who chose their own study method may differ in many other ways, while a comparison where people were assigned to groups at random is built to isolate the effect. You will study that difference in Module 11.</div>
+<div style="margin-bottom: 14px;">There is a second, smaller caution. A joint relative frequency answers &ldquo;what share of <em>everyone</em>?&rdquo; It is not a fair way to compare two groups of different sizes. For that you will need a different denominator, which is exactly what the next lesson adds.</div>
+<div>Organizations that run online experiments and surveys often report results in tables like these. Whether a given table supports a claim of cause still depends on the study design behind it.</div>
+        </div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; COUNTIFS AND PERCENTS IN EXCEL, ARITHMETIC IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<strong>Excel counts for you.</strong> To tally a cell from raw records, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS(range1,"A",range2,"B")</code>: it counts the rows where the first range equals A <em>and</em> the second range equals B. For example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS(B2:B25,"Packed",C2:C25,"Grade 10")</code> returns 4 for the lunch records. Use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(...)</code> for row totals, column totals, and the grand total. To turn a cell into a share of everyone, divide by the grand total (for example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F2/$I$5</code>) and click <strong>Home</strong> &gt; <strong>Percent Style</strong>. A PivotTable (<strong>Insert</strong> &gt; <strong>PivotTable</strong>) can also build counts, but it is optional.<br /><br />
+<strong>Desmos Scientific</strong> does plain arithmetic, so a relative frequency is a division. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">5/24</code> to get 0.2083&hellip;, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">5/24*100</code> to get about 20.8 as a percent. For a marginal, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">10/24*100</code> (about 41.7). To check a total, type the sum, for example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">10+8+6</code>, and compare it with the grand total.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<strong>Task: have an AI complete a partial two-way table, then verify it by arithmetic.</strong><br />
+<strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A made-up survey of 60 students has this two-way table. Rows: Plays a sport, Does not play a sport. Columns: Grade 9, Grade 10, Grade 11. Plays a sport: 12, ?, 7, and the row total is 28. Does not play: ?, 11, ?, and the row total is 32. Column totals: 18, 20, 22. The grand total is 60. Fill in the three missing cells, then give the joint relative frequency of &lsquo;plays a sport and Grade 10&rsquo; and the marginal relative frequency of &lsquo;plays a sport&rsquo; as percents.&rdquo;</em><br />
+<strong>Predict.</strong> Before you read its answer, fill in the cells yourself using the row and column totals (you should get 9, 6, and 15), then work out the two percents (15.0% and about 46.7%).<br />
+<strong>Verify.</strong> Check every cell the AI gives against its row total and its column total, and add the rows and columns for yourself. Common errors to look for: a cell that fits its row but breaks its column, totals that no longer add to 60, a percent computed with a row or column total instead of 60, and a confident explanation that skips the checking. Report which items it got right, which it got wrong, and anything it stated too confidently.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 40 minutes, plus the Excel steps and the interactive above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Read the Table</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up survey of 62 students recorded the reading format they chose (print book or e-book) and their class period. The counts are: Print book 15, 9, 12 for Periods 1, 2, 3; E-book 5, 11, 10 for Periods 1, 2, 3. Add the row totals, the column totals, and the grand total, and check that the row totals and the column totals each add to the grand total.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Name, in words, what the number 10 in the E-book and Period 3 cell tells you, and what the number 36 (the Print book row total) tells you. Which one is a joint frequency and which a marginal frequency?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find the joint relative frequency of E-book and Period 3, and the marginal relative frequency of Print book, as percents to the nearest tenth. Say each one aloud as a sentence beginning &ldquo;What share of all 62 students&hellip;&rdquo;</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Row totals: 15 + 9 + 12 = 36 (Print book) and 5 + 11 + 10 = 26 (E-book). Column totals: 15 + 5 = 20 (Period 1), 9 + 11 = 20 (Period 2), 12 + 10 = 22 (Period 3). Row totals add to 36 + 26 = <strong>62</strong>; column totals add to 20 + 20 + 22 = <strong>62</strong>. Both match the grand total. 2. 10 is a <strong>joint</strong> frequency: ten students chose an e-book <em>and</em> are in Period 3. 36 is a <strong>marginal</strong> frequency: 36 students chose a print book, whatever their period. 3. 10 &divide; 62 = 0.1613, about <strong>16.1%</strong>: what share of all 62 students chose an e-book and are in Period 3. 36 &divide; 62 = 0.5806, about <strong>58.1%</strong>: what share of all 62 students chose a print book.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Tally Twenty Records</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up survey asked 20 students two questions: did you eat breakfast (Yes or No), and do you ride the bus to school (Bus or Not bus)? Each record below is <em>breakfast, bus</em>:<br /><span style="font-size: 15px;">1. No, Not bus; 2. No, Not bus; 3. Yes, Not bus; 4. No, Not bus; 5. Yes, Not bus; 6. Yes, Bus; 7. No, Not bus; 8. Yes, Bus; 9. No, Bus; 10. Yes, Bus; 11. Yes, Not bus; 12. Yes, Bus; 13. No, Not bus; 14. Yes, Not bus; 15. No, Bus; 16. Yes, Bus; 17. Yes, Bus; 18. No, Bus; 19. Yes, Bus; 20. Yes, Not bus.</span></div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Tally the 20 records into a two-way table (rows Yes and No for breakfast, columns Bus and Not bus), with row totals, column totals, and the grand total. Check that the margins add to 20.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find all four joint relative frequencies and the two marginal relative frequencies for the breakfast variable, as percents. What share of all 20 students ate breakfast <em>and</em> ride the bus?</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        2. Yes and Bus 7; Yes and Not bus 5; No and Bus 3; No and Not bus 5. Row totals: Yes 12, No 8. Column totals: Bus 10, Not bus 10. Grand total 12 + 8 = 10 + 10 = <strong>20</strong>. 3. Joint: 7 &divide; 20 = <strong>35%</strong>, 5 &divide; 20 = <strong>25%</strong>, 3 &divide; 20 = <strong>15%</strong>, 5 &divide; 20 = <strong>25%</strong> (they add to exactly 100%, because 20 divides evenly into 100). Marginals for breakfast: Yes 12 &divide; 20 = <strong>60%</strong>, No 8 &divide; 20 = <strong>40%</strong>. The share who ate breakfast and ride the bus is the joint cell, <strong>35%</strong>. (If your tally differs, recount the records one at a time, in order.)
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Find the Cell, Find the Error</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up table has a grand total of 80. The two row totals are 50 and 30. The two column totals are 45 and 35. The cell in row 1, column 1 is 28. Find the other three cells and check your answer.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate looks at the lunch table from Worked Example 1 and says: &ldquo;The share of all students who eat in the cafeteria and are in Grade 9 is 5 out of 10, or 50%.&rdquo; Find the mistake, say what denominator should have been used, and give the correct percent.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one sentence, say why a two-way table of counts cannot by itself show that one variable causes the other.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Row 1: 28 + ? = 50, so the cell is <strong>22</strong>. Column 1: 28 + ? = 45, so the cell below is <strong>17</strong>. Row 2: 17 + ? = 30, so the last cell is <strong>13</strong>. Checks: column 2 is 22 + 13 = 35 (matches), and all four cells add to 28 + 22 + 17 + 13 = 80. 2. The classmate divided by 10, the cafeteria <em>row total</em>. A &ldquo;share of all students&rdquo; must use the grand total, 24: 5 &divide; 24 = <strong>20.8%</strong>. (50% answers a different question, the share <em>within</em> the cafeteria group, which the next lesson takes up.) 3. A table shows only how many fall in each combination; something else about the students, or the way the data were collected, could explain a pattern, so the table shows association, not cause.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 29.2 &mdash; Two-Way Frequency Tables</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Read counts, totals, and relative frequencies from a table, find a missing cell, an applied item, COUNTIFS formulas in Excel typed as text, and an AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 29.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on joint and marginal relative frequencies, missing cells, choosing a display, and rounding.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 29.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will ask a different question of the same table: among <em>one group only</em>, how do the other variable's categories split? That is the idea behind comparing groups with conditional relative frequencies.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 29.2 &middot; Two-Way Frequency Tables: Joint and Marginal</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

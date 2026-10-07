@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 29.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 29.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 29.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Conditional Relative Frequencies, Segmented Bars, and Association</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">One table can give you two different percents. The denominator tells you which question you asked.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Learn to turn counts into conditional percents, to see them as segmented bars, to build a whole table from group sizes and percents, and to say what a difference between groups does and does not show.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read the worked examples, try the table explorer, build a table in Excel, and write one carefully worded conclusion. Plan on about 90 minutes. Every dataset and scenario on this page is constructed (made up), and the screening test is hypothetical.</div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compute row and column <strong>conditional relative frequencies</strong> from a two-way table and say which denominator I used, in words that start &ldquo;of those who&hellip;&rdquo;.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> draw and read a <strong>segmented (100%) bar graph</strong>, say what bars that look alike would mean, and decide whether two categorical variables look associated by comparing conditional relative frequencies, with a hedged sense of how big a difference matters.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> build a complete two-way table from group sizes plus conditional percents, by table and by <strong>tree diagram</strong>, and show that the tree and the table agree.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> state that an association in observational data is not evidence of cause, and write one careful sentence that says only what the data show.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). Save the workbook you build as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk29_TwoWay_YourName.xlsx</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From earlier: reading a two-way table with its row and column totals, and from Semester 1 the 1,000-person screening count (Lesson 8.3) and the two-way table lesson (Lesson 9.3).</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: NAME THE GROUP YOU ARE TALKING ABOUT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A percent without its group is a half-sentence. &ldquo;65% were alert&rdquo; is silent about 65% of whom. The two most common errors in reading a table are dividing by the wrong total and then speaking as if you had divided by the right one. Both are quiet mistakes, and both change what a reader will believe about real people.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">This lesson makes one habit automatic: before you write a percent, finish the sentence &ldquo;<strong>of those who&hellip;</strong>&rdquo;. The group after those words is your denominator. If you cannot name it, you do not yet know what you computed. Being responsible with a table means making the denominator visible, and making your conclusion no bigger than the data.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128202; THREE DENOMINATORS, THREE DIFFERENT QUESTIONS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In a two-way table of counts, every cell can be divided by three different totals. They answer three different questions.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Joint relative frequency.</strong> Divide a cell by the <em>grand total</em>. &ldquo;Of everyone surveyed, what share are in both categories?&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Marginal relative frequency.</strong> Divide a row total (or column total) by the grand total. &ldquo;Of everyone surveyed, what share are in this category, ignoring the other variable?&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Conditional relative frequency.</strong> Divide a cell by its <em>row total</em> or by its <em>column total</em>. The group you are conditioning on becomes the whole world.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A <strong>row conditional</strong> relative frequency answers &ldquo;of those in this row, what share fall in this column?&rdquo; Each row&rsquo;s conditionals add to 100%. A <strong>column conditional</strong> answers &ldquo;of those in this column, what share fall in this row?&rdquo; Each column&rsquo;s conditionals add to 100%. The two are not the same, and mixing them up is the error this lesson is built to prevent. (You met the same warning in Semester 1: the chance of A given B is not the chance of B given A.)</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127859; WORKED EXAMPLE 1 &mdash; ROW AND COLUMN CONDITIONALS, AND THE BARS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up survey asked 300 students two questions: did you eat breakfast this morning, and did you feel alert in first period?</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;"></td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Felt alert</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Did not feel alert</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Total</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Ate breakfast</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">117</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">63</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>180</strong></td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Did not eat breakfast</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">54</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">66</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>120</strong></td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>Total</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>171</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>129</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>300</strong></td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 1, audit the totals.</strong> 117 + 63 = 180, 54 + 66 = 120, 117 + 54 = 171, 63 + 66 = 129, and 171 + 129 = 300 = 180 + 120. The table is consistent.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 2, row conditionals (the denominator is the row total).</strong> Of those who ate breakfast, 117 / 180 = 0.65 = <strong>65%</strong> felt alert, and 63 / 180 = 0.35 = 35% did not. Of those who did not eat breakfast, 54 / 120 = 0.45 = <strong>45%</strong> felt alert, and 66 / 120 = 0.55 = 55% did not. Each row adds to 100%.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 3, a column conditional (the denominator is the column total).</strong> Of those who felt alert, 117 / 171 &asymp; <strong>68.4%</strong> ate breakfast. Of those who did not feel alert, 63 / 129 &asymp; 48.8% ate breakfast. Notice that 68.4% is <em>not</em> the alert rate for breakfast eaters. It answers a different question, about a different group (the 171 who felt alert).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 4, the marginal for comparison.</strong> Overall, 180 / 300 = 60% of the students ate breakfast. Among the alert students the share is higher (68.4%), among the not-alert students it is lower (48.8%). The overall 60% sits between them.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 14px; color: #0E1C42; text-align: center; margin-bottom: 4px;"><strong>Segmented (100%) bars for the made-up breakfast survey</strong></div><svg viewBox="0 0 480 212" width="100%" style="max-width: 520px; display: block; margin: 0 auto;" role="img" aria-label="Two horizontal 100 percent segmented bars. Students who ate breakfast: 65 percent felt alert and 35 percent did not. Students who did not eat breakfast: 45 percent felt alert and 55 percent did not." xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="480" height="212" fill="#FFFFFF"/><line x1="170.0" y1="20" x2="170.0" y2="142" stroke="#E4E9F2" stroke-width="1"/><text x="170.0" y="160" font-size="12" fill="#444" text-anchor="middle">0%</text><line x1="242.5" y1="20" x2="242.5" y2="142" stroke="#E4E9F2" stroke-width="1"/><text x="242.5" y="160" font-size="12" fill="#444" text-anchor="middle">25%</text><line x1="315.0" y1="20" x2="315.0" y2="142" stroke="#E4E9F2" stroke-width="1"/><text x="315.0" y="160" font-size="12" fill="#444" text-anchor="middle">50%</text><line x1="387.5" y1="20" x2="387.5" y2="142" stroke="#E4E9F2" stroke-width="1"/><text x="387.5" y="160" font-size="12" fill="#444" text-anchor="middle">75%</text><line x1="460.0" y1="20" x2="460.0" y2="142" stroke="#E4E9F2" stroke-width="1"/><text x="460.0" y="160" font-size="12" fill="#444" text-anchor="middle">100%</text><text x="162" y="55" font-size="13" fill="#0E1C42" text-anchor="end">Ate breakfast (180)</text><rect x="170.0" y="30" width="188.5" height="36" fill="#2196D0" stroke="#FFFFFF" stroke-width="1"/><text x="264.2" y="53" font-size="13" fill="#FFFFFF" text-anchor="middle">65%</text><rect x="358.5" y="30" width="101.5" height="36" fill="#C7922C" stroke="#FFFFFF" stroke-width="1"/><text x="409.2" y="53" font-size="13" fill="#FFFFFF" text-anchor="middle">35%</text><text x="162" y="111" font-size="13" fill="#0E1C42" text-anchor="end">Did not (120)</text><rect x="170.0" y="86" width="130.5" height="36" fill="#2196D0" stroke="#FFFFFF" stroke-width="1"/><text x="235.2" y="109" font-size="13" fill="#FFFFFF" text-anchor="middle">45%</text><rect x="300.5" y="86" width="159.5" height="36" fill="#C7922C" stroke="#FFFFFF" stroke-width="1"/><text x="380.2" y="109" font-size="13" fill="#FFFFFF" text-anchor="middle">55%</text><rect x="170" y="179" width="13" height="13" fill="#2196D0"/><text x="188" y="190" font-size="12" fill="#444">Felt alert</text><rect x="320" y="179" width="13" height="13" fill="#C7922C"/><text x="338" y="190" font-size="12" fill="#444">Did not feel alert</text></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Constructed (made-up) data.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 5, read the bars.</strong> Each bar is one row, scaled to the same full length (100%). The blue segment is the row conditional for &ldquo;felt alert&rdquo;: 65% for breakfast eaters, 45% for the others. The bars differ by <strong>20 percentage points</strong> (65 &minus; 45).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 6, say it carefully.</strong> &ldquo;In this made-up survey of 300 students, 65% of those who ate breakfast felt alert, compared with 45% of those who did not. In this sample, breakfast and alertness look associated.&rdquo; That sentence names both groups, gives both percents, and says &ldquo;in this sample.&rdquo;</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; SEGMENTED BARS, AND WHAT ALIKE BARS WOULD MEAN</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>segmented bar graph</strong> (also called a 100% stacked bar graph) draws one bar per row. Every bar has the same total length, 100%, and is cut into pieces that show that row&rsquo;s conditional relative frequencies. Because every bar is scaled to 100%, the groups can be compared fairly even when they have very different sizes. (A plain bar graph of counts would make the bigger group look bigger on every segment.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now the key idea. Suppose the two bars in Worked Example 1 had come out looking <strong>exactly alike</strong>, say 55% alert for both. That would mean the share who felt alert was the same whether or not a student ate breakfast. Knowing the row would tell you nothing about the column. In this sample, <strong>the two variables would show no association</strong>. If the bars differ, the variables are <strong>associated in this sample</strong>: knowing the row changes the share you expect in each column.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Words to avoid: &ldquo;independent&rdquo; is a claim about a population or a model, and a single sample will almost never produce bars that match perfectly. Say &ldquo;no association in this sample,&rdquo; or &ldquo;the bars are nearly the same.&rdquo;</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; HOW BIG A DIFFERENCE MATTERS (HONESTLY, THERE IS NO MAGIC NUMBER)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Real bars are never exactly alike, so you need a sense of when a gap is worth reporting. There is no single cutoff, but three things help you weigh it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The size of the gap.</strong> Measure it in percentage points. A 20-point gap (65% versus 45%) is large. A 1-point gap is small.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The size of the groups.</strong> The same gap is more believable with more people behind it. <em>Constructed illustration:</em> 20 of 40 students versus 22 of 40 is 50% versus 55%, a 5-point gap that disappears if just two students in the second group had answered the other way. But 2,000 of 4,000 versus 2,200 of 4,000 is also 50% versus 55%, and a gap that size is much harder to blame on the luck of who was asked.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Sampling variation.</strong> A different sample of students would give somewhat different percents, even if nothing about the population changed. Later in this course you will learn how to judge how much a percent can wander. For now, the responsible move is to report the difference you see, say it is for this sample, and avoid announcing a big discovery from a small gap in a small group.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A rough working habit, hedged: a gap of a few points in small groups is a reason to be cautious. A gap of 15 to 20 points or more, with groups of a hundred or more, is worth reporting as a real difference in the sample, and it is the kind of difference you would want to investigate further.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127795; WORKED EXAMPLE 2 &mdash; BUILD THE WHOLE TABLE FROM SIZES AND PERCENTS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up school has 500 students. Its records say that 60% of students ride the bus. Of the bus riders, 30% arrive early (before the first bell). Of the students who do not ride the bus, 55% arrive early. You are given only group sizes and percents, not a table. Can you build the table?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Yes, but notice what you need: the <strong>group sizes</strong> (the marginal shares) and the <strong>conditional percents</strong>. The percents alone are not enough, because &ldquo;30% of the bus riders&rdquo; means nothing until you know how many bus riders there are.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 1, group sizes.</strong> Bus riders: 0.60 &times; 500 = <strong>300</strong>. Non-riders: 500 &minus; 300 = <strong>200</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 2, each cell is (group size) &times; (conditional percent).</strong> Bus and early: 0.30 &times; 300 = <strong>90</strong>. Bus and not early: 300 &minus; 90 = <strong>210</strong>. Non-bus and early: 0.55 &times; 200 = <strong>110</strong>. Non-bus and not early: 200 &minus; 110 = <strong>90</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 3, add the totals.</strong> Early: 90 + 110 = 200. Not early: 210 + 90 = 300. Grand total: 200 + 300 = 500.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;"></td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Early</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Not early</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Total</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Bus</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">90</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">210</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>300</strong></td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Not bus</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">110</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">90</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>200</strong></td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>Total</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>200</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>300</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>500</strong></td></tr>
+</table></div>
+<!-- TREE DIAGRAM (drawn with inline SVG, no image file): the tree below is the same problem as the table above -->
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 4, the tree route.</strong> Draw the first branches as the group shares (0.60 and 0.40). From each, draw the second branches as the conditional percents. Multiply along each path to get the leaf, which is a <em>joint</em> relative frequency.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 14px; color: #0E1C42; text-align: center; margin-bottom: 4px;"><strong>Tree diagram for the made-up school (drawn with inline SVG)</strong></div><svg viewBox="0 0 700 330" width="100%" style="max-width: 720px; display: block; margin: 0 auto;" role="img" aria-label="Tree diagram. Everyone, 500 students, splits into bus riders 0.60 and non-riders 0.40. Bus riders split into early 0.30 giving leaf 0.18, and not early 0.70 giving leaf 0.42. Non-riders split into early 0.55 giving leaf 0.22, and not early 0.45 giving leaf 0.18." xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="700" height="330" fill="#FFFFFF"/><text x="40" y="20" font-size="12" fill="#6b7a99" text-anchor="middle">everyone</text><text x="215" y="20" font-size="12" fill="#6b7a99" text-anchor="middle">first branches: group shares</text><text x="545" y="20" font-size="12" fill="#6b7a99" text-anchor="middle">second branches, then leaves (joint)</text><circle cx="40" cy="175" r="22" fill="#0E1C42"/><text x="40" y="179" font-size="11" fill="#FFFFFF" text-anchor="middle">all 500</text><line x1="62" y1="175" x2="150" y2="95" stroke="#0E1C42" stroke-width="2"/><text x="92" y="127" font-size="12" fill="#8A5A00" text-anchor="middle">60% of 500</text><rect x="150" y="77" width="130" height="36" rx="8" fill="#EEF1F8" stroke="#0E1C42" stroke-width="1.5"/><text x="215" y="100" font-size="13" fill="#0E1C42" text-anchor="middle">Bus (0.60)</text><line x1="280" y1="95" x2="420" y2="55" stroke="#0E1C42" stroke-width="2"/><text x="350" y="69" font-size="12" fill="#8A5A00" text-anchor="middle">30% early</text><rect x="420" y="34" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="52" font-size="13" fill="#0E1C42" text-anchor="middle">Early</text><text x="545" y="68" font-size="12" fill="#1a2340" text-anchor="middle">0.60 &times; 0.30 = 0.18</text><line x1="280" y1="95" x2="420" y2="125" stroke="#0E1C42" stroke-width="2"/><text x="350" y="124" font-size="12" fill="#8A5A00" text-anchor="middle">70% not early</text><rect x="420" y="104" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="122" font-size="13" fill="#0E1C42" text-anchor="middle">Not early</text><text x="545" y="138" font-size="12" fill="#1a2340" text-anchor="middle">0.60 &times; 0.70 = 0.42</text><line x1="62" y1="175" x2="150" y2="255" stroke="#0E1C42" stroke-width="2"/><text x="92" y="231" font-size="12" fill="#8A5A00" text-anchor="middle">40% of 500</text><rect x="150" y="237" width="130" height="36" rx="8" fill="#EEF1F8" stroke="#0E1C42" stroke-width="1.5"/><text x="215" y="260" font-size="13" fill="#0E1C42" text-anchor="middle">Not bus (0.40)</text><line x1="280" y1="255" x2="420" y2="215" stroke="#0E1C42" stroke-width="2"/><text x="350" y="229" font-size="12" fill="#8A5A00" text-anchor="middle">55% early</text><rect x="420" y="194" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="212" font-size="13" fill="#0E1C42" text-anchor="middle">Early</text><text x="545" y="228" font-size="12" fill="#1a2340" text-anchor="middle">0.40 &times; 0.55 = 0.22</text><line x1="280" y1="255" x2="420" y2="285" stroke="#0E1C42" stroke-width="2"/><text x="350" y="284" font-size="12" fill="#8A5A00" text-anchor="middle">45% not early</text><rect x="420" y="264" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="282" font-size="13" fill="#0E1C42" text-anchor="middle">Not early</text><text x="545" y="298" font-size="12" fill="#1a2340" text-anchor="middle">0.40 &times; 0.45 = 0.18</text></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Constructed (made-up) data.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 5, the tree and the table agree.</strong> Leaf &times; 500 gives the table cell: 0.18 &times; 500 = 90, 0.42 &times; 500 = 210, 0.22 &times; 500 = 110, 0.18 &times; 500 = 90. The leaves add to 0.18 + 0.42 + 0.22 + 0.18 = 1, as they must. The tree is the table written as percents, and the table is the tree written as counts.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 6, now use the table.</strong> The row conditionals are the second branches you were given: 30% of bus riders arrive early, 55% of non-riders do. A column question, by contrast, needs the table: <em>of the students who arrive early, what share ride the bus?</em> It is 90 / 200 = <strong>45%</strong>, not 30%. The 30% is of bus riders. The 45% is of early arrivers.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 7, say what it shows, and what it does not.</strong> &ldquo;In this made-up school, 30% of bus riders arrived early, compared with 55% of non-riders, a 25-point difference in this sample.&rdquo; That does <em>not</em> show that riding the bus makes students late. Bus routes, distance from school, and when families leave home could all matter, and nobody assigned students to ride or not.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; RESPONSIBILITY CHECKPOINT: ASSOCIATION IS NOT CAUSATION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Return to the breakfast survey. Students chose whether to eat breakfast, and nobody assigned them. That makes it an <strong>observational</strong> study. The table shows an association: breakfast eaters were more likely to report feeling alert. It does not show that breakfast <em>caused</em> the alertness. Maybe students who eat breakfast also tend to get more sleep, or have calmer mornings at home, and sleep and calm mornings are what help. The table cannot tell these stories apart.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The careful claim is the one in Worked Example 1: <em>&ldquo;In this survey, students who ate breakfast were more likely to report feeling alert.&rdquo;</em> A causal claim needs more, such as a randomized experiment, which you will study in Module 11. You also saw this idea earlier this week when a third variable explained away a strong correlation. Two-way tables are subject to the same rule: <strong>a difference in conditional percents is an association, and an association is not a cause.</strong></div>
+</div>
+
+<div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+    <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Two-Way Table Explorer</div>
+    <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Task 1.</strong> With the <em>Study method &times; Exam result</em> preset loaded, click <em>Conditional on row</em>. Click the Passed cell in the Flashcards row, then the Passed cell in the Rereading row. You should read 45/60 = 0.75 (75.0%) and 28/60 = 0.4667 (46.7%). Say each one aloud starting &ldquo;of those who&hellip;&rdquo;.<br /><strong>Task 2.</strong> Click <em>Conditional on column</em> and click the Flashcards-Passed cell. You should read 45/73 = 0.6164 (61.6%). Write the question it answers (of those who passed&hellip;). Then click the Flashcards-Did not pass cell and read 15/47 = 0.3191 (31.9%).<br /><strong>Task 3.</strong> Look at the segmented bars under the table (<em>Each row as a segmented bar</em>). They stay row-based in every view: Flashcards shows 75.0% / 25.0% and Rereading shows 46.7% / 53.3%.<br /><strong>Task 4.</strong> Change the Rereading Passed box from 28 to 96 and press Tab. Both bars now read 75.0% / 25.0% (96/128 = 0.75). What do alike bars mean? Now click <em>Conditional on column</em> and click the Flashcards-Passed cell: 45/141 = 0.3191, the same as the Flashcards share of everyone (60/188 = 0.3191). Click the <em>Study method &times; Exam result</em> button to reset.<br /><strong>Task 5.</strong> Click the <em>App version &times; Signed up (A/B test)</em> button, then <em>Conditional on row</em>. Read the sign-up rates: Version A 62/500 = 12.4%, Version B 89/500 = 17.8%, a gap of 5.4 percentage points. Using the three questions from this lesson (size of gap, size of groups, sampling variation), write one hedged sentence.</div>
+    <iframe src="https://optimaondemand.github.io/hsps-widgets/two-way-table.html" width="100%" height="900" style="border: none; display: block;" title="The Two-Way Table Explorer" allowfullscreen></iframe>
+    <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/two-way-table.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+</div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127981; WHERE PEOPLE USE THIS &middot; FALSE POSITIVES REVISITED</div>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6;"><strong>A hypothetical screening test (made up, not a real test).</strong> In Semester 1 (Lesson 8.3) you met the <em>base rate fallacy</em>: reading a test&rsquo;s accuracy as if it were the answer, and so forgetting how rare the condition is. You solved that problem with a 1,000-person count, a tree, and the long theorem. Here is the same idea, and you will see that the 1,000-person count was a two-way table all along (Lesson 9.3 said so). Suppose 1,000 people are screened for a made-up condition. 2% of them have it. The test catches 90% of those who have it, and wrongly flags 5% of those who do not.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Out of 1,000 people</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Tests positive</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Tests negative</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Total</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Has the condition (2% of 1,000)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">18</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">2</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>20</strong></td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Does not have it (98%)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">49</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">931</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>980</strong></td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>Total</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>67</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>933</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;"><strong>1,000</strong></td></tr>
+</table></div>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-bottom: 10px;"><strong>Building it.</strong> 2% of 1,000 = 20 have the condition, and 980 do not. The test catches 0.90 &times; 20 = 18 and misses 2. It wrongly flags 0.05 &times; 980 = 49 and correctly clears 931. Every cell is a whole number, which is why these made-up numbers were chosen.<br /><br /><strong>Row conditional (of those who have the condition):</strong> 18 / 20 = 90% test positive. This is the &ldquo;the test catches 90%&rdquo; fact, a statement about the test.<br /><strong>Column conditional (of those who test positive):</strong> 18 / 67 &asymp; <strong>26.9%</strong> actually have the condition. About 73% of the positives (49 of 67) are false positives. This is the number a person who just tested positive needs. It is a different question, about a different group, so it has a different denominator.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 14px; color: #0E1C42; text-align: center; margin-bottom: 4px;"><strong>The same screening problem as a tree (drawn with inline SVG)</strong></div><svg viewBox="0 0 700 330" width="100%" style="max-width: 720px; display: block; margin: 0 auto;" role="img" aria-label="Tree diagram for a hypothetical screening test. 1,000 people split into has the condition 0.02 and does not 0.98. Has the condition: positive 0.90 giving leaf 0.018, negative 0.10 giving leaf 0.002. Does not: positive 0.05 giving leaf 0.049, negative 0.95 giving leaf 0.931." xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="700" height="330" fill="#FFFFFF"/><text x="40" y="20" font-size="12" fill="#6b7a99" text-anchor="middle">everyone</text><text x="215" y="20" font-size="12" fill="#6b7a99" text-anchor="middle">first branches: group shares</text><text x="545" y="20" font-size="12" fill="#6b7a99" text-anchor="middle">second branches, then leaves (joint)</text><circle cx="40" cy="175" r="22" fill="#0E1C42"/><text x="40" y="179" font-size="11" fill="#FFFFFF" text-anchor="middle">1,000 people</text><line x1="62" y1="175" x2="150" y2="95" stroke="#0E1C42" stroke-width="2"/><text x="92" y="127" font-size="12" fill="#8A5A00" text-anchor="middle">2% of 1,000</text><rect x="150" y="77" width="130" height="36" rx="8" fill="#EEF1F8" stroke="#0E1C42" stroke-width="1.5"/><text x="215" y="100" font-size="13" fill="#0E1C42" text-anchor="middle">Has condition (0.02)</text><line x1="280" y1="95" x2="420" y2="55" stroke="#0E1C42" stroke-width="2"/><text x="350" y="69" font-size="12" fill="#8A5A00" text-anchor="middle">90% positive</text><rect x="420" y="34" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="52" font-size="13" fill="#0E1C42" text-anchor="middle">Positive</text><text x="545" y="68" font-size="12" fill="#1a2340" text-anchor="middle">0.02 &times; 0.90 = 0.018</text><line x1="280" y1="95" x2="420" y2="125" stroke="#0E1C42" stroke-width="2"/><text x="350" y="124" font-size="12" fill="#8A5A00" text-anchor="middle">10% negative</text><rect x="420" y="104" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="122" font-size="13" fill="#0E1C42" text-anchor="middle">Negative</text><text x="545" y="138" font-size="12" fill="#1a2340" text-anchor="middle">0.02 &times; 0.10 = 0.002</text><line x1="62" y1="175" x2="150" y2="255" stroke="#0E1C42" stroke-width="2"/><text x="92" y="231" font-size="12" fill="#8A5A00" text-anchor="middle">98% of 1,000</text><rect x="150" y="237" width="130" height="36" rx="8" fill="#EEF1F8" stroke="#0E1C42" stroke-width="1.5"/><text x="215" y="260" font-size="13" fill="#0E1C42" text-anchor="middle">Does not (0.98)</text><line x1="280" y1="255" x2="420" y2="215" stroke="#0E1C42" stroke-width="2"/><text x="350" y="229" font-size="12" fill="#8A5A00" text-anchor="middle">5% positive</text><rect x="420" y="194" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="212" font-size="13" fill="#0E1C42" text-anchor="middle">Positive</text><text x="545" y="228" font-size="12" fill="#1a2340" text-anchor="middle">0.98 &times; 0.05 = 0.049</text><line x1="280" y1="255" x2="420" y2="285" stroke="#0E1C42" stroke-width="2"/><text x="350" y="284" font-size="12" fill="#8A5A00" text-anchor="middle">95% negative</text><rect x="420" y="264" width="250" height="42" rx="8" fill="#FDF3E3" stroke="#C7922C" stroke-width="1.5"/><text x="545" y="282" font-size="13" fill="#0E1C42" text-anchor="middle">Negative</text><text x="545" y="298" font-size="12" fill="#1a2340" text-anchor="middle">0.98 &times; 0.95 = 0.931</text></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Hypothetical (made-up) test.</div></div>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6;"><strong>The tree agrees.</strong> The two positive leaves are 0.018 and 0.049, which add to 0.067, and 0.018 / 0.067 = 18/67. Each leaf times 1,000 gives the table cell (18, 2, 49, 931).<br /><br /><strong>The Semester 1 route agrees too.</strong> What Semester 1 called Bayes&rsquo; theorem (the &ldquo;long theorem&rdquo; of Lesson 8.2) gives (0.90 &times; 0.02) / (0.90 &times; 0.02 + 0.05 &times; 0.98) = 0.018 / 0.067 = 18/67 &asymp; 26.9%. It is the same fraction, because the table&rsquo;s column conditional <em>is</em> that computation, done with counts instead of with formulas. Compare Semester 1&rsquo;s numbers (1% have it, 90% caught, 9% false alarms), which gave about 9 in 98, roughly 9%: a different base rate, a different answer, the same method.<br /><br /><em>Why it matters, hedged.</em> When a condition is rare in the group screened, a good test can still produce many more false positives than true positives, and that is why a positive screening result is commonly followed by further testing rather than treated as the final answer. These numbers are made up to show the arithmetic. Real tests and real populations have their own numbers, so look them up before quoting any.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: CONDITIONAL FREQUENCIES AND A 100% BAR CHART</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel is the star.</strong> Put the counts in a block with the row totals in column D and the column totals in row 4. A <strong>row</strong> conditional divides each cell by its row total: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2/$D2</code>. The dollar sign locks column D, so when you fill the formula right or down, the denominator always comes from column D while the row number is free to change. A <strong>column</strong> conditional divides each cell by its column total: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2/B$4</code>. The dollar sign locks row 4. Format the results as percents with <strong>Home &rarr; Percent Style (%)</strong>. For the chart, select the counts, then choose <strong>Insert &rarr; Insert Column or Bar Chart &rarr; 100% Stacked Column</strong>. Full click-by-click steps are in Activity 3.<br /><br />
+            <strong>Desmos Scientific</strong> is for plain arithmetic only. Type each fraction as two counts so you can trace it: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">117/180</code> gives 0.65, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">117/171</code> gives 0.6842&hellip;, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">18/67</code> gives 0.2686&hellip;, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.6*500</code> gives 300.
+        </div>
+    </div>
+
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; FALSE-POSITIVE PROBLEM VIA THE TABLE; COMPARE WITH THE BAYES ROUTE (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Predict first (build the table yourself).</strong> A new hypothetical screening: 1,000 people, 4% have a made-up condition, the test catches 80% of those who have it, and it wrongly flags 10% of those who do not. Before you open any AI tool, build the two-way table by counts (condition in rows, test result in columns) and write your answer to: <em>of those who test positive, what share actually have the condition?</em><br />
+            <strong>Prompt.</strong> Now give an AI tool exactly this: <em>&ldquo;1,000 people are screened. 4% have a condition. The test catches 80% of those who have it and wrongly flags 10% of those who do not. Build the two-way table of counts, then tell me, of those who test positive, what share have the condition. Then solve it again with Bayes&rsquo; theorem and tell me whether the two answers agree.&rdquo;</em><br />
+            <strong>Verify.</strong> Check its table cell by cell against yours, and check its row and column totals. Did it divide by the number who test positive (the column total) or by the number who have the condition (the row total)? Did the Bayes route and the table route give the same fraction? Did it say &ldquo;80% chance you have it&rdquo; anywhere, mixing up the test&rsquo;s catch rate with the answer? Report what it got right, any place it was wrong or vague, and what you did about it. (Check your own table against the answer key in the Check box of Activity 2.)
+        </div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 90 minutes, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Name the Denominator</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up survey asked 320 teens which format they prefer for pleasure reading, print or e-book. 150 teens are under 15 and 170 are 15 or older. Table: under 15, 90 prefer print and 60 prefer e-book; 15 or older, 68 prefer print and 102 prefer e-book.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Draw the two-way table with all totals and audit them (rows, columns, grand total).</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute both row conditionals for &ldquo;prefer print&rdquo; and write each as a full sentence beginning &ldquo;of those who&hellip;&rdquo;.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Draw the two segmented bars (each 100% long) with the percents labeled. Do the bars look alike? In one sentence, say what they show, with a hedge.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute one column conditional, 90 divided by the print column total, and say in words which group it describes. Is it the same as the first row conditional?</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Totals: print 90 + 68 = 158, e-book 60 + 102 = 162, grand total 320. Row conditionals: of the teens under 15, 90 / 150 = 0.60 = 60% prefer print; of the teens 15 or older, 68 / 170 = 0.40 = 40% prefer print. The bars are 60/40 and 40/60: clearly different, a 20-point gap, so in this sample age group and format preference look associated (a typical sentence: &ldquo;In this made-up survey, 60% of the under-15 teens preferred print, compared with 40% of the teens 15 or older.&rdquo;). Column conditional: of the teens who prefer print, 90 / 158 &asymp; 57.0% are under 15. That is a different group (the 158 print fans) and a different number from 60%. Common error: dividing 90 by 320 gives 28.1%, a joint relative frequency, not a conditional.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Build the Table Two Ways</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up gym has 600 members. 40% are morning members and 60% are evening members. 70% of morning members attend at least three days a week, and 45% of evening members do.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Build the two-way table of counts (membership time in rows, attends at least three days in columns). Show each cell as (group size) &times; (percent), and add the totals.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Draw the tree: first branches are the group shares, second branches are the conditional percents, leaves are the products. Multiply each leaf by 600 and check that it equals your table cell.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute, with the denominator in words: of all members, what share attend at least three days? Of those who attend at least three days, what share are morning members?</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Draw the two segmented bars. In one hedged sentence, say whether membership time and attendance look associated, and add the sentence that blocks a causal reading.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Group sizes: 0.40 &times; 600 = 240 morning, 360 evening. Cells: morning attend 0.70 &times; 240 = 168, morning not 72; evening attend 0.45 &times; 360 = 162, evening not 198. Totals: attend 330, not 270, grand 600. Tree leaves: 0.28, 0.12, 0.27, 0.33, and times 600 they are 168, 72, 162, 198, which match the table. Of all members, 330 / 600 = 55% attend at least three days. Of those who attend at least three days, 168 / 330 &asymp; 50.9% are morning members. Bars: 70% versus 45%, a 25-point gap, so in this sample they look associated. A careful sentence: &ldquo;In this made-up gym, 70% of morning members and 45% of evening members attended at least three days a week.&rdquo; Not causation: members chose their time slot. Work schedules or age could affect both.<br /><br /><strong>Answer key for the AI Training task:</strong> 1,000 people, 4% = 40 have it; 80% of 40 = 32 positive, 8 negative; 960 do not; 10% of 960 = 96 positive, 864 negative; positives 32 + 96 = 128; 32 / 128 = 25%. Bayes route: (0.80 &times; 0.04) / (0.80 &times; 0.04 + 0.10 &times; 0.96) = 0.032 / 0.128 = 25%.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel: Conditionals and a 100% Chart</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">30 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a <strong>Blank workbook</strong>. Press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk29_TwoWay_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Type the headings: <strong>A1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Breakfast?</code>, <strong>B1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Felt alert</code>, <strong>C1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Not alert</code>, <strong>D1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Total</code>. Type <strong>A2</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Ate breakfast</code>, <strong>A3</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">No breakfast</code>, <strong>A4</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Total</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Enter the counts from Worked Example 1: <strong>B2</strong> 117, <strong>C2</strong> 63, <strong>B3</strong> 54, <strong>C3</strong> 66.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:C2)</code> and press Enter. Copy it down to <strong>D3</strong>. In <strong>B4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:B3)</code> and copy it right to <strong>C4</strong>. In <strong>D4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(D2:D3)</code>. Expect 180, 120, 171, 129, and 300.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Row conditionals.</strong> In <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Row %: alert</code> and in <strong>G1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Row %: not alert</code>. In <strong>F2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2/$D2</code> and press Enter. In <strong>G2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C2/$D2</code>. Select <strong>F2:G2</strong> and drag the fill handle (the small square at the lower right corner) down one row. The <strong>$</strong> keeps every formula dividing by column D. Select F2:G3 and click <strong>Percent Style (%)</strong> on the Home tab. Expect 65%, 35%, 45%, 55%.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">6</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Column conditionals.</strong> In <strong>I1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Col %: alert</code> and in <strong>J1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Col %: not alert</code>. In <strong>I2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2/B$4</code> and in <strong>J2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C2/C$4</code>. Fill down one row, then format as percents. Expect 68.4% in I2 (breakfast eaters among the alert) and 48.8% in J2 (breakfast eaters among the not alert). The <strong>$</strong> now locks row 4. Next to each percent, write which group it describes.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">7</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Chart.</strong> Select <strong>A1:C3</strong> (the counts and their labels, not the totals). Open the <strong>Insert</strong> tab, click <strong>Insert Column or Bar Chart</strong>, and choose <strong>100% Stacked Column</strong>. If your two bars are the breakfast groups, you have a segmented bar graph. If instead the bars are &ldquo;Felt alert&rdquo; and &ldquo;Not alert&rdquo;, click <strong>Chart Design &rarr; Switch Row/Column</strong>. Add a chart title and axis labels.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">8</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write one sentence that names both groups and both percents, says &ldquo;in this sample,&rdquo; and does not use a cause verb.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Row conditionals should read 65%, 35%, 45%, 55% (formulas =B2/$D2 and so on), and the column conditionals for the Felt alert column 68.4% (breakfast) and 48.8% (no breakfast) in row 2 and row 3 of columns I and J; check that you used =B2/B$4 and its fill-down. If every percent shows 100% or an error, check that you typed the $ in front of D (or in front of 4), not after it. A model sentence: &ldquo;In this made-up survey of 300 students, 65% of the students who ate breakfast felt alert, compared with 45% of those who did not.&rdquo;</div>
+</details>
+</div></div>
+
+<div style="margin-bottom: 6px;"></div>
+</div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 29.3 &mdash; Read the Table, Claim Only What It Shows</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded questions (conditional percents, denominators, bars, building a table from percents, a screening problem) and one short written item comparing two groups. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 29.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on conditional percents, segmented bars, association, building a table from percents (including by tree), and careful wording.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Bivariate Data &amp; Regression</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 29.3 &middot; Conditional Relative Frequencies, Segmented Bars, and Association</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

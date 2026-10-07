@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 28.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 28.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 28.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Residuals: Assessing a Linear Fit</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A line is only as good as what it misses. Look at the misses.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Residuals (observed minus predicted) and what their signs mean; residual plots; the biggest miss; outliers and points that pull the line; residuals that add to zero and the sum of squared residuals; a residual column in Excel; a good fit is still only an association</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Fit the Line interactive, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compute a residual (observed minus predicted) and say what its sign means in context.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> read a residual plot and decide whether a straight line is adequate (random scatter) or not (a curve or a fan shape).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> spot the biggest miss, and tell an outlier from a point that pulls the line hard, in plain words.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that the residuals of a least-squares line add to zero (and check it on small data), and that the line makes the sum of squared residuals as small as possible.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Last lesson you learned a rule for picking one best line: make the sum of squared misses as small as possible. But a rule that picks the <em>best</em> line does not promise that the line is <em>good</em>. Even the best straight line through a curved cloud is a poor description of it. How would you find out?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The answer is to stop staring at the line and look at what is <em>left over</em>: the leftovers, point by point. If the line has captured the real pattern, the leftovers should look like nothing at all, just random noise. If the leftovers have a shape, the line has missed something, and the shape tells you what. Honest modelers do this check every time, because it is easy to love a line and hard to admit it is wrong.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">That honesty is this module's virtue, <strong>responsibility</strong>. Today you learn to ask of every fitted line: what did it miss, and where?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every scenario, dataset, and equation in this lesson is <strong>constructed</strong> to teach the idea. None of it is real data about real people, teams, or plants.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128207; THE RESIDUAL: OBSERVED MINUS PREDICTED</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every data point has an observed value, <em>y</em>. The line gives a predicted value, &#375;. The difference is called the <strong>residual</strong>:</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">residual = <em>y</em> &minus; &#375; &nbsp;&nbsp; (observed minus predicted)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The order matters, and it is always <strong>observed minus predicted</strong>. (Last lesson called this the &ldquo;miss.&rdquo; Residual is the name statisticians use.) The sign tells you the direction of the miss:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Positive residual.</strong> The observed value is above the line. The model <em>underpredicted</em>: the actual value was higher than predicted.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Negative residual.</strong> The observed value is below the line. The model <em>overpredicted</em>: the actual value was lower than predicted.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Zero residual.</strong> The point sits exactly on the line.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The size tells you how far off the model was, in the same units as <em>y</em>. A residual of &minus;5.6 quiz points is a miss of about 5.6 points, in the downward direction.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: ONE RESIDUAL, AND WHAT ITS SIGN MEANS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The least-squares line for the <em>Hours studied</em> scenario (15 constructed students) is &#375; = 49.404 + 6.5542<em>x</em>, where <em>x</em> is hours studied and &#375; is predicted quiz score in points. A made-up student studied 4 hours and scored 78. Another made-up student studied 4 hours and scored 70. Find each residual and say what it means.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> First I find the predicted score at 4 hours, because every residual needs a prediction to subtract. Then I subtract in the order observed minus predicted, and I look at the sign before I say anything.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prediction.</strong> &#375; = 49.404 + 6.5542 &times; 4 = 49.404 + 26.2168 = <strong>75.6208</strong>, about 75.6 points.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Student with 78.</strong> residual = 78 &minus; 75.6208 = <strong>+2.38</strong>. Positive: this student scored about 2.4 points <em>higher</em> than the model predicted for 4 hours.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Student with 70.</strong> residual = 70 &minus; 75.6208 = <strong>&minus;5.62</strong>. Negative: this student scored about 5.6 points <em>lower</em> than the model predicted.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Sense check.</strong> 78 is above 75.6, so the point is above the line and the residual is positive. 70 is below 75.6, so the residual is negative. The signs agree with the picture.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: SEVEN POINTS, ALL RESIDUALS, AND THEIR SUM</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up player records free throws made out of 20 after <em>x</em> days of practice, for 7 days. The least-squares line is &#375; = 3 + 2<em>x</em> (free throws made, predicted). Compute the predicted value and the residual at every point, then add the residuals and square them.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> I will build a table with one row per point, so that no residual is lost. Columns: <em>x</em>, observed <em>y</em>, predicted &#375;, residual <em>y</em> &minus; &#375;, and residual squared.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Day (<em>x</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Made (<em>y</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Predicted &#375; = 3 + 2<em>x</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Residual <em>y</em> &minus; &#375;</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Residual squared</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(1) = 5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(2) = 7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&minus;3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(3) = 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">13</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(4) = 11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">12</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(5) = 13</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&minus;1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(6) = 15</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3 + 2(7) = 17</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&minus;1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Totals</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>0</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>18</strong></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Sum of the residuals.</strong> 1 + (&minus;3) + 1 + 2 + (&minus;1) + 1 + (&minus;1) = <strong>0</strong>. The positives (1 + 1 + 2 + 1 = 5) cancel the negatives (&minus;3 &minus; 1 &minus; 1 = &minus;5) exactly.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Sum of squared residuals (SSE).</strong> 1 + 9 + 1 + 4 + 1 + 1 + 1 = <strong>18</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Biggest miss.</strong> The largest residual in size is &minus;3 at day 2 (the player made 4 free throws; the line predicted 7). It is the biggest miss, and it is a <em>negative</em> one.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Check the line.</strong> The means are <em>x</em>&#772; = 28 &divide; 7 = 4 and <em>y</em>&#772; = 77 &divide; 7 = 11, and 3 + 2(4) = 11, so the line passes through (<em>x</em>&#772;, <em>y</em>&#772;), as a least-squares line must.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; WHY THE RESIDUALS ADD TO ZERO, AND WHAT SSE IS FOR</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The zero in the last example was not luck. It is a fact about every least-squares line (one that has an intercept, like ours): <strong>the residuals add to zero</strong>, apart from tiny rounding. The line sits so that the misses above it exactly balance the misses below it. You cannot prove it here, but you can <em>check</em> it on any small data set, and you just did.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">That fact is also a trap, so notice what it does <em>not</em> say. Residuals adding to zero does not mean the line is good. Even a terrible line through a curved cloud has residuals that add to zero. A zero sum carries no information about quality. For quality we use the second fact from last lesson: the least-squares line makes the sum of the <em>squared</em> residuals, the SSE, as small as possible.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Compare the same seven points with two other lines:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Line</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Residuals at <em>x</em> = 1 to 7</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sum of residuals</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">SSE</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 3 + 2<em>x</em> (least squares)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1, &minus;3, 1, 2, &minus;1, 1, &minus;1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">18</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 4 + 2<em>x</em> (shifted up 1)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0, &minus;4, 0, 1, &minus;2, 0, &minus;2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&minus;7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">25</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 2 + 2.5<em>x</em> (tilted and shifted)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.5, &minus;3.0, 0.5, 1.0, &minus;2.5, &minus;1.0, &minus;3.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&minus;7.0</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">32.00</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Shifting the line up by 1 pushes every residual down by 1, so seven residuals drop by 7 in total: the sum goes from 0 to &minus;7, and the SSE rises from 18 to 25. The tilted line does worse still (sum &minus;7.0, SSE 32). One more caution: other lines can also have residuals that add to 0 (any line through the point (<em>x</em>&#772;, <em>y</em>&#772;) does), so a zero sum cannot pick the best line. The SSE can: the least-squares line has the smallest one.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; READING A RESIDUAL PLOT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>residual plot</strong> graphs each residual against <em>x</em>. The horizontal line at 0 is the fitted line itself: points above it are above the line, points below it are below. You are looking at the line's misses, magnified and with the slope removed. Ask one question: <strong>is there a pattern?</strong></div><div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px;"><div style="flex: 1; min-width: 220px; max-width: 300px;"><svg viewBox="0 0 300 170" width="100%" style="max-width: 300px; height: auto; background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 6px;" role="img" aria-label="Residual plot: Random scatter"><text x="150.0" y="15" text-anchor="middle" font-size="12" fill="#0E1C42" font-weight="bold">Random scatter</text><line x1="36" y1="84.0" x2="290" y2="84.0" stroke="#0E1C42" stroke-width="1.5"/><line x1="36" y1="24" x2="36" y2="144" stroke="#D0D9E8"/><text x="32" y="88.0" text-anchor="end" font-size="10" fill="#666">0</text><text x="150.0" y="162" text-anchor="middle" font-size="10" fill="#666">x</text><text x="10" y="84.0" font-size="10" fill="#666" transform="rotate(-90 10 84.0)" text-anchor="middle">residual</text><circle cx="36.0" cy="45.6" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="64.2" cy="109.6" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="92.4" cy="68.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="120.7" cy="132.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="148.9" cy="52.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="177.1" cy="93.6" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="205.3" cy="55.2" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="233.6" cy="119.2" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="261.8" cy="71.2" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="290.0" cy="93.6" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/></svg></div><div style="flex: 1; min-width: 220px; max-width: 300px;"><svg viewBox="0 0 300 170" width="100%" style="max-width: 300px; height: auto; background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 6px;" role="img" aria-label="Residual plot: A curve"><text x="150.0" y="15" text-anchor="middle" font-size="12" fill="#0E1C42" font-weight="bold">A curve</text><line x1="36" y1="84.0" x2="290" y2="84.0" stroke="#0E1C42" stroke-width="1.5"/><line x1="36" y1="24" x2="36" y2="144" stroke="#D0D9E8"/><text x="32" y="88.0" text-anchor="end" font-size="10" fill="#666">0</text><text x="150.0" y="162" text-anchor="middle" font-size="10" fill="#666">x</text><text x="10" y="84.0" font-size="10" fill="#666" transform="rotate(-90 10 84.0)" text-anchor="middle">residual</text><circle cx="36.0" cy="36.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="64.2" cy="68.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="92.4" cy="92.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="120.7" cy="108.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="148.9" cy="116.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="177.1" cy="116.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="205.3" cy="108.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="233.6" cy="92.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="261.8" cy="68.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="290.0" cy="36.0" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/></svg></div><div style="flex: 1; min-width: 220px; max-width: 300px;"><svg viewBox="0 0 300 170" width="100%" style="max-width: 300px; height: auto; background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 6px;" role="img" aria-label="Residual plot: A fan"><text x="150.0" y="15" text-anchor="middle" font-size="12" fill="#0E1C42" font-weight="bold">A fan</text><line x1="36" y1="84.0" x2="290" y2="84.0" stroke="#0E1C42" stroke-width="1.5"/><line x1="36" y1="24" x2="36" y2="144" stroke="#D0D9E8"/><text x="32" y="88.0" text-anchor="end" font-size="10" fill="#666">0</text><text x="150.0" y="162" text-anchor="middle" font-size="10" fill="#666">x</text><text x="10" y="84.0" font-size="10" fill="#666" transform="rotate(-90 10 84.0)" text-anchor="middle">residual</text><circle cx="36.0" cy="81.5" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="64.2" cy="87.7" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="92.4" cy="77.8" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="120.7" cy="93.8" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="148.9" cy="70.5" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="177.1" cy="102.5" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="205.3" cy="59.4" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="233.6" cy="116.0" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="261.8" cy="44.6" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><circle cx="290.0" cy="132.0" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/></svg></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 10px;"><em>The three plots above use constructed residuals to show the shapes.</em></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Random scatter</strong> (left). Positives and negatives mixed with no shape, about the same spread everywhere. <strong>The line is adequate.</strong> This is what you hope for.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A curve</strong> (middle). The residuals run in streaks: positive, then negative, then positive again, like a smile. The straight line is too straight; the real relationship bends. <strong>The line is not adequate</strong>, even if it has a small SSE. A curved model would do better.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A fan</strong> (right). The residuals stay close to 0 at one end and spread wider and wider toward the other. The misses are not equally large everywhere, so predictions are far less trustworthy on one side. <strong>The line is not adequate</strong> as a description of the spread.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Why does this beat looking at the scatter plot alone? Because the eye is good at spotting a departure from a flat line at zero, and poor at spotting a slight bend in a tilted cloud.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: READING A LIST OF RESIDUALS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A constructed least-squares fit to 10 points (<em>x</em> = 1 to 10) leaves these residuals, in order of <em>x</em>: 6.0, 2.0, &minus;1.0, &minus;3.0, &minus;4.0, &minus;4.0, &minus;3.0, &minus;1.0, 2.0, 6.0. Is a straight line adequate?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> I do not need a graph to start. I read the signs in order of <em>x</em> and look for streaks.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Signs, in order:</strong> + + &minus; &minus; &minus; &minus; &minus; &minus; + +.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Streaks:</strong> positive at the left end, a long negative run in the middle, positive again at the right end. The sign changes just twice, and the pattern is a smile.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Sanity check:</strong> the residuals add to 0 (to rounding), as they must for a least-squares line, so nothing is wrong with the arithmetic. The sum being 0 says nothing about the shape.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Conclusion.</strong> Streaks like this mean a straight line is not adequate; the data curve. Random signs, flipping back and forth with no run, would have said the opposite.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; THE BIGGEST MISS, AND A POINT THAT PULLS THE LINE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Two different questions come up about unusual points, and they have different answers.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The biggest miss</strong> is the point with the largest residual in size: the point the line describes worst. A point far from the line, with a large residual, is called an <strong>outlier</strong> in the fit.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A point that pulls the line hard</strong> (statisticians say it has high <em>leverage</em>, and is <em>influential</em> if it actually changes the line a lot) is a point <em>far from the others in the x direction</em>. A point out at the edge of the <em>x</em> values acts like the end of a lever: the line swings toward it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the surprise: they are not the same thing. Use six constructed points: (1, 3), (2, 5), (3, 4), (4, 7), (5, 6), (6, 8). Their least-squares line is &#375; = 2.400 + 0.886<em>x</em>. Now add one more point two ways.</div><div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px;"><div style="flex: 1; min-width: 220px; max-width: 300px;"><svg viewBox="0 0 300 170" width="100%" style="max-width: 300px; height: auto; background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 6px;" role="img" aria-label="Add (3.5, 12): an outlier"><text x="150.0" y="14" text-anchor="middle" font-size="12" fill="#0E1C42" font-weight="bold">Add (3.5, 12): an outlier</text><line x1="30" y1="146" x2="290" y2="146" stroke="#999"/><line x1="30" y1="22" x2="30" y2="146" stroke="#999"/><line x1="38.1" y1="106.6" x2="273.8" y2="0.4" stroke="#C7922C" stroke-width="2"/><circle cx="46.2" cy="112.9" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="62.5" cy="96.4" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="78.8" cy="104.7" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="95.0" cy="79.9" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="111.2" cy="88.1" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="127.5" cy="71.6" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="86.9" cy="38.5" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><text x="150.0" y="164" text-anchor="middle" font-size="10" fill="#666">x</text></svg></div><div style="flex: 1; min-width: 220px; max-width: 300px;"><svg viewBox="0 0 300 170" width="100%" style="max-width: 300px; height: auto; background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 6px;" role="img" aria-label="Add (14, 3): far to the right"><text x="150.0" y="14" text-anchor="middle" font-size="12" fill="#0E1C42" font-weight="bold">Add (14, 3): far to the right</text><line x1="30" y1="146" x2="290" y2="146" stroke="#999"/><line x1="30" y1="22" x2="30" y2="146" stroke="#999"/><line x1="38.1" y1="92.9" x2="273.8" y2="100.4" stroke="#C7922C" stroke-width="2"/><circle cx="46.2" cy="112.9" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="62.5" cy="96.4" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="78.8" cy="104.7" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="95.0" cy="79.9" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="111.2" cy="88.1" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="127.5" cy="71.6" r="4" fill="#2196D0" stroke="#0E1C42" stroke-width="0.8"/><circle cx="257.5" cy="112.9" r="4" fill="#C0392B" stroke="#0E1C42" stroke-width="0.8"/><text x="150.0" y="164" text-anchor="middle" font-size="10" fill="#666">x</text></svg></div></div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 620px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Data</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Least-squares line</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">What happened</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The six points alone</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 2.400 + 0.886<em>x</em></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The baseline.</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Add (3.5, 12): a big miss in the <em>middle</em> of the <em>x</em> values</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 3.329 + 0.886<em>x</em></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Residual at the new point is 5.57: a huge miss. But the slope did not move at all (0.886); only the intercept shifted. An outlier, but it pulls little.</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Add (14, 3): far to the <em>right</em> of the others</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 5.455 + &minus;0.0625<em>x</em></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The slope flips from 0.886 to &minus;0.0625: the line is nearly flat. One point changed the story. Yet its own residual is only &minus;1.58, smaller than the residual 2.92 at (6, 8). The line bent toward it, so it hides its own influence.</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Lesson learned.</strong> A small residual does not clear a point of suspicion. A point far out in <em>x</em> can drag the line toward itself and look innocent in the residual plot. When you see such a point, refit the line with and without it and report both. If the answer changes a lot, say so; do not quietly delete the point to get a result you like. Honesty about a data point you cannot explain is part of responsibility.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Fit the Line (residuals)</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Two tasks.</strong> All the data are made up. <strong>(1) Hours studied.</strong> Choose the <em>Hours studied</em> button (15 constructed students; least-squares line &#375; = 49.404 + 6.5542<em>x</em>, SSE about 196.19). Keep <em>Show residual segments</em> checked: each vertical segment is one residual. Scroll to the <em>Residual plot</em> panel under the scatter plot and press <em>Residuals from least-squares</em>. Read the note beneath it: it reports the <em>Sum of residuals</em> (about 0 for least squares) and the SSE. On the scatter plot find the point ringed <em>biggest miss</em> (red ring) and the point ringed <em>pulls hardest</em> (gold dashed ring). Are they the same point? Write down which is which, and the residual of the biggest miss. Then drag one point and watch the residual plot and the rings respond. Optional: switch to <em>My line</em> mode, make the line worse, and see what happens to the residual plot. <strong>(2) A curve.</strong> Press <em>Plant growth (curved)</em> (16 constructed measurements; least-squares line &#375; = 13.875 + 1.3199<em>x</em>, <em>r</em>&sup2; about 0.7161). Look at the <em>Residual plot</em> with <em>Residuals from least-squares</em> selected, and read the note: it points out streaks, long runs of one sign, then the other, then back. Describe the shape in one sentence and say whether a straight line is adequate here, even though <em>r</em>&sup2; looks fairly high.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/regression-playground.html" width="100%" height="1280" style="border: none; display: block;" title="Fit the Line" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/regression-playground.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A RESIDUAL COLUMN, THE SUM, AND A RESIDUAL PLOT, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will compute every residual for Worked Example 2 in a spreadsheet, check that they add to about 0, and draw the residual plot. Use the same constructed data: free throws made out of 20 after 1 to 7 days of practice, with the least-squares line &#375; = 3 + 2<em>x</em>.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Day (<em>x</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">1</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">2</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">3</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">5</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">6</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">7</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Made (<em>y</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">13</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">12</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk28_L1_YourName</code> (practice; you do not upload it).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> to <strong>D1</strong> type the headings <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Day</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Made</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Predicted</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Residual</code>, pressing <strong>Tab</strong> after each.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Type the seven days in <strong>A2</strong> to <strong>A8</strong> (1 to 7) and the seven made values in <strong>B2</strong> to <strong>B8</strong> (6, 4, 10, 13, 12, 16, 16).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=3+2*A2</code>, then press <strong>Enter</strong>. This is the predicted value &#375; from the line.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2-C2</code>, then press <strong>Enter</strong>. This is the residual: observed minus predicted.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C2</strong>, then hold <strong>Shift</strong> and click <strong>D2</strong> to select both cells. Drag the small square at the bottom right corner of the selection down to row 8 (this is called <strong>filling down</strong>). Each row now has its own predicted value and residual.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Check column D against the table in Worked Example 2: it should read 1, &minus;3, 1, 2, &minus;1, 1, &minus;1.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D10</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(D2:D8)</code>, then press <strong>Enter</strong>. Excel shows 0. (On some data a sum like this shows a tiny number such as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1.2E-15</code> instead of 0. That is floating-point rounding inside the computer, and it means &ldquo;zero for all practical purposes.&rdquo;)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D11</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUMSQ(D2:D8)</code>, then press <strong>Enter</strong>. Excel shows 18, the SSE.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Draw the residual plot.</strong> Click <strong>A1</strong> and drag to <strong>A8</strong>, then hold <strong>Ctrl</strong> and drag from <strong>D1</strong> to <strong>D8</strong>, so that both columns and their headings are selected. Click the <strong>Insert</strong> tab, open the <strong>Scatter (X, Y)</strong> button in the <strong>Charts</strong> group, and pick the first choice, <strong>Scatter</strong> (dots only).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Give the chart axis titles with units (for example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Days of practice</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Residual (free throws)</code>) using the green <strong>+</strong> button (<strong>Chart Elements</strong>) and <strong>Axis Titles</strong>. Look at the shape of the dots: is there a pattern, or do they look random?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Honest note.</strong> Menu names and button positions differ a little between desktop Excel and Excel for the web, and selecting two separate columns with Ctrl can behave differently in the web version. If it does not work, copy the Residual column next to the Day column and select those two together. Your chart must show the residuals against <em>x</em> with axis titles.</div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; RESPONSIBILITY: A GOOD-LOOKING LINE IS STILL ONLY AN ASSOCIATION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Suppose your residual plot is a perfect, patternless cloud and the SSE is small. You have shown that a <em>straight line is a fair summary of how these two variables move together</em>. You have <strong>not</strong> shown that changing <em>x</em> would change <em>y</em>. A good-looking line is still only an association: correlation is not causation. Something else, such as how much a student already knew or how much sleep they got, could be moving both. Lesson 28.3 takes this up fully.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A residual plot checks the <em>shape</em> of the fit. It cannot check the <em>cause</em>. In practice, analysts in many fields look at residual plots before trusting a fitted line for prediction, but they still do not claim a cause from a line fitted to observed data alone.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; ONE RESIDUAL IN DESMOS, A RESIDUAL COLUMN IN EXCEL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Desmos Scientific</strong> does plain arithmetic, so a single residual is just a prediction and a subtraction. For the student who studied 4 hours and scored 78, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">78-(49.404+6.5542*4)</code> and you get about 2.38. Keep the whole prediction inside its own parentheses so the subtraction takes the entire predicted value. For the student who scored 70, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">70-(49.404+6.5542*4)</code> and you get about &minus;5.62. The order is always observed minus predicted; reversing it flips the sign.<br /><br />
+            <strong>Excel</strong> does many residuals at once: put the observed values in one column and the predicted values in the next, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2-C2</code> (observed minus predicted) in the first residual cell, and fill down. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(D2:D8)</code> adds the residuals and should show 0 or a number extremely close to 0 (such as 1E-15), for a least-squares line. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUMSQ(D2:D8)</code> gives the sum of the squared residuals. To see the shape, select the <em>x</em> column and the residual column and insert a <strong>Scatter</strong> chart. Lesson 28.2 teaches the functions that compute the slope and intercept directly.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A made-up practice study has these (x, y) points: (1, 6), (2, 4), (3, 10), (4, 13), (5, 12), (6, 16), (7, 16). The fitted line is predicted y = 3 + 2x. List the residual at each point (observed minus predicted), say whether each is above or below the line, and say what the sum of the residuals should be.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, work out the seven residuals yourself and the sum. (You should have 1, &minus;3, 1, 2, &minus;1, 1, &minus;1 and a sum of 0.)<br />
+            <strong>Verify.</strong> Check every residual the AI gives, one at a time, against yours, and <strong>check the signs yourself</strong>: is each point really above or below the line? Common errors to look for: subtracting in the wrong order (predicted minus observed, which flips every sign), an arithmetic slip in one row, saying the residuals sum to a number other than 0, or describing a negative residual as &ldquo;the model underpredicted.&rdquo; Report which items it got right, which it got wrong, and anything it stated too confidently. Then ask what the sum of squared residuals is and verify it yourself (it is 18).
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 40 minutes, plus the Excel steps and the interactive above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Residual or Not? Sign and Size</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A constructed model predicts the number of cups of tea a cafe sells from the number of rainy hours: &#375; = 20 + 6<em>x</em>. On one day with 3 rainy hours the cafe sold 41 cups. Compute the residual and say what its sign means in context.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">On another day with 5 rainy hours the cafe sold 46 cups. Compute the residual. Which of the two days was the bigger miss, and which was an underprediction?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Narrate: say aloud why the order is observed minus predicted, and what a residual of 0 tells you.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. &#375; = 20 + 6(3) = 38. Residual = 41 &minus; 38 = <strong>+3</strong>. The cafe sold about 3 cups <em>more</em> than the model predicted (the model underpredicted). 2. &#375; = 20 + 6(5) = 50. Residual = 46 &minus; 50 = <strong>&minus;4</strong>. The cafe sold about 4 cups <em>fewer</em> than predicted (the model overpredicted). The 5-hour day was the bigger miss (4 is more than 3 in size); the 3-hour day was the underprediction. 3. The order is fixed so that everyone gets the same sign: positive means the point is above the line. A residual of 0 means the point lies exactly on the line.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Check the Sum, Then Read the Shape</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A constructed least-squares line is &#375; = 2 + 3<em>x</em> and five points are (1, 4), (2, 9), (3, 10), (4, 15), (5, 17). Compute the five residuals. Add them. Square them and add those too.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A different line fitted to a different data set leaves these residuals, in order of <em>x</em> from 1 to 8: +4, +2, +1, &minus;1, &minus;3, &minus;4, &minus;2, +3. Read the signs. Is a straight line adequate? Say what you would try next.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A third residual plot is close to 0 for small <em>x</em> and then fans out wider and wider. State what that means for predictions at large <em>x</em>.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Predictions 5, 8, 11, 14, 17. Residuals 4 &minus; 5 = &minus;1; 9 &minus; 8 = +1; 10 &minus; 11 = &minus;1; 15 &minus; 14 = +1; 17 &minus; 17 = 0. Sum = (&minus;1) + 1 + (&minus;1) + 1 + 0 = <strong>0</strong>. Squares 1, 1, 1, 1, 0, so SSE = <strong>4</strong>. (The means are <em>x</em>&#772; = 3, <em>y</em>&#772; = 11, and 2 + 3(3) = 11, so the line does pass through (<em>x</em>&#772;, <em>y</em>&#772;).) 2. Signs: + + + &minus; &minus; &minus; &minus; +. That is a streak pattern (positive, negative, positive): a curve, so a straight line is <em>not</em> adequate; try a curved model. (These residuals add to 0, so the arithmetic is consistent, but the sum alone would not have told you about the shape.) 3. The misses are small at small <em>x</em> and large at large <em>x</em>, so the line is much less reliable for predictions at large <em>x</em>, and one &ldquo;typical miss&rdquo; does not describe the whole range.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Outlier or Influential? Make the Call</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Using the interactive, in <em>Hours studied</em> mode find the point ringed <em>biggest miss</em> and the point ringed <em>pulls hardest</em>. Write two sentences: one on why a point can have a big residual and still pull the line only a little, and one on why a point can pull the line hard and yet have a small residual.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Back to the six points (1, 3), (2, 5), (3, 4), (4, 7), (5, 6), (6, 8) with line &#375; = 2.400 + 0.886<em>x</em>. Adding (14, 3) changed the slope to &minus;0.0625. A classmate says &ldquo;(14, 3) has a small residual, so it is not a problem.&rdquo; Explain the mistake and what you would do.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one sentence, explain why a good-looking line with a patternless residual plot still does not show that <em>x</em> causes <em>y</em>.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. A point in the middle of the <em>x</em> values can be far from the line (a big residual) without tilting it much, because it has little leverage. A point far out in <em>x</em> has a lot of leverage: the line bends toward it, so its own residual can be small even though it moved the whole line. 2. The slope changed from 0.886 to &minus;0.0625, so the point is influential; the small residual (&minus;1.58) is small <em>because</em> the line bent toward it. Refit with and without it, report both lines, and say honestly that one point changed the answer. 3. A residual plot checks only the shape of the fit. Something else could be moving both variables, so the line describes an association and does not show a cause.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 28.1 &mdash; Residuals</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Compute and interpret residuals, add up and square them, read residual plots, tell outliers from influential points, a residual column in Excel, an applied item, and an AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 28.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on computing residuals, reading residual plots, why residuals sum to zero, influential points, and comparing lines by SSE.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 28.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will measure how strongly two variables move together with a single number, the correlation coefficient, and compute it and the line in Excel.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 28.1 &middot; Residuals: Assessing a Linear Fit</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

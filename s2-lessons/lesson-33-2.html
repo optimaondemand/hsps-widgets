@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 33.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 33.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Honest numbers for the common good</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 33.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Margin of Error: How Far Can a Poll Miss?</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A poll is one draw from a big pile of polls we might have gotten, and the width of that pile is the margin of error.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Simulating many polls; margin of error as the distance that holds the middle 95% of poll results; the safe rule 1 &divide; &radic;<em>n</em> and the formula 1.96 &times; &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>); planning a sample size; reading a lead honestly; what the margin does not cover</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Margin of Error Lab, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes: roughly 40 minutes for reading, examples, the interactive, and the Excel steps, and about 35 minutes for the activities.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain, using a simulation of many polls, that the <strong>margin of error</strong> is the distance from the true value within which about 95 of every 100 poll results land.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compute a margin of error two ways, the <strong>safe rule</strong> 1 &divide; &radic;<em>n</em> and the formula 1.96 &times; &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>), and say why the safe rule does not need to know <em>p</em>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> plan a sample size for a target margin of error with <em>n</em> = (100 &divide; <em>m</em>)&sup2; (rounded up), and explain why cutting the margin in half takes four times as many people.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> read a poll honestly: decide whether a lead is clear or too close to call, and name what a margin of error does <strong>not</strong> cover.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up news story reads: <strong>&ldquo;Rivera 52%, Okafor 48%. Margin of error: plus or minus 3.5 points.&rdquo;</strong> Rivera has the bigger number. Does that mean Rivera is ahead? And what is that &ldquo;plus or minus&rdquo; doing there?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Lesson 33.1 you saw that when you take many samples, the sample means (or sample proportions) pile up in a bell shape around the truth, and the width of that pile is the <strong>standard error</strong>. Today we turn that width into something a reader can use: a statement of how far one poll can miss. We will find it first by <em>simulation</em>, by running a thousand pretend polls and looking at the pile. Only after you have seen it will we write the formula.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, shows up here in a quiet way. A town deciding about a park, a school board choosing a schedule, and neighbors weighing a ballot measure all lean on numbers from polls. A person who can read those numbers honestly, without overselling a lead and without throwing out a useful poll, is doing a real service to everyone who has to decide.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every poll, percent, and candidate in this lesson is <strong>made up</strong> (constructed) or <strong>simulated</strong> by a computer. Rivera and Okafor are invented names. None of it is real polling data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; ONE POLL, ONE DRAW FROM A BIG PILE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Imagine a made-up town where exactly 40% of residents favor a new library-hours plan. That true percent is a <strong>parameter</strong>, and in real life nobody knows it. A pollster takes a simple random sample of <em>n</em> people and reports the sample percent, a <strong>statistic</strong>. Another random sample of the same size would give a slightly different percent, and another a third. This is the sampling variation you studied in Lesson 33.1 and in Module 11.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the key move. Suppose we <em>could</em> run the poll a thousand times (a computer can, if we tell it the truth). The thousand results form a pile, centered near the true 40% with a bell shape. Now ask: <strong>how far from the truth do the middle 95 of every 100 results land?</strong> Call that distance <em>d</em>. If you knew <em>d</em>, then for any single poll you could say, &ldquo;Polls like this land within <em>d</em> points of the truth about 95 times in 100.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">That distance <em>d</em> is the <strong>margin of error</strong> (MOE). Notice where the idea comes from: it comes from the <em>pile of possible polls</em>, not from a formula. The formula, which comes later today, is just a shortcut for finding the width of the pile without running a thousand polls.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: A THOUSAND SIMULATED POLLS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> In a made-up town, 40% favor the library-hours plan. A computer script (fixed starting seed, so the run can be repeated) draws 1000 random samples at each of three sizes, <em>n</em> = 100, 400, and 1600, and records the percent who say yes in each. For each size, find the distance <em>d</em> that holds the middle 95% of the 1000 results, and compare the three distances.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> For each size I measure how far every result is from the truth, 40, ignoring direction. Then I sort those 1000 distances from smallest to largest and read the 950th one. Ninety-five percent of the polls are at least that close, so that distance is the simulated margin of error. (This is how the lab&rsquo;s tile <em>Simulated margin of error</em> is defined.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">For <em>n</em> = 400, here is the pile of all 1000 results, in 2-point bins.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="background: #F8F9FA; border: 1px solid #D0D9E8; border-radius: 8px; padding: 12px; margin-bottom: 14px;"><svg viewBox="0 0 640 260" width="100%" style="max-width: 640px; display: block; margin: 0 auto;" role="img" aria-label="Histogram of 1000 simulated poll results at n = 400 from a population with true percent 40. Results pile up in a bell shape around 40, ranging from about 30 to 47. The shaded band from 35.2 to 44.8 holds 947 of the 1000 results."><rect x="0" y="0" width="640" height="260" fill="#FFFFFF"/><rect x="229.8" y="30" width="253.1" height="160.0" fill="#FDF3E3"/><rect x="92.7" y="188.9" width="52.7" height="1.1" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="119.1" y="184.9" font-size="12" text-anchor="middle" fill="#1a2340">2</text><rect x="145.5" y="185.2" width="52.7" height="4.8" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="171.8" y="181.2" font-size="12" text-anchor="middle" fill="#1a2340">9</text><rect x="198.2" y="165.9" width="52.7" height="24.1" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="224.5" y="161.9" font-size="12" text-anchor="middle" fill="#1a2340">45</text><rect x="250.9" y="104.3" width="52.7" height="85.7" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="277.3" y="100.3" font-size="12" text-anchor="middle" fill="#1a2340">160</text><rect x="303.6" y="47.5" width="52.7" height="142.5" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="330.0" y="43.5" font-size="12" text-anchor="middle" fill="#1a2340">266</text><rect x="356.4" y="41.6" width="52.7" height="148.4" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="382.7" y="37.6" font-size="12" text-anchor="middle" fill="#1a2340">277</text><rect x="409.1" y="91.4" width="52.7" height="98.6" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="435.5" y="87.4" font-size="12" text-anchor="middle" fill="#1a2340">184</text><rect x="461.8" y="161.6" width="52.7" height="28.4" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="488.2" y="157.6" font-size="12" text-anchor="middle" fill="#1a2340">53</text><rect x="514.5" y="187.9" width="52.7" height="2.1" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="540.9" y="183.9" font-size="12" text-anchor="middle" fill="#1a2340">4</text><line x1="40" y1="190" x2="620" y2="190" stroke="#0E1C42" stroke-width="2"/><line x1="40.0" y1="190" x2="40.0" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="40.0" y="212" font-size="13" text-anchor="middle" fill="#1a2340">28</text><line x1="92.7" y1="190" x2="92.7" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="92.7" y="212" font-size="13" text-anchor="middle" fill="#1a2340">30</text><line x1="145.5" y1="190" x2="145.5" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="145.5" y="212" font-size="13" text-anchor="middle" fill="#1a2340">32</text><line x1="198.2" y1="190" x2="198.2" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="198.2" y="212" font-size="13" text-anchor="middle" fill="#1a2340">34</text><line x1="250.9" y1="190" x2="250.9" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="250.9" y="212" font-size="13" text-anchor="middle" fill="#1a2340">36</text><line x1="303.6" y1="190" x2="303.6" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="303.6" y="212" font-size="13" text-anchor="middle" fill="#1a2340">38</text><line x1="356.4" y1="190" x2="356.4" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="356.4" y="212" font-size="13" text-anchor="middle" fill="#1a2340">40</text><line x1="409.1" y1="190" x2="409.1" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="409.1" y="212" font-size="13" text-anchor="middle" fill="#1a2340">42</text><line x1="461.8" y1="190" x2="461.8" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="461.8" y="212" font-size="13" text-anchor="middle" fill="#1a2340">44</text><line x1="514.5" y1="190" x2="514.5" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="514.5" y="212" font-size="13" text-anchor="middle" fill="#1a2340">46</text><line x1="567.3" y1="190" x2="567.3" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="567.3" y="212" font-size="13" text-anchor="middle" fill="#1a2340">48</text><line x1="620.0" y1="190" x2="620.0" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="620.0" y="212" font-size="13" text-anchor="middle" fill="#1a2340">50</text><text x="330" y="236" font-size="14" text-anchor="middle" fill="#0E1C42">Poll result: percent who say yes (n = 400)</text><line x1="356.4" y1="30" x2="356.4" y2="190" stroke="#C7922C" stroke-width="2.5" stroke-dasharray="6 4"/><text x="356.4" y="22" font-size="13" text-anchor="middle" fill="#8a6218">true 40</text><text x="229.8" y="44" font-size="12" text-anchor="middle" fill="#8a6218">35.2</text><text x="482.9" y="44" font-size="12" text-anchor="middle" fill="#8a6218">44.8</text></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 6px;">Simulated data: 1000 poll results, each from a random sample of 400 (true percent 40, made up). Each bar counts the polls in a 2-point bin. The shaded band is 40 &plusmn; 4.8.</div></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The bars pile up in a bell shape centered at 40. The shaded band, 40 &plusmn; 4.8, holds <strong>947 of the 1000</strong> polls. That is 94.7%, close to 95%. A few polls missed badly: the lowest result in this run was 30.5 and the highest was 46.25.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here are all three sizes together. The first column of numbers comes from the simulation, and the other two are formulas we will build in a moment.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 420px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sample size <em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Simulated MOE (from 1000 polls)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Formula 1.96 &times; &radic;(0.4 &times; 0.6 &divide; <em>n</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Safe rule 100 &divide; &radic;<em>n</em></th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10.0 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9.6 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10.0 points</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">400</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5.0 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4.8 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5.0 points</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1600</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.25 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.4 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.5 points</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Look at the pattern.</strong> Going from 100 to 400 people (four times as many) cut the margin from about 10 points to about 5, which is half. Going from 400 to 1600 (four times again) cut it from about 5 to about 2.4. The simulated 2.25 sits a bit under the formula&rsquo;s 2.4. That is not a mistake: poll results are whole-number counts, and 1000 polls is a modest pile, so a simulated value can wobble by a few tenths of a point from run to run. For this reason we say <strong>&ldquo;about.&rdquo;</strong></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> In this simulated run the margins were about <strong>10, 5, and 2.25 points</strong> for <em>n</em> = 100, 400, and 1600. Your run in the lab below will differ a little, because the polls are random. <strong>Four times the people, half the margin</strong> is the pattern to carry forward.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Margin of Error Lab</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Six tasks.</strong> This page is long (about 2300 pixels tall), so <strong>scroll inside the frame</strong>. Start in <em>Part 1: Simulate polls</em>. Choose the scenario with a true percent of 40 (the library hours plan), then click the <strong>400</strong> sample-size button. <strong>(1)</strong> Press <em>Run 1000 polls</em>. A histogram of poll results appears, and the truth stays hidden until you press <em>Show the truth</em>. Before you do, guess where the pile is centered. <strong>(2)</strong> Press <em>Show the truth</em>. Does the pile center near 40? <strong>(3)</strong> In <em>Part 2</em>, read the three tiles in section 3: <em>Simulated margin of error</em>, <em>Formula at the true p</em>, and <em>Safe rule 1/sqrt(n)</em>. At <em>n</em> = 400 expect a simulated value near 5 (it wobbles from run to run), then 4.8, then 5.0. <strong>(4)</strong> Press <em>Reset</em> if you like, then repeat with <em>n</em> = 100 and <em>n</em> = 1600 (use the sample-size buttons, or the slider). Section 4, the sample size ladder, shows 10.0, 5.0, and 2.5 points for 100, 400, and 1600, and the box <em>How many people for plus-or-minus __ points?</em> lets you type a target. Try 3 points. <strong>(5)</strong> In section 5, the two-candidate lead checker, click each of the three Rivera and Okafor presets (all made up) and read its verdict. <strong>(6)</strong> Read section 6, <em>What the margin of error does NOT cover</em>, and then write one sentence: &ldquo;When I made <em>n</em> four times as big, the margin of error became about ____ as big.&rdquo; Your numbers will differ a little each time you run the polls, because the draws are random.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/margin-of-error.html" width="100%" height="1100" style="border: none; display: block;" title="Margin of Error Lab" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/margin-of-error.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is long, so scroll inside the frame.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: THE FORMULA AND THE SAFE RULE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Find the margin of error for a random sample of <em>n</em> = 400 from a population whose true percent is <em>p</em> = 40%, first with the formula 1.96 &times; &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>), then with the safe rule 1 &divide; &radic;<em>n</em>. Then see how the formula changes with <em>p</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Where does the formula come from? In Lesson 33.1 you learned that the pile of sample proportions has a spread called the standard error, &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>), and that the pile is roughly bell-shaped. In a bell curve, about 95% of the values sit within about 2 standard errors of the center. The more exact number is <strong>1.96</strong>. So the margin of error is 1.96 standard errors. That is the whole idea, and it matches what the simulation found.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Formula.</strong> <em>p</em>(1 &minus; <em>p</em>) = 0.4 &times; 0.6 = 0.24. Divide by <em>n</em>: 0.24 &divide; 400 = 0.0006. The square root is &radic;0.0006 = 0.02449, which is the standard error. Multiply by 1.96: 1.96 &times; 0.02449 = <strong>0.0480</strong>, or <strong>4.8 percentage points</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Safe rule.</strong> &radic;400 = 20, and 1 &divide; 20 = 0.05, so the rule gives <strong>5.0 points</strong>. In the shortcut form, 100 &divide; &radic;<em>n</em> points = 100 &divide; 20 = 5.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Why have a safe rule at all?</strong> The formula needs <em>p</em>, the very number the poll is trying to learn. The product <em>p</em>(1 &minus; <em>p</em>) is biggest when <em>p</em> = 50%, so the formula&rsquo;s margin is biggest there too. Look at the table.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 320px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">True percent <em>p</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"><em>p</em>(1 &minus; <em>p</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Formula MOE at <em>n</em> = 400 (points)</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.09</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.9</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">20%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.16</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3.9</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.21</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4.5</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">40%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.24</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4.8</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">50%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.25</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4.9</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.24</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4.8</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">At <em>p</em> = 50% the formula gives 1.96 &times; &radic;(0.25 &divide; 400) = 1.96 &times; 0.025 = 0.049, which is 4.9 points. Since 1.96 &times; &radic;0.25 = 0.98, which is just under 1, the safe rule 1 &divide; &radic;<em>n</em> is the worst-case formula value rounded up a hair. It never understates the formula&rsquo;s margin, and it does not need <em>p</em>. That is why it is called &ldquo;safe.&rdquo; When the true percent is far from 50%, the safe rule is a little roomy (at 20% it says 5.0 where the formula says 3.9).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Formula at <em>p</em> = 40%: about <strong>4.8 points</strong>. Safe rule: <strong>5.0 points</strong>. The simulation in Example 1 found 5.0 for this size. All three agree to within a few tenths of a point. Remember the two rules: the <strong>formula</strong> needs the true <em>p</em>, and the <strong>safe rule</strong> needs only <em>n</em>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: HOW MANY PEOPLE DO WE NEED?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up town clerk wants a poll with a margin of error of no more than 3 percentage points. How many people should she survey? What if she wants 5 points? 2 points? What does each cost compared with the 5-point plan?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Start from the safe rule, margin = 1 &divide; &radic;<em>n</em>, and solve for <em>n</em>. Write the margin as a proportion <em>m</em> (so 3 points is <em>m</em> = 0.03). Then &radic;<em>n</em> = 1 &divide; <em>m</em>, so <em>n</em> = (1 &divide; <em>m</em>)&sup2;. If you keep the margin in points, the same formula reads <em>n</em> = (100 &divide; <em>m</em>)&sup2;.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">For 3 points: (100 &divide; 3)&sup2; = 33.33&hellip;&sup2; = 1111.1&hellip;. We must <strong>round up</strong>, never down, because 1,111 people would give a margin of 100 &divide; &radic;1111 = 3.0002 points, a hair over the target, while 1,112 gives 2.9988, just under. So she needs <strong>1,112</strong> people.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 420px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Target margin (points)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">People needed <em>n</em> = (100 &divide; <em>m</em>)&sup2;</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Rounded up</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(100 &divide; 10)&sup2; = 100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">100</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(100 &divide; 5)&sup2; = 400</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">400</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(100 &divide; 3)&sup2; = 1111.1&hellip;</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1,112</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.5</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(100 &divide; 2.5)&sup2; = 1600</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1,600</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(100 &divide; 2)&sup2; = 2500</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2,500</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Compare the costs.</strong> Going from 5 points (400 people) to 2.5 points (1,600 people) cut the margin in half but cost <strong>four times</strong> as many people. Going from 5 points to 2 points costs 2,500 &divide; 400 = 6.25 times as many. Precision gets expensive quickly, because <em>n</em> sits under a square root: <em>to halve the margin, quadruple the sample</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> 3 points needs <strong>1,112</strong> people, 5 points needs <strong>400</strong>, and 2 points needs <strong>2,500</strong>. Each time the target margin is cut in half, the needed sample is multiplied by four. A planner should ask whether the extra precision is worth the extra cost.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 4: IS THE LEAD REAL?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Three made-up polls report two-candidate races. Poll X: Rivera 52%, Okafor 48%, <em>n</em> = 800. Poll Y: Rivera 58%, Okafor 42%, <em>n</em> = 800. Poll Z: Rivera 54%, Okafor 46%, <em>n</em> = 1600. For each, decide whether the lead is clear or too close to call. (All names and numbers are made up.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> I will use the lab&rsquo;s simple rule of thumb. First find the margin of error with the safe rule. Then compare the <strong>gap</strong> (the leader&rsquo;s percent minus the other&rsquo;s) with <strong>twice the margin</strong>. If the gap is smaller than about twice the margin, call it <strong>too close to call</strong>. If the gap is larger, the lead is hard to explain by sampling variation alone. Why twice? Each candidate&rsquo;s percent wobbles, and the two wobble in opposite directions (when one rises, the other falls), so the gap between them swings about twice as far as either percent alone. This is a classroom rule of thumb, not the full method a professional would use, so treat it as a guide.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Poll</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Gap</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Margin 100 &divide; &radic;<em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Twice the margin</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Verdict</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">X: 52 vs 48, <em>n</em> = 800</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3.54</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7.07</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Too close to call (4 is less than 7.07)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Y: 58 vs 42, <em>n</em> = 800</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3.54</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7.07</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Clear lead (16 is more than 7.07)</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Z: 54 vs 46, <em>n</em> = 1600</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">8</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.50</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5.00</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Clear lead (8 is more than 5)</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Check Poll X: &radic;800 = 28.28, and 100 &divide; 28.28 = 3.54. Rivera&rsquo;s plausible range is 52 &plusmn; 3.5, from about 48.5 to 55.5, and Okafor&rsquo;s is 48 &plusmn; 3.5, from about 44.5 to 51.5. The two ranges overlap a lot, so a 4-point gap is not enough to be sure who is ahead.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Poll X is <strong>too close to call</strong>. Polls Y and Z show <strong>clear leads</strong>. Notice Poll Z: its lead (8) is only half of Poll Y&rsquo;s (16), yet it is still clear, because the poll is twice as large and its margin is smaller.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; WHAT THE MARGIN OF ERROR DOES NOT COVER</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The margin of error measures <strong>one thing</strong>: how far a fair random sample can miss by chance. It says nothing about the other ways a poll can go wrong. In Module 11 you met these, and they do not shrink when the sample gets bigger.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Problem</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">What it does</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Does the margin of error cover it?</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Bias in who is asked</strong> (for example, only people who phone a radio show)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The pile of possible polls is centered away from the truth</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Nonresponse</strong> (many people chosen never answer)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The people who answer may differ from those who do not</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Bad wording</strong> (a question that nudges the answer)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Pushes answers one way</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Chance misses</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Even a perfect poll can land outside the margin</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">It describes them: about 5 polls in 100 miss by more than the margin by chance alone</td></tr></tbody></table></div></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">That last row matters. A &ldquo;plus or minus 3&rdquo; does <em>not</em> promise the poll is within 3 points of the truth. It says that if you took many polls the same way, about 95 of every 100 would be. The other 5 would miss by more, through no one&rsquo;s fault. And a huge poll built on a biased method is just a precisely wrong answer: a bigger <em>n</em> shrinks the margin of error, but it does nothing about a lean in the method.</div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#9888;&#65039; THREE COMMON MISCONCEPTIONS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>&ldquo;The poll is certainly within the margin of error.&rdquo;</strong> No. About 95 of 100 polls taken this way would be; about 5 in 100 miss by more, by chance alone.<br />
+            <strong>&ldquo;A margin of error of 4% means a 4% chance the poll is wrong.&rdquo;</strong> No. It is a distance, about 4 percentage points, not a probability. The 95 in &ldquo;95 of 100&rdquo; is how often polls land inside that distance.<br />
+            <strong>&ldquo;The candidate with the higher number is ahead.&rdquo;</strong> Not necessarily. If the gap is smaller than about twice the margin, the poll cannot tell the two apart. Report such a race as &ldquo;too close to call,&rdquo; not as a lead.
+        </div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127758; WHERE YOU MIGHT SEE THIS: READING A POLITICAL POLL CORRECTLY</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When a news story reports a poll, you can ask a short list of questions. These are good habits in general; practices differ from one polling organization to another, so treat the list as a guide, not a rulebook.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Who was asked, and how were they chosen?</strong> A random sample is the goal. If people chose themselves (a call-in or click-in poll), the margin of error does not mean what it appears to mean.<br />&#9654; <strong>How many people?</strong> Use the safe rule, 100 &divide; &radic;<em>n</em> points, to check the reported margin. Note that it describes the sample&rsquo;s chance variation only.<br />&#9654; <strong>How big is the lead compared with the margin?</strong> A lead smaller than about twice the margin is best described as too close to call, as in Worked Example 4.<br />&#9654; <strong>How was the question worded, and how many people actually answered?</strong> Wording and nonresponse are not covered by the margin.<br />&#9654; <strong>Is this one poll or a pattern?</strong> A single poll can miss by chance. Several well-designed polls that agree tell you more than one.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Reading a poll this way is a service to your neighbors: you can say what a poll supports, what it does not, and why, instead of repeating a headline.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A MARGIN OF ERROR CALCULATOR, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build a small margin-of-error calculator. Everything here is made up. This is a practice build; you do not upload it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk33_L2_YourName</code>. Rename the first sheet <strong>MOE</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Type the headings. In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n</code>, in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Safe rule</code>, in <strong>C1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">p-hat</code>, in <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Formula MOE</code>, in <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Low end</code>, and in <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">High end</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Type the data. In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">100</code>, in <strong>A3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">400</code>, and in <strong>A4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1600</code>. In <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.4</code>, then copy it to <strong>C3</strong> and <strong>C4</strong> (the same 0.4 in all three).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Safe rule.</strong> Click <strong>B2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1/SQRT(A2)</code>, then press <strong>Enter</strong>. Click B2 again and drag the small square at the bottom right corner of the cell down to <strong>B4</strong>. These are proportions, so format them as percents: select <strong>B2:B4</strong>, and on the <strong>Home</strong> tab, in the <strong>Number</strong> group, click the <strong>%</strong> button, then click <strong>Increase Decimal</strong> once. You should see <strong>10.0%</strong>, <strong>5.0%</strong>, and <strong>2.5%</strong>. (Read each as percentage points.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Formula margin.</strong> Click <strong>D2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1.96*SQRT(C2*(1-C2)/A2)</code>, press Enter, and fill down to <strong>D4</strong>. Format <strong>D2:D4</strong> as percents with one decimal in the same way. You should see about <strong>9.6%</strong>, <strong>4.8%</strong>, and <strong>2.4%</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Interval endpoints.</strong> Click <strong>E2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C2-D2</code>. Click <strong>F2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C2+D2</code>. Select <strong>E2:F2</strong> and fill down to row 4. Format E2:F4 as percents with one decimal. For <em>n</em> = 400 you should see <strong>35.2%</strong> and <strong>44.8%</strong>; for <em>n</em> = 100, <strong>30.4%</strong> and <strong>49.6%</strong>; for <em>n</em> = 1600, <strong>37.6%</strong> and <strong>42.4%</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Sample-size planner.</strong> In <strong>H1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Target (points)</code>, in <strong>I1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">m</code>, and in <strong>J1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">People needed</code>. In <strong>H2:H5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">3</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">5</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">2</code>, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">3.5</code> (the targets in points). Click <strong>I2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=H2/100</code>, and fill down to I5 (this turns points into a proportion: 3 becomes 0.03). Click <strong>J2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUNDUP((1/I2)^2,0)</code>, press Enter, and fill down to <strong>J5</strong>. You should see <strong>1112</strong>, <strong>400</strong>, <strong>2500</strong>, and <strong>817</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Check yourself.</strong> Change a value in column A (try 900) and watch B, D, E, and F update. Change C2 to 0.5: the formula margin for <em>n</em> = 100 should rise to about 9.8%, and the safe rule should stay put at 10.0%, because the safe rule never looks at <em>p</em>. ROUNDUP always rounds away from zero, so 1111.1 becomes 1112, never 1111.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; MARGIN OF ERROR IN DESMOS; INTERVAL ENDPOINTS AND SAMPLE SIZE IN EXCEL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1/SQRT(n)</code> gives the safe-rule margin as a proportion, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1.96*SQRT(p*(1-p)/n)</code> gives the formula margin. Interval endpoints are <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=p-moe</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=p+moe</code> (with cell references in place of the words). To plan a sample size from a target margin written as a proportion <em>m</em> (3 points is 0.03), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUNDUP((1/m)^2,0)</code>. Format results as percents with Home &gt; Number.<br />
+            <strong>Desmos Scientific</strong> is plain arithmetic here, done in two small steps so you never have to nest a root inside a fraction. For <em>n</em> = 400, press the square-root button, enter 400, and read the result (20). Then enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1 &divide; 20</code> to get 0.05, which is 5 points. For the margin around a poll result of 52% with a margin of 0.0354, enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.52 &minus; 0.0354</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.52 + 0.0354</code> to get the two endpoints, 0.4846 and 0.5554. For a target of 3 points, enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">100 &divide; 3</code> to get 33.33&hellip;, then square it with the exponent key and round up to a whole person.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI FOR A MARGIN OF ERROR; CHECK THE NUMBER AND WHAT IT LEAVES OUT (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A poll surveys a random sample of 400 people. What is the margin of error, and what does it mean? What does it not cover?&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide what a careful answer must say: the margin is about <strong>5 percentage points</strong> (1 &divide; &radic;400 = 0.05; at <em>p</em> = 50% the formula gives 4.9); it means that about 95 of 100 polls taken this way would land within that distance of the truth; and it covers sampling variation only, not bias, nonresponse, or wording.<br />
+            <strong>Verify.</strong> Check its number with the safe rule, then in the Margin of Error Lab set <em>n</em> = 400, press <em>Run 1000 polls</em>, and compare the <em>Simulated margin of error</em> tile. Then grade the meaning. Did it say &ldquo;5% chance of being wrong&rdquo; (a common slip, because the margin is a distance, not a probability)? Did it call the poll &ldquo;accurate within 5 points&rdquo; with no mention of the 95-in-100 idea? Did it leave out what the margin does <strong>not</strong> cover, or claim that a big sample removes bias? Rewrite its weakest sentence so that it is true. <strong>Verdict.</strong> A fluent answer is not a checked answer; the simulation and the formula are.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 35 minutes, plus the Excel steps and the interactive above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Run, Record</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Copy this table into your notebook. In the first two columns, <strong>predict</strong> the margin of error for a true percent of 40% using Desmos: the safe rule 100 &divide; &radic;<em>n</em> and the formula 1.96 &times; &radic;(0.4 &times; 0.6 &divide; <em>n</em>). Then <strong>run</strong> the Margin of Error Lab (the 40% scenario, <em>Run 1000 polls</em> at each size) and <strong>record</strong> the <em>Simulated margin of error</em> tile.<br /><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 360px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"><em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Safe rule (points)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Formula (points)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Simulated (points)</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">400</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1600</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr></tbody></table></div></div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Finish the sentence: &ldquo;Each time <em>n</em> was multiplied by ____, the margin of error was multiplied by about ____.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Your simulated value will not match your neighbor&rsquo;s. Explain in one sentence why, using the words <em>random</em> and <em>sampling variation</em>.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Safe rule: 10, 5, 2.5. Formula: 9.6, 4.8, 2.4. Simulated: your numbers should land close to the formula, usually within about a point at <em>n</em> = 100 and within a few tenths of a point at 400 and 1600 (a 1000-poll pile wobbles from run to run). 2. Each time <em>n</em> was multiplied by <strong>4</strong>, the margin was multiplied by about <strong>1/2</strong> (halved). 3. Example: &ldquo;Each run draws a new random set of polls, so the pile and the 95% distance change a little each time; that is sampling variation showing up inside the experiment.&rdquo;
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Read the Poll</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Case A.</strong> A made-up student council race: Ana 55%, Ben 45%, <em>n</em> = 100.<br /><strong>Case B.</strong> A made-up park bond: Yes 51%, No 49%, <em>n</em> = 1600.<br /><strong>Case C.</strong> A made-up lunch menu poll: new menu 64%, old menu 36%, <em>n</em> = 400.<br />For each, find the margin with the safe rule, find twice the margin, and decide: <em>clear lead</em> or <em>too close to call</em>?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Case D.</strong> A made-up radio show asks listeners to call in about a new stadium. Of 1,500 callers, 70% say yes. The station announces &ldquo;plus or minus 2.6 points.&rdquo; Is the announcement a good reason to say that 70% of the city supports the stadium? Explain.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In your own words: what does &ldquo;plus or minus 4 points&rdquo; mean for a poll?</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. A: &radic;100 = 10, so the margin is 10 points; twice that is 20; the gap is 10, which is less than 20, so <strong>too close to call</strong>. B: 100 &divide; &radic;1600 = 100 &divide; 40 = 2.5; twice is 5; the gap is 2, so <strong>too close to call</strong> (even with 1600 people). C: 100 &divide; 20 = 5; twice is 10; the gap is 28, so a <strong>clear lead</strong>. 2. 100 &divide; &radic;1500 = 2.58, which is the announced 2.6. But the margin covers chance variation only. Callers chose themselves, so the poll may lean heavily toward people who care most; a bigger <em>n</em> does not fix that. Not a good reason. 3. Example: &ldquo;If many polls were taken the same way, about 95 of every 100 would land within 4 points of the true percent. About 5 in 100 would miss by more, and it says nothing about bias or bad wording.&rdquo;
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Plan the Poll</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up school wants to estimate the share of families who favor a later start time, with a margin of error no more than <strong>4 points</strong>. How many families should it survey? Use <em>n</em> = (100 &divide; <em>m</em>)&sup2; and round up. In Excel, what would you type if the target 0.04 were in cell A2?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Each returned survey costs the school about $3 to process (made up). What is the cost at 4 points? The board then asks for <strong>2 points</strong>. How many families, how many times as many as before, and what is the cost?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A board member says, &ldquo;If we survey 5,000 families who volunteer to answer, our margin will be tiny, so we will be sure.&rdquo; Respond in two sentences.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (100 &divide; 4)&sup2; = 25&sup2; = <strong>625</strong> families. Excel: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUNDUP((1/A2)^2,0)</code>. 2. 625 &times; $3 = <strong>$1,875</strong>. For 2 points: (100 &divide; 2)&sup2; = <strong>2,500</strong> families, which is <strong>four times</strong> as many (2500 &divide; 625 = 4), costing 2,500 &times; $3 = <strong>$7,500</strong>. Half the margin, four times the people and four times the cost. 3. Example: &ldquo;The margin of error would be small, about 1.4 points, but it covers only chance variation. Volunteers choose themselves, so the poll could be biased, and a big biased poll is just precisely wrong.&rdquo; (100 &divide; &radic;5000 = 1.41.)
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 33.2 &mdash; Read the Poll, Plan the Poll</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Eight auto-graded items on margin of error, sample size, and reading a lead, plus a typed Excel formula and a short AI-check response. Submit in Canvas; no workbook upload.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 33.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the formula and safe rule, planning a sample size, how the margin changes with <em>n</em>, and reading a poll.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 33.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will turn a poll result and its margin of error into an <strong>interval estimate</strong>, and learn what a <strong>confidence level</strong> really says.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 33.2 &middot; Margin of Error: How Far Can a Poll Miss?</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

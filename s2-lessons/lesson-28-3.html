@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 28.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 28.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 28.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Correlation Is Not Causation</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A strong pattern tells you that two things go together. It does not tell you why.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Learn the standard explanations for an association, test one with real arithmetic, and practice reporting a pattern without claiming more than the data can bear.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read the worked examples, run the within-group check in Excel, and rewrite two overclaiming headlines. Plan on about 75 minutes. Every dataset, headline, and scenario on this page is constructed (made up) unless the page says otherwise.</div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why a strong association between two variables does not show that one causes the other, and name the standard explanations: <em>x</em> causes <em>y</em>, <em>y</em> causes <em>x</em>, a third variable drives both, or coincidence.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> give a plausible <strong>confounder</strong> (lurking variable) for a described association and say how you would check it.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> say what kind of study can support a causal claim (a randomized experiment) and how it differs from an observational study.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> rewrite an overclaiming headline into a careful one.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). Save the workbook you build as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk28_Confounder_YourName.xlsx</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From this week and last week: reading a scatter plot, and the correlation coefficient <em>r</em> as a number for straight-line association.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: DO NOT CLAIM WHAT YOU HAVE NOT SHOWN</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Last week you learned to draw a line through data and to predict with it. This week you learn how far a line&rsquo;s story can honestly go. A scatter plot can be tight and a correlation can be strong, and still the data may say nothing about <em>why</em> the two variables go together. The most important habit in this module is a habit of speech: say what the pattern shows, and stop there.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A careless claim has a cost. A town that bans ice cream to prevent pool accidents, or a family that changes its life because of a headline, has acted on a story the data never told. Reporting a pattern carefully is a way of being fair to the people who will read it and act on it.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; FOUR WAYS TO EXPLAIN AN ASSOCIATION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Suppose two variables <em>x</em> and <em>y</em> show a strong association. There are four standard explanations. A responsible analyst keeps all four on the table until the evidence removes some of them.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>1. <em>x</em> causes <em>y</em>.</strong> Changing <em>x</em> really does change <em>y</em>. Sometimes this is the truth. The trouble is that the data alone cannot establish it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>2. <em>y</em> causes <em>x</em> (reverse direction).</strong> The arrow runs the other way. <em>Constructed example:</em> in a made-up clinic, patients who take more pain medicine report more pain. Does the medicine cause pain? More likely, more pain leads people to take more medicine.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>3. A third variable drives both (a confounder, or lurking variable).</strong> Something not in your scatter plot pushes <em>x</em> and <em>y</em> up and down together. <em>Constructed example:</em> in a made-up group of children, shoe size and reading score rise together. Shoe size does not teach reading, and reading does not stretch feet. Age drives both.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>4. Coincidence (chance).</strong> With only a few points, or after checking a great many pairs of variables, some pairs will line up by luck. <em>Constructed example:</em> five made-up students have these (letters in first name, quiz score) pairs: (3, 62), (4, 70), (5, 68), (6, 80), (7, 85). The correlation is about <strong>+0.95</strong>, very strong. No one believes that a longer name raises a quiz score. With five points, and with the freedom to try many pairs of variables, a striking pattern can be an accident.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">These can also combine. A pattern can be partly causal and partly confounded. Your job is not to guess one answer, but to say which are still possible.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127846; WORKED EXAMPLE 1 &mdash; A THIRD VARIABLE, TESTED WITH ARITHMETIC</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up regional survey collects one week of numbers from ten towns: <em>x</em> = ice cream cones sold (in hundreds) and <em>y</em> = pool incidents (accidents and rescues at public pools). Five towns had a warm week and five had a hot week.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Town</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Weather that week</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Cones sold <em>x</em> (hundreds)</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Pool incidents <em>y</em></td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town A</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Warm</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">18</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">2</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town B</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Warm</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">22</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">5</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town C</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Warm</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">25</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">6</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town D</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Warm</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">29</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">3</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town E</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Warm</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">33</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">4</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town F</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Hot</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">50</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">10</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town G</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Hot</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">53</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">12</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town H</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Hot</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">57</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">13</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town I</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Hot</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">60</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">9</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Town J</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Hot</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">66</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">11</td></tr>
+</table></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 14px; color: #0E1C42; text-align: center; margin-bottom: 4px;"><strong>Cones sold and pool incidents in ten made-up towns</strong></div><svg viewBox="0 0 480 310" width="100%" style="max-width: 520px; display: block; margin: 0 auto;" role="img" aria-label="Scatter plot of ten made-up towns: cones sold on the horizontal axis, pool incidents on the vertical axis. Five warm-week towns are at the lower left and five hot-week towns at the upper right, forming two separate clusters." xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="480" height="310" fill="#FFFFFF"/><line x1="62" y1="258.0" x2="464" y2="258.0" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="262.0" font-size="12" fill="#444" text-anchor="end">0</text><line x1="62" y1="210.4" x2="464" y2="210.4" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="214.4" font-size="12" fill="#444" text-anchor="end">3</text><line x1="62" y1="162.8" x2="464" y2="162.8" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="166.8" font-size="12" fill="#444" text-anchor="end">6</text><line x1="62" y1="115.2" x2="464" y2="115.2" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="119.2" font-size="12" fill="#444" text-anchor="end">9</text><line x1="62" y1="67.6" x2="464" y2="67.6" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="71.6" font-size="12" fill="#444" text-anchor="end">12</text><line x1="62" y1="20.0" x2="464" y2="20.0" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="24.0" font-size="12" fill="#444" text-anchor="end">15</text><line x1="62.0" y1="20" x2="62.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="62.0" y="275" font-size="12" fill="#444" text-anchor="middle">10</text><line x1="129.0" y1="20" x2="129.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="129.0" y="275" font-size="12" fill="#444" text-anchor="middle">20</text><line x1="196.0" y1="20" x2="196.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="196.0" y="275" font-size="12" fill="#444" text-anchor="middle">30</text><line x1="263.0" y1="20" x2="263.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="263.0" y="275" font-size="12" fill="#444" text-anchor="middle">40</text><line x1="330.0" y1="20" x2="330.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="330.0" y="275" font-size="12" fill="#444" text-anchor="middle">50</text><line x1="397.0" y1="20" x2="397.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="397.0" y="275" font-size="12" fill="#444" text-anchor="middle">60</text><line x1="464.0" y1="20" x2="464.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="464.0" y="275" font-size="12" fill="#444" text-anchor="middle">70</text><line x1="62" y1="258" x2="464" y2="258" stroke="#0E1C42" stroke-width="1.5"/><line x1="62" y1="20" x2="62" y2="258" stroke="#0E1C42" stroke-width="1.5"/><text x="263" y="298" font-size="13" fill="#0E1C42" text-anchor="middle">Ice cream cones sold (hundreds per week)</text><text x="15" y="139" font-size="13" fill="#0E1C42" text-anchor="middle" transform="rotate(-90 15 139)">Pool incidents per week</text><circle cx="115.6" cy="226.3" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="142.4" cy="178.7" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="162.5" cy="162.8" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="189.3" cy="210.4" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="216.1" cy="194.5" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="330.0" cy="99.3" r="5.5" fill="#C7922C" stroke="#0E1C42" stroke-width="1"/><circle cx="350.1" cy="67.6" r="5.5" fill="#C7922C" stroke="#0E1C42" stroke-width="1"/><circle cx="376.9" cy="51.7" r="5.5" fill="#C7922C" stroke="#0E1C42" stroke-width="1"/><circle cx="397.0" cy="115.2" r="5.5" fill="#C7922C" stroke="#0E1C42" stroke-width="1"/><circle cx="437.2" cy="83.5" r="5.5" fill="#C7922C" stroke="#0E1C42" stroke-width="1"/><circle cx="120" cy="32" r="5.5" fill="#2196D0" stroke="#0E1C42"/><text x="130" y="36" font-size="12" fill="#444">warm-week towns</text><circle cx="120" cy="50" r="5.5" fill="#C7922C" stroke="#0E1C42"/><text x="130" y="54" font-size="12" fill="#444">hot-week towns</text></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Constructed (made-up) data.</div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 1, all ten towns together.</strong> The correlation is <strong><em>r</em> = +0.88</strong>: a strong positive association. Towns that sold more ice cream had more pool incidents. The least-squares line has slope about 0.20, so each extra hundred cones goes with about 0.2 more incidents.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 2, a tempting claim.</strong> &ldquo;Ice cream causes pool incidents. Ban ice cream near pools and incidents will drop.&rdquo; Notice what this claim does: it takes a pattern and recommends an action. The data have not earned that.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 3, name a possible confounder.</strong> Weather. A hot week sends people to the pool, which gives more incidents, and sends people to the ice cream stand, which gives more cones. Weather could drive both. The data have a weather column, so we can test the idea.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 4, split by weather and recompute <em>r</em> inside each group.</strong> Warm towns only: <em>x</em> is 18, 22, 25, 29, 33 and <em>y</em> is 2, 5, 6, 3, 4, giving <strong><em>r</em> = +0.19</strong>. Hot towns only: <em>x</em> is 50, 53, 57, 60, 66 and <em>y</em> is 10, 12, 13, 9, 11, giving <strong><em>r</em> = &minus;0.08</strong>. Inside each group the association is weak, and it does not even point the same way.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 5, see where the big <em>r</em> came from.</strong> The warm towns average 25.4 hundred cones and 4 incidents. The hot towns average 57.2 hundred cones and 11 incidents. The overall association comes almost entirely from the <em>gap between the two groups</em>: hot towns are higher on both variables. Once weather is held about the same, ice cream sales hardly predict incidents.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 6, say it responsibly.</strong> &ldquo;In these ten made-up towns, weeks with more ice cream sales tended to have more pool incidents. The relationship nearly disappears inside each weather group, which fits the idea that hot weather drives both. This does not show that ice cream has no effect, and it does not prove weather is the only factor.&rdquo;</div>
+<div style="background: #EEF1F8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 10px 16px; margin: 8px 0 0 0; font-size: 17px; color: #1a2340; line-height: 1.6;"><strong>What did the check show, and what did it not show?</strong> It showed that a third variable <em>can fully account</em> for a strong association, and that the association is not a reliable guide for action. It did <strong>not</strong> prove that ice cream is harmless. Each group has only five towns, so these small within-group correlations are themselves rough. Responsible conclusions are written as &ldquo;consistent with,&rdquo; not &ldquo;proved.&rdquo;</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128295; HOW TO TEST A SUSPECTED CONFOUNDER</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You just did it. The method is short enough to keep in your head.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Name it.</strong> Ask: what else could push both variables? Weather, age, size, wealth, time, and how people were chosen are the usual suspects.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Measure it.</strong> You can only test a lurking variable you have data on. If you did not collect it, you cannot rule it in or out.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Compare inside groups that are alike on it.</strong> Split the data by the suspect (warm versus hot) and recompute <em>r</em> within each group. If the association shrinks sharply, the suspect is a likely explanation. If it stays about as strong, the suspect does not explain it, though another one might.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Report what you did and did not rule out.</strong> A check removes some explanations. It rarely removes all of them.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">There is a stronger tool, and it is the subject of the next section.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129514; WHAT CAN SUPPORT A CAUSAL CLAIM?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In an <strong>observational study</strong> the researcher watches and records what happens, and the subjects end up in their groups by their own choices or circumstances. Every example in this lesson so far is observational. Subjects who choose their own habits may differ in many other ways, so confounders are always possible.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In a <strong>randomized experiment</strong> the researcher <em>assigns</em> the treatments, and does it by chance (a coin flip, a random number draw). Because chance decides who gets what, the groups tend to be alike on everything else, including factors nobody thought to measure. If the groups then end up different, the treatment becomes the leading explanation. That is why a well-run randomized experiment can support a cause-and-effect claim in a way a scatter plot cannot.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed illustration.</em> Instead of recording which made-up students choose to sleep eight hours, a researcher randomly assigns 200 volunteers to a regular-bedtime schedule or to their usual routine, then compares test scores. The random assignment, not the students&rsquo; choices, creates the two groups.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Randomized experiments are not always possible or ethical. You cannot randomly assign people to smoke or to live in poverty. In those cases people build a careful case from many studies and many checks. You will study how experiments, random assignment, and observational studies work in Module 11. For now, remember the sentence: <strong>observational data can show an association; random assignment is what lets us talk about cause.</strong></div>
+</div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127981; WHERE PEOPLE USE THIS &middot; CHOCOLATE AND NOBEL PRIZES</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">A widely discussed published analysis compared countries&rsquo; chocolate consumption per person with the number of Nobel laureates per person, and found a strong positive association. It has become a commonly used classroom example of why an association across countries does not show that chocolate makes people win prizes. Think about what else differs between countries. National wealth and research funding are plausible confounders: a richer country may both buy more chocolate and spend more on universities and laboratories. Also notice the unit of analysis. The data are about whole countries, so they say nothing about whether any single person who eats more chocolate becomes more likely to win a prize. (This callout gives no figures on purpose. If you want the details, look the analysis up and check exactly what it claims before you repeat it.)</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: CORREL OVER TWO RANGES</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel is the star.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(C2:C11,D2:D11)</code> gives <em>r</em> for the whole column pair. To find <em>r</em> inside one group, point the same function at a shorter pair of ranges, for example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(C2:C6,D2:D6)</code>. The two ranges must be the same length and must list the same towns in the same order. A third variable shows up when the within-group <em>r</em> is much smaller than the overall <em>r</em>. The full click-by-click steps are in Activity 2.<br /><br />
+            <strong>Desmos Scientific</strong> is for plain arithmetic only. Check a group mean by typing <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(18+22+25+29+33)/5</code> and reading 25.4, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(50+53+57+60+66)/5</code> and reading 57.2.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY (THREE CONFOUNDERS, RANKED)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool exactly this: <em>&ldquo;Here is a made-up headline: &lsquo;Towns With More Street Musicians Have Higher House Prices, Study Finds.&rsquo; Give me three possible confounders for this association, and tell me how I could check each one.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write your own list of three confounders. For each, decide which of the two variables it could plausibly push.<br />
+            <strong>Verify.</strong> Now compare. Then <strong>rank the AI&rsquo;s three confounders yourself</strong>, from most to least plausible, and defend your ranking in two or three sentences. A strong defense says how the confounder could affect <em>both</em> variables and what data would test it. Also critique the AI: Did it treat a possible confounder as a proven cause? Did it mention reverse direction or chance, or only a third variable? Did it invent statistics or details about a &ldquo;study&rdquo; that does not exist? Did it suggest a check you could actually carry out? Report what you kept, what you changed, and why.
+        </div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128240; REWRITING A HEADLINE RESPONSIBLY</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Most causal overclaims in the news are not in the data. They are in the verbs. Watch for these words:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Overclaiming:</strong> causes, leads to, boosts, ruins, prevents, makes, because of, the secret to, proves.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Careful:</strong> is associated with, tends to go with, was linked to, was higher among, in this sample.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A good rewrite has four parts: <strong>who</strong> was studied (the sample), <strong>what</strong> was measured, the <strong>pattern</strong> in careful words, and what the data <strong>cannot say</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed headline.</em> &ldquo;Study: Late Bedtimes Make Teens Fail Math.&rdquo; Suppose the made-up survey asked 120 teens when they go to bed and recorded their math grades, and nobody was assigned a bedtime.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>What is wrong:</strong> &ldquo;make&rdquo; claims cause. The teens chose their own bedtimes, so this is an observational study. Alternatives: a heavy workload or an after-school job could cause both late bedtimes and lower grades (a confounder), or struggling with math could cause stress and late nights (reverse direction).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Careful rewrite:</strong> &ldquo;In a made-up survey of 120 teens, those who reported later bedtimes tended to have lower math grades. The survey cannot say why.&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Notice that the careful version is a little longer and a little less exciting. That is the price of being accurate, and a responsible writer pays it.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 75 minutes, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Spot the Confounder</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each constructed scenario below, (i) say which of the four explanations is most likely: <em>x</em> causes <em>y</em>, <em>y</em> causes <em>x</em>, a third variable drives both, or chance; (ii) name a plausible confounder or the reverse-direction story; (iii) say how you would check it.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> In a made-up school, students who eat breakfast have higher test scores.<br /><strong>(b)</strong> In made-up fire records, fires that had more fire trucks sent to them had more damage.<br /><strong>(c)</strong> In a made-up group of children aged 5 to 12, those with bigger shoe sizes have higher reading scores.<br /><strong>(d)</strong> In made-up city records, cities with more police officers have more crime.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Pick one scenario and write one sentence that a careful reporter could print about it.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>(a)</strong> A third variable is likely: for example sleep, or family circumstances, could affect both breakfast and test scores. A check: compare breakfast and scores among students who sleep about the same hours. <strong>(b)</strong> A third variable: the size of the fire. Bigger fires get more trucks and also cause more damage; sending trucks is not what creates the damage. Check: compare fires of about the same size. <strong>(c)</strong> A third variable: age. Older children have bigger feet and also read better. Check: compare children of the same age. <strong>(d)</strong> Two stories are plausible. City size (a third variable) means larger cities have more officers and more crimes in total; and reverse direction, since cities with more crime may hire more officers. A check: compare rates per person, and look at what happens over time. A good printed sentence uses &ldquo;is associated with&rdquo; or &ldquo;tend to,&rdquo; says the sample, and avoids &ldquo;causes.&rdquo; Answers may differ; accept any confounder that could plausibly push both variables and any check that holds the confounder about the same.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">The Within-Group Check in Excel</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a <strong>Blank workbook</strong>. Press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk28_Confounder_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Type the headings: <strong>A1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Town</code>, <strong>B1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Weather</code>, <strong>C1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Cones (hundreds)</code>, <strong>D1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Pool incidents</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Type the data from Worked Example 1 into <strong>A2:D11</strong>: the five warm towns in rows 2 to 6 and the five hot towns in rows 7 to 11. Keep all warm towns above all hot towns.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r, all ten towns</code>. In <strong>G1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(C2:C11,D2:D11)</code> and press Enter. Expect about <strong>0.88</strong>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>F2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r, warm towns only</code>. In <strong>G2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(C2:C6,D2:D6)</code> and press Enter. This uses two separate, shorter ranges. Expect about <strong>0.19</strong>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">6</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>F3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r, hot towns only</code>. In <strong>G3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(C7:C11,D7:D11)</code> and press Enter. Expect about <strong>&minus;0.08</strong>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">7</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Select <strong>G1:G3</strong>, and on the Home tab click <strong>Decrease Decimal</strong> until two decimals show. (If a cell shows <strong>#N/A</strong> or <strong>#DIV/0!</strong>, check that both ranges in the formula have the same number of cells.)</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">8</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Optional: select <strong>C1:D11</strong>, open the <strong>Insert</strong> tab, and choose <strong>Scatter</strong> (markers only). Look for the two clusters.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">9</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one or two sentences, answer: why is the overall <em>r</em> so much larger than either within-group <em>r</em>? Then write what the check <em>cannot</em> show.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">G1 is 0.88, G2 is 0.19, G3 is &minus;0.08. The overall <em>r</em> is large because the hot towns sit high on both variables and the warm towns sit low on both; the gap between the two clusters creates most of the association, while inside each cluster the points show little straight-line pattern. The check cannot show that ice cream has no effect (each group has only five towns), and it cannot rule out other confounders; it shows only that weather alone can account for the strong overall association.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Headline Rewrite</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Rewrite each constructed headline in careful words. Use the four parts: who was studied, what was measured, the pattern in careful words, and what the data cannot say.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> &ldquo;Study: Playing Chess Makes Kids Smarter.&rdquo; (Made up: 80 children were surveyed; their families decided whether they played chess.)<br /><strong>(b)</strong> &ldquo;New Data Proves Bigger Libraries Boost Town Incomes.&rdquo; (Made up: a comparison of 40 towns.)</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each, name one confounder or a reverse-direction story that the original headline ignores.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one sentence, say what design would let a researcher make a causal claim about chess.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>(a)</strong> Sample rewrite: &ldquo;In a made-up survey of 80 children, those who played chess tended to score higher on a thinking test; the survey cannot say whether chess is the reason.&rdquo; Alternatives: families with more time and money may both enrol children in chess and support their schoolwork (confounder), or children who already like puzzles may be more drawn to chess (reverse direction). <strong>(b)</strong> Sample rewrite: &ldquo;In a made-up comparison of 40 towns, those with bigger libraries tended to have higher median incomes. The comparison cannot say why.&rdquo; Alternatives: richer towns may fund both larger libraries and other services, or wealthy residents may demand bigger libraries (reverse direction). <strong>Design:</strong> randomly assign children to learn chess or to an equally time-consuming activity, then compare thinking-test scores. Look for: no cause verbs, a stated sample, and an honest limit.</div>
+</details>
+</div></div>
+
+<div style="margin-bottom: 6px;"></div>
+</div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 28.3 &mdash; Careful Claims</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded questions (including three correlations you compute) and one short written item on an overclaiming headline. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 28.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on lurking variables, reverse direction, what a within-group check shows, what supports a causal claim, and careful wording.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Bivariate Data &amp; Regression</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 28.3 &middot; Correlation Is Not Causation</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 27.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 27.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 27.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Fitting a Line: Slope and Intercept in Context</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A line is a model. Say what it says, and no more.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">The line &#375; = <em>a</em> + <em>bx</em>; slope and intercept in context with units; building a line from two points; why we need a rule for the best line; least squares and the sum of squared misses; a trendline in Excel; association is not cause</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, play with the Fit the Line interactive, follow the Excel steps, and complete the four activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> write a line as a model, &#375; = <em>a</em> + <em>bx</em>, and find its equation from two points by hand.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> interpret a slope and an intercept in context, with units, and decide when an intercept has no sensible meaning.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why a rule is needed to pick a line, and describe the least-squares line as the one that makes the sum of squared vertical misses as small as possible.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> add a trendline with its equation to a scatter chart in Excel, and state what a fitted line says about association without claiming a cause.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Last lesson you looked at a cloud of points and described it in words: rising, falling, tight, loose. Words are a fine start, but a cloud of points is hard to <em>use</em>. Suppose a student studied 4 hours. What score should we expect? You could squint at the cloud and guess. Or you could draw one straight line through it and read the answer off the line.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">That one line is a small piece of mathematics doing a large job. Two numbers, where the line starts and how steeply it climbs, compress a whole cloud into a sentence you can say aloud and use to make predictions. This is an old trick of applied mathematics: replace a messy world with a simple <strong>model</strong>, and then be honest about what the model can and cannot tell you.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">That honesty is this module's virtue, <strong>responsibility</strong>. A line makes claims. Today you will learn to read those claims exactly, to say them with their units, and to refuse the claims the line does not make.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every scenario, dataset, and equation in this lesson is <strong>constructed</strong> to teach the idea. None of it is real data about real people, cars, cafes, or plants.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128207; A LINE AS A MODEL</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A straight-line model has the form</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">&#375; = <em>a</em> + <em>b</em><em>x</em></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here <em>x</em> is the <strong>explanatory</strong> variable (the one we use to predict, from last lesson), and &#375; (read &ldquo;y-hat&rdquo;) is the <strong>predicted</strong> value of the response variable. The little hat is a promise to be careful: it means <em>predicted by the model</em>, not <em>observed</em>. A real data point has a <em>y</em>; the line gives a &#375;. They are usually not equal.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The two numbers that define the line:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong><em>a</em>, the intercept.</strong> The predicted value &#375; when <em>x</em> = 0. On a graph, it is where the line crosses the vertical axis.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong><em>b</em>, the slope.</strong> How much &#375; changes when <em>x</em> goes up by 1. Rise over run: the change in &#375; divided by the change in <em>x</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A positive slope means the line climbs as you move right; a negative slope means it falls. A slope of 0 would be a flat line: the model predicts the same &#375; whatever <em>x</em> is.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128483;&#65039; READING SLOPE AND INTERCEPT, WITH UNITS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A slope is never just a number. It is a number <strong>with units</strong>: units of <em>y</em> per unit of <em>x</em>. And it is a statement about what the <em>model predicts</em>. Use this frame:</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">For each additional [1 unit of <em>x</em>], the model predicts [<em>y</em>] to change by about [<em>b</em> units of <em>y</em>].</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The intercept has a frame too: <em>when x is 0, the model predicts [y] to be about [a units of y].</em> But before you say that sentence, ask one question: <strong>is <em>x</em> = 0 a sensible place to look?</strong> If 0 lies far outside the <em>x</em> values in the data, the line out there is a guess about territory we never measured. Then the intercept is just the number that anchors the line, and it has no real-world meaning.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here are three constructed models side by side.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 620px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Constructed model</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Slope in context</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Intercept in context</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 49.5 + 6.5<em>x</em><br />(<em>x</em> = hours studied, data from 0.5 to 6 hours; &#375; = quiz score in points)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">For each additional hour studied, the model predicts a quiz score about <strong>6.5 points higher</strong>.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The model predicts about 49.5 points at 0 hours. Zero hours is just outside the data (the smallest is 0.5), so read it as a rough anchor, not a measured result.</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 28 &minus; 2<em>x</em><br />(<em>x</em> = age of a car in years, data from 1 to 10 years; &#375; = asking price in $1000s)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">For each additional year of age, the model predicts an asking price about <strong>$2 thousand lower</strong>.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">At age 0 the model predicts about $28 thousand. A brand-new car is just outside the data, so treat that as a loose guide.</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = &minus;80 + 0.85<em>x</em><br />(<em>x</em> = height in cm, data from 150 to 190 cm; &#375; = weight in kg)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">For each additional centimeter of height, the model predicts a weight about <strong>0.85 kg higher</strong>.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>No sensible meaning.</strong> It would say a person 0 cm tall weighs &minus;80 kg. Zero is far outside 150 to 190, and the number is negative. The intercept just positions the line.</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Two habits to build. First, <strong>say &ldquo;predicts&rdquo;</strong>, not &ldquo;causes&rdquo; or &ldquo;makes.&rdquo; Second, <strong>say &ldquo;about&rdquo;</strong>, because a line is an approximation and points do not sit exactly on it.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: A LINE FROM TWO POINTS (POSITIVE SLOPE)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> On a constructed scatter plot of hours studied (<em>x</em>) against quiz score in points (<em>y</em>), you draw a straight line by eye. It passes through the two plotted points (1, 58) and (5, 85). Find the equation of your line, write the slope in context, and predict the score for 3 hours.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> The slope is rise over run, so I take the change in score over the change in hours. Then, to find the intercept, I take any point on the line, put it into &#375; = <em>a</em> + <em>bx</em>, and solve for <em>a</em>, which gives <em>a</em> = <em>y</em> &minus; <em>bx</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Slope.</strong> <em>b</em> = (85 &minus; 58) &divide; (5 &minus; 1) = 27 &divide; 4 = <strong>6.75</strong> points per hour.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Intercept.</strong> Use the point (1, 58): <em>a</em> = 58 &minus; 6.75 &times; 1 = <strong>51.25</strong> points.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Equation.</strong> &#375; = 51.25 + 6.75<em>x</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check with the other point.</strong> At <em>x</em> = 5: 51.25 + 6.75 &times; 5 = 51.25 + 33.75 = 85. It lands on (5, 85), so the line passes through both of my points.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Slope in context.</strong> For each additional hour studied, the model predicts a quiz score about 6.75 points higher.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prediction at 3 hours.</strong> &#375; = 51.25 + 6.75 &times; 3 = 51.25 + 20.25 = <strong>71.5</strong> points.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Sense check.</strong> 3 hours lies between 1 hour (58) and 5 hours (85), and 71.5 lies between 58 and 85. Reasonable.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: A LINE FROM TWO POINTS (NEGATIVE SLOPE)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A constructed plot of car age in years (<em>x</em>) against asking price in $1000s (<em>y</em>) has a line drawn through (2, 24) and (10, 8). Find its equation and read the slope.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> This line falls as it goes right, so I expect a negative slope. I will keep the sign carefully: the change in price is 8 &minus; 24, which is negative.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Slope.</strong> <em>b</em> = (8 &minus; 24) &divide; (10 &minus; 2) = &minus;16 &divide; 8 = <strong>&minus;2</strong> ($1000s per year).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Intercept.</strong> <em>a</em> = <em>y</em> &minus; <em>bx</em> = 24 &minus; (&minus;2)(2) = 24 + 4 = <strong>28</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Equation.</strong> &#375; = 28 &minus; 2<em>x</em>. Check: at <em>x</em> = 10, 28 &minus; 20 = 8. &#10003;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Slope in context.</strong> For each additional year of age, the model predicts an asking price about $2 thousand lower.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The classic slip.</strong> Writing <em>a</em> = <em>y</em> + <em>bx</em> instead of <em>y</em> &minus; <em>bx</em>. With a negative slope that slip gives 24 + (&minus;2)(2) = 20, and the line would miss the point (2, 24). Always check the line against the second point.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; WHY WE NEED A RULE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You drew your line through two points you chose. A classmate looking at the very same cloud may choose two different points and draw a different line. Both lines can look reasonable. Which is better? &ldquo;It looks better to me&rdquo; is not an answer a scientist can use, so we need a <strong>rule</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is a concrete case from the <em>Hours studied</em> scenario in the interactive below (15 constructed students). Two classmates draw lines by eye:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Classmate</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Points chosen</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Line</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sum of squared misses</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Classmate 1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(1, 58) and (5, 85)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 51.25 + 6.75<em>x</em></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 286.59</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Classmate 2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(1, 49) and (6, 90)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#375; = 40.8 + 8.2<em>x</em></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 510.26</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">What is a sum of squared misses? For each data point, the <strong>miss</strong> is the vertical distance from the point to the line: the observed <em>y</em> minus the predicted &#375;. Square each miss (so that misses above and below the line both count as positive, and big misses count much more than small ones), then add them all up. This total is called the <strong>SSE</strong>, the sum of squared errors. A small SSE means the line stays close to the points. (You will study these misses, called residuals, in detail in Week 28; today you only need the idea.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now the rule. The <strong>least-squares line</strong> is the one line that makes the SSE as small as it can possibly be. No other straight line has a smaller sum of squared vertical misses. For the <em>Hours studied</em> scenario that line is</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">&#375; = 49.404 + 6.5542<em>x</em> &nbsp;&nbsp;&nbsp; with SSE about 196.19</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">so it beats both classmates (286.59 and 510.26). Notice also how close a tidy rounded line comes: &#375; = 50 + 6.5<em>x</em> has an SSE of about 199.13. Rounded lines can be good, but only the least-squares line is the smallest of all. We will not derive how it is found; spreadsheets and software do that arithmetic. What you need is to know what the rule <em>is</em>, and one fact about the answer:</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">The least-squares line always passes through the point (<em>x</em>&#772;, <em>y</em>&#772;), the mean of the <em>x</em> values and the mean of the <em>y</em> values.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">In <em>Hours studied</em> the means are <em>x</em>&#772; = 3 hours and <em>y</em>&#772; = 69.067 points, and indeed 49.404 + 6.5542 &times; 3 = 69.07. The line pivots through the center of the cloud.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Fit the Line</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Three tasks.</strong> All the data are made up. <strong>(1) Hours studied.</strong> Choose the <em>Hours studied</em> button and stay in <em>My line</em> mode. Drag the gold handles (or use the sliders <em>Slope b</em> and <em>Intercept a</em>) to bring the bar <em>Your SSE</em> as low as you can. Write down your lowest SSE. Then press <em>Show least-squares line</em>, compare your SSE with the bar <em>Least-squares SSE</em> (about 196.19), and press <em>Snap my line to it</em>. Copy the equation, which should be &#375; = 49.404 + 6.5542<em>x</em>. <strong>(2) Hot chocolate.</strong> Repeat on <em>Hot chocolate</em>; the least-squares line there is &#375; = 138.998 &minus; 1.4329<em>x</em>. <strong>(3) Say it.</strong> For each of the two least-squares lines, write the slope sentence in context, with units, using the frame from this lesson, and say whether the intercept has a sensible meaning (look at where the data sit on the <em>x</em> axis). Optional: in <em>Hours studied</em>, find the point (<em>x</em>&#772;, <em>y</em>&#772;) = (3, 69.067) and see that the least-squares line passes through it. Your SSE will differ a little from anyone else's; what matters is that you can see how close you get by hand and how the rule settles the question.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/regression-playground.html" width="100%" height="1280" style="border: none; display: block;" title="Fit the Line" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/regression-playground.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; WORKED EXAMPLE 3: READING THE LEAST-SQUARES LINES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The least-squares lines for the two scenarios you just fitted are &#375; = 49.404 + 6.5542<em>x</em> (hours studied to quiz score in points) and &#375; = 138.998 &minus; 1.4329<em>x</em> (outdoor temperature in &deg;F to cups of hot chocolate sold). Interpret both slopes, comment on both intercepts, and predict hot chocolate sales at 50&deg;F.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> For each line I write the slope sentence first, with units on both sides of the word per. Then I check where <em>x</em> = 0 sits compared with the data before I say anything about the intercept.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Hours studied slope.</strong> For each additional hour studied, the model predicts a quiz score about 6.55 points higher.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Hot chocolate slope.</strong> For each additional degree Fahrenheit, the model predicts about 1.43 fewer cups sold. The slope is negative, so the line falls.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Hours studied intercept.</strong> The data run from 0.5 to 6 hours, so 0 is just outside. The model's 49.4 points at 0 hours is a rough anchor.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Hot chocolate intercept.</strong> The temperatures in the data run from 28&deg;F to 80&deg;F. Zero degrees is far outside, and 138.998 cups at 0&deg;F is the line carried well beyond anything measured. Do not report it as a finding.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prediction at 50&deg;F.</strong> &#375; = 138.998 &minus; 1.4329 &times; 50 = 138.998 &minus; 71.645 = <strong>67.4</strong> cups (about 67). Fifty degrees is inside the data, so this is a fair use of the line.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Be careful with the sentence you write.</strong> The model does <em>not</em> say that a colder day <em>makes</em> people buy hot chocolate, and it does not say that studying <em>makes</em> a score rise. It says how the predictions move. More on that below.</div>
+    </div>
+    <div style="background: #E8F6FB; border-left: 5px solid #2196D0; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #1B6A94; margin-bottom: 8px;">&#128220; A MOMENT IN THE HISTORY OF MATHEMATICS &middot; GALTON AND REGRESSION TOWARD THE MEAN</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.6;">Francis Galton (1822&ndash;1911), the English scientist you met in Week 26, also studied how traits pass from parents to children. In the later 1800s he compared the heights of parents with the heights of their adult children. He noticed a pattern. The children of very tall parents tended to be tall, but on average they were closer to the average height than their parents were. The reverse held for very short parents: their children tended to be short, but on average closer to the average. He described this with the word <em>regression</em>, using phrasing such as <em>regression toward mediocrity</em>. That is why a method for fitting a line to data still carries the word <em>regression</em>, which sounds like going backward even though the method is simply fitting a line. And note what the pattern is <em>not</em>: it is a statistical effect, not a force that makes families pull back toward the average. It appears whenever two measurements are related but not perfectly. <strong>See it yourself:</strong> in the interactive above, choose <em>Regression toward the mean</em> (40 made-up parent and child heights, measured in standard deviations from average). The least-squares slope is about 0.5, so a parent at +2 SD has a predicted child at about +1.00 SD: tall, but closer to average. Switch on <em>Show the line y = x (a child exactly as tall as the parent)</em> and compare it with the fitted line. This is a short sketch; historians add many details beyond it.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A SCATTER CHART WITH A TRENDLINE, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will turn a small table into a scatter chart, add a trendline, and show its equation. Use these constructed data: <em>x</em> is minutes of daily practice and <em>y</em> is words typed per minute on a made-up typing check for 8 students.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Student</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">1</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">2</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">3</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">5</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">6</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">7</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">8</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Minutes (<em>x</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">15</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">20</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">25</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">35</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">40</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">45</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Words per minute (<em>y</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">22</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">25</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">31</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">38</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">41</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">40</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">47</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk27_L2_YourName</code> (this one is practice; you do not upload it).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Minutes</code>, press <strong>Enter</strong>. Click <strong>B1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">WPM</code>, press <strong>Enter</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Type the eight pairs in rows 2 to 9: <strong>A2</strong> to <strong>A9</strong> hold 10, 15, 20, 25, 30, 35, 40, 45, and <strong>B2</strong> to <strong>B9</strong> hold 22, 25, 31, 30, 38, 41, 40, 47. Check each one against the table.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click and drag from <strong>A1</strong> to <strong>B9</strong> to select the headings and all the numbers.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click the <strong>Insert</strong> tab. In the <strong>Charts</strong> group, click the button for <strong>Scatter (X, Y)</strong> or <strong>Bubble</strong> (its icon shows dots on axes), then pick the first choice, <strong>Scatter</strong> (dots only, no lines). A chart with eight dots appears. Minutes is on the horizontal axis and WPM on the vertical axis.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Add labels. Click the chart, click the green <strong>+</strong> button (<strong>Chart Elements</strong>) at its top right, and check <strong>Axis Titles</strong> and <strong>Chart Title</strong>. Click each title box and type a clear name with units, such as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Daily practice (minutes)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Typing speed (words per minute)</code>, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Practice and Typing Speed (constructed data)</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Add the trendline.</strong> Click the chart, click the <strong>+</strong> button again, and check <strong>Trendline</strong>. (You can also right-click one of the dots and choose <strong>Add Trendline</strong>.) A straight line appears through the dots.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Show the equation.</strong> Right-click the line and choose <strong>Format Trendline</strong> (a pane opens on the right). Under <strong>Trendline Options</strong>, make sure <strong>Linear</strong> is selected. Scroll down and check <strong>Display Equation on chart</strong> and <strong>Display R-squared value on chart</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Read the label on the chart. You should see an equation close to <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y = 0.6857x + 15.393</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">R&sup2; = 0.9504</code>. The exact digits Excel shows can differ slightly in rounding. (To show more digits, right-click the label, choose <strong>Format Trendline Label</strong>, then <strong>Number</strong>, and pick a number format with 4 decimal places.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Translate it.</strong> Excel writes the equation with plain <em>y</em> and <em>x</em>, and puts the slope first. In this lesson's notation, with names and units, the model is &#375; = 15.393 + 0.6857<em>x</em>, where <em>x</em> is minutes of daily practice and &#375; is predicted words per minute. The slope sentence: for each additional minute of daily practice, the model predicts typing speed about 0.69 words per minute higher. The intercept says 15.4 words per minute at 0 minutes, but the data start at 10 minutes, so treat it as an anchor, not a finding.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Check the fact about the middle.</strong> The mean of the minutes is 27.5 and the mean of the words per minute is 34.25. Compute 15.393 + 0.6857 &times; 27.5 and you get about 34.25: the line passes through (<em>x</em>&#772;, <em>y</em>&#772;), as the least-squares line must. (An independent least-squares calculation for these eight points gives a slope of 0.68571 and an intercept of 15.3929, matching Excel.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>About R-squared.</strong> The label also shows <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">R&sup2;</code>. It is a number between 0 and 1 that Week 28 will explain. For now, just copy it down and do not interpret it yet.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A prediction in a cell.</strong> Click <strong>A11</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">30</code>, press <strong>Enter</strong>. Click <strong>B11</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=15.393+0.6857*A11</code>, then press <strong>Enter</strong>. Excel shows about 35.96, the model's predicted words per minute at 30 minutes. This is a plain formula built from the numbers on the chart.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Honest note.</strong> Menu names and button positions differ a little between desktop Excel and Excel for the web, and the Format pane can look different. If you cannot find a button, search the ribbon for <em>trendline</em>. Your chart must show a straight trendline, the equation, and axis titles with units.</div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; RESPONSIBILITY: WHAT A LINE SAYS, AND WHAT IT DOES NOT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A fitted line <strong>describes an association</strong> in the data you have. It does not, by itself, show that changing <em>x</em> would change <em>y</em>. Look at the difference in these constructed sentences about the hours-studied model.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Says more than the model does</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Says what the model says</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Each extra hour of studying raises your score by 6.55 points.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">For each additional hour studied, the model predicts a quiz score about 6.55 points higher.</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A student who studies 0 hours will score 49.4.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The model predicts about 49.4 points at 0 hours, but 0 hours is outside the data, so this is a rough anchor.</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">This line proves studying causes higher scores.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Students who studied more tended to score higher in these data; the line summarizes that association.</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Why the care? Other things may travel with hours studied: how much a student already knew, how much sleep they got, how much they care. A line fitted to data we merely observed cannot separate these. Week 28 returns to this carefully. For today, the habit is: <strong>say what the model predicts, give the units, and stop there.</strong> To say more is to claim what you have not shown.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; A LINE FROM TWO POINTS IN DESMOS, A TRENDLINE IN EXCEL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Desmos Scientific</strong> does plain arithmetic, so type the formulas the way you write them. Slope from the two points (1, 58) and (5, 85): type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(85-58)/(5-1)</code> and you get 6.75. Put each subtraction in its own parentheses so the division covers the whole difference. Intercept: type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">58-6.75*1</code> and you get 51.25. A prediction at 3 hours: type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">51.25+6.75*3</code> and you get 71.5. For the negative-slope line through (2, 24) and (10, 8), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(8-24)/(10-2)</code> to get &minus;2, then <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">24-(-2)*2</code> to get 28. A common slip is to subtract the points in a different order on the top and the bottom, which flips the sign of the slope.<br /><br />
+            <strong>Excel</strong> draws the line for you: select the two columns, <strong>Insert</strong> a <strong>Scatter</strong> chart, add a <strong>Trendline</strong>, and check <strong>Display Equation on chart</strong> and <strong>Display R-squared value on chart</strong>. The equation shows the slope first, as <em>y</em> = <em>bx</em> + <em>a</em>. To use the equation in a cell, type its numbers into a formula, such as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=15.393+0.6857*A11</code> for a value in A11. Week 28 teaches the spreadsheet functions that compute the slope and intercept directly.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A made-up caf&eacute; fitted a line to 14 days of data: predicted cups of hot chocolate sold = 139 &minus; 1.43 &times; (outdoor temperature in &deg;F). The temperatures in the data ranged from 28&deg;F to 80&deg;F. Interpret the slope and the intercept in context, with units, and predict sales at 50&deg;F.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write your own interpretation of the slope and the intercept, and a prediction at 50&deg;F. (You should get: for each additional degree, about 1.43 fewer cups; 139 cups at 0&deg;F, which is far outside 28 to 80, so no real meaning; and 139 &minus; 1.43 &times; 50 = 67.5 cups.)<br />
+            <strong>Verify.</strong> Check its arithmetic in Desmos by typing <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">139-1.43*50</code> (67.5). Then check the <em>units</em> (cups per degree Fahrenheit), the wording (does it say predicts, or does it say temperature causes or makes sales change?), and what it does with the intercept. Watch for these common errors: causal language (each extra degree reduces sales by 1.43 cups, as if the line proved it); a wrong or missing unit (for example, 1.43 percent); reading the intercept as a real finding (at 0&deg;F the caf&eacute; sells 139 cups) when 0&deg;F is outside the data; and swapping the roles of <em>x</em> and <em>y</em>. Flag anything wrong, vague, or too confident, and say what you would ask next.<br />
+            <strong>The verified interpretation, for comparison:</strong> for each additional degree Fahrenheit, the model predicts about 1.43 fewer cups of hot chocolate sold. The intercept, 139 cups at 0&deg;F, is far outside the temperatures in the data (28&deg;F to 80&deg;F), so it has no sensible meaning here. At 50&deg;F, which is inside the data, the model predicts about 67.5 cups. The model describes an association in these made-up data and does not show that temperature causes the change.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes, plus the Excel steps above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Say What the Model Says</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A constructed model predicts a person's height in cm (&#375;) from arm span in cm (<em>x</em>): &#375; = 5 + 0.97<em>x</em>. The data have arm spans from 150 to 190 cm. Write the slope sentence with units and say whether the intercept has a sensible meaning. Predict the height for an arm span of 170 cm.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A constructed model predicts the resale value in dollars (&#375;) of a made-up phone from its age in years (<em>x</em>), with data from 1 to 5 years: &#375; = 420 &minus; 65<em>x</em>. Write the slope sentence with units.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Narrate: say aloud why the word predicts matters in a slope sentence.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. For each additional centimeter of arm span, the model predicts a height about 0.97 cm greater. The intercept, 5 cm at an arm span of 0, has no sensible meaning: 0 is far outside 150 to 190 cm. At 170 cm: 5 + 0.97 &times; 170 = 5 + 164.9 = <strong>169.9 cm</strong>. 2. For each additional year of age, the model predicts a resale value about $65 lower. 3. A line summarizes a pattern; points scatter around it, and the line does not show that <em>x</em> causes the change in <em>y</em>.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Two Points to an Equation</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find the equation of the line through (1, 10) and (4, 22). Show the slope as rise over run, then find the intercept using <em>a</em> = <em>y</em> &minus; <em>bx</em>. Check it against the second point and predict &#375; at <em>x</em> = 3.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find the equation of the line through (20, 55) and (60, 35), and predict &#375; at <em>x</em> = 40.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. <em>b</em> = (22 &minus; 10) &divide; (4 &minus; 1) = 12 &divide; 3 = <strong>4</strong>. <em>a</em> = 10 &minus; 4(1) = <strong>6</strong>. So &#375; = 6 + 4<em>x</em>. Check: at <em>x</em> = 4, 6 + 16 = 22. &#10003; At <em>x</em> = 3: 6 + 12 = <strong>18</strong>. 2. <em>b</em> = (35 &minus; 55) &divide; (60 &minus; 20) = &minus;20 &divide; 40 = <strong>&minus;0.5</strong>. <em>a</em> = 55 &minus; (&minus;0.5)(20) = 55 + 10 = <strong>65</strong>. So &#375; = 65 &minus; 0.5<em>x</em>. Check: at <em>x</em> = 60, 65 &minus; 30 = 35. &#10003; At <em>x</em> = 40: 65 &minus; 20 = <strong>45</strong>.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Fit It, Then Compare</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Complete the three tasks in the Fit the Line interactive. Record your lowest <em>Your SSE</em> for <em>Hours studied</em> and for <em>Hot chocolate</em>, and the least-squares SSE shown beside each.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write the slope sentence in context for each least-squares line, and say whether each intercept has a sensible meaning.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In two sentences, explain why two people can draw different lines by eye, and what the least-squares rule adds.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Your numbers will vary. For <em>Hours studied</em> the least-squares SSE is about 196.19, and no straight line can go below it. 2. <em>Hours studied</em>: for each additional hour studied, the model predicts a quiz score about 6.55 points higher; 0 hours is just outside the data (0.5 to 6), so the intercept 49.4 is a rough anchor. <em>Hot chocolate</em>: for each additional &deg;F, the model predicts about 1.43 fewer cups sold; 0&deg;F is far outside the data (28 to 80), so the intercept 139 has no sensible meaning. 3. Different people choose different points or tilt the line differently, and each line has its own total of squared misses. The least-squares rule picks the single line with the smallest sum of squared vertical misses, so everyone gets the same answer.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Rewrite It Carefully</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">8 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate writes: &ldquo;The slope of 6.55 shows that each hour of studying makes your quiz score go up by 6.55 points.&rdquo; Rewrite the sentence so it says only what the model says.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Another writes: &ldquo;The intercept 139 means the caf&eacute; sells 139 cups when it is 0&deg;F.&rdquo; Say what is wrong and rewrite it.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. For each additional hour studied, the model predicts a quiz score about 6.55 points higher (in these constructed data, students who studied more tended to score higher). The words makes and shows claim a cause the line cannot show. 2. 0&deg;F is far outside the temperatures in the data (28&deg;F to 80&deg;F), so the line there is a guess about territory never measured. A careful version: the intercept is 139 cups, but because 0&deg;F is outside the data it has no sensible meaning; it only positions the line.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 27.2 &mdash; Fitting a Line</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Interpret slope and intercept in context, find a line from two points, compare lines by their sum of squared misses, an Excel trendline answered as text, a careful rewrite, and an AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 27.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on reading slope and intercept, building a line from two points, what least squares minimizes, and regression toward the mean.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 27.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will use a fitted line to make predictions, and learn why predicting inside the data and predicting beyond it are very different things.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 27.2 &middot; Fitting a Line: Slope and Intercept in Context</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

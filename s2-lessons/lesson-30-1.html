@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 30.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 30.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42;"><span style="font-style: italic;">Embedded in this lesson</span></div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Fair, representative sampling</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 30.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Parameter or Statistic? Why We Sample</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">We cannot ask everyone, so what do we do with the answers we can get?</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Population and sample; parameter and statistic; the symbols for a mean and a proportion; why we sample instead of counting everyone; when counting everyone is practical; why a statistic changes from sample to sample but a parameter does not</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, follow the Excel steps, and complete the three activities at the bottom. Plan on about 70 minutes.</div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> tell a <strong>population</strong> from a <strong>sample</strong>, and a <strong>parameter</strong> from a <strong>statistic</strong>, in a described situation, using the symbols &mu; and <span style="text-decoration: overline;">x</span> for means and p and p&#770; for proportions.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why people sample instead of taking a census (cost, time, destructive testing, populations that cannot be fully reached, populations that keep changing), and say when a census is practical.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> decide whether a variable is categorical (summarize with a proportion) or numerical (summarize with a mean), and compute the matching statistic from a sample.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that a statistic is a number we can compute but that changes from sample to sample, while a parameter is one fixed number that is usually unknown, and that a small or convenient sample still produces only a statistic.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will grade its answers, not trust them).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A cook lifts a spoon to her lips and tastes the soup. One spoonful, a tiny fraction of the pot, and she announces: &ldquo;needs salt.&rdquo; Nobody asks her to drink the whole pot first. We trust the spoonful because the soup has been stirred, so a spoonful is a fair stand-in for the pot.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Almost everything we want to know is like the pot, not the spoon. How long will the batteries a factory ships last? What share of the voters in a town want a new library? How many minutes of homework does a typical student in a school really do? We can never taste the whole pot. We taste a spoonful and then make a careful claim about the pot.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">This module is about doing that <em>responsibly</em>: choosing the spoonful fairly, saying honestly what it shows, and never pretending it shows more. Today we begin with the vocabulary that keeps us honest: which numbers describe the pot, and which describe only the spoon.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every school, factory, town, club, and count in this lesson is <strong>constructed</strong> to teach the idea. None of it is real data about real people or products.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127970; POPULATION AND SAMPLE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The <strong>population</strong> is the entire group we want to learn about: all the students in a school, all the batteries from one production run, all the registered voters in a town. A <strong>sample</strong> is the part of that population that we actually collect data from. A <strong>census</strong> is a sample that is the whole population: every individual is measured.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The people or things in a population are the <strong>individuals</strong>, and what we record about each one is a <strong>variable</strong>. Before you do anything else with a data set, answer two questions in words: <em>who or what is the population?</em> and <em>who or what is the sample?</em> Writing them down keeps you from claiming more than you measured.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The population is a choice we make.</strong> If a teacher wants to describe only her own 25 students, those 25 are the whole population for her question. If she wants to say something about every student in the school, those same 25 are only a sample. The question decides which is which.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128209; PARAMETER AND STATISTIC</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A number that describes a population is a <strong>parameter</strong>. A number that describes a sample is a <strong>statistic</strong>. Statisticians use different symbols so that we never mix them up:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">What it measures</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Parameter (the whole population)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Statistic (the sample)</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Mean of a numerical variable</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&mu; (mu, said &ldquo;myoo&rdquo;)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><span style="text-decoration: overline;">x</span> (x-bar)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Proportion for a categorical variable</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">p</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">p&#770; (p-hat)</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">How many individuals</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">(not needed today)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">n, the sample size</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">That is all the notation we need today. The pattern to remember: <strong>Greek letter or plain letter for the population, a letter with a mark over it for the sample.</strong></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Which summary fits which variable?</strong> The type of variable chooses the summary. A <strong>categorical</strong> variable puts individuals into groups (yes or no, bus or walk), so we summarize it with a <strong>proportion</strong>: the number in the group divided by the total. A <strong>numerical</strong> variable is a measurement (minutes, hours, dollars), so we summarize it with a <strong>mean</strong>: the sum divided by the count.</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;"><strong>proportion</strong> = <em>number in the category</em> &divide; <em>total number</em> &nbsp;&nbsp;&nbsp;&nbsp; <strong>mean</strong> = <em>sum of the values</em> &divide; <em>number of values</em></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The same formulas work for both worlds. Divide over the whole population and you get the parameter (&mu; or p). Divide over a sample and you get the statistic (<span style="text-decoration: overline;">x</span> or p&#770;).</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127869;&#65039; WORKED EXAMPLE 1: THE SCHOOL CAFETERIA</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up school has 800 students. The cafeteria manager wants to know what share of all 800 students would buy from a new salad bar, and how much a student spends on lunch on an average day. On one Tuesday she asks the first 40 students who come through the lunch line. Of the 40, 26 say they would buy from the salad bar, and the 40 students spent a total of $174.00 on lunch. Identify the population, sample, variables, parameters, and statistics.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> I start by naming the groups in words. The population is <strong>all 800 students</strong> at the school. The sample is the <strong>40 students</strong> she asked. Next, the variables. &ldquo;Would buy from the salad bar&rdquo; is yes or no, so it is <strong>categorical</strong>, and the summary is a proportion. &ldquo;Amount spent&rdquo; is a dollar measurement, so it is <strong>numerical</strong>, and the summary is a mean.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Statistic for the categorical variable.</strong> p&#770; = 26 &divide; 40 = <strong>0.65</strong>, or 65%.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Statistic for the numerical variable.</strong> <span style="text-decoration: overline;">x</span> = $174.00 &divide; 40 = <strong>$4.35</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>Parameters.</strong> The true share p of all 800 students who would buy from the salad bar, and the true mean &mu; spent by all 800 students. <strong>Neither is known.</strong> We have not asked them all.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Responsibility check.</strong> Students who eat in the lunch line are not all the students: someone who brings lunch or skips it never walked through that line. So p&#770; = 65% and <span style="text-decoration: overline;">x</span> = $4.35 are honest numbers about <em>these 40 students</em>, and only an estimate of p and &mu;. How well they estimate is the question the rest of this module answers. Notice what we did <em>not</em> write: &ldquo;65% of the school would buy from the salad bar.&rdquo; We do not know that.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128267; WORKED EXAMPLE 2: A BATTERY FACTORY AND TESTING TO DESTRUCTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up factory finishes one production run of 12,000 batteries. The company wants to say how many hours the batteries last in a standard device. A battery's lifetime can be measured only by running it until it is dead. The quality team tests 10 batteries and records these lifetimes in hours: 38, 41, 44, 40, 39, 43, 42, 37, 45, 41. Why not test them all, and what are the parameter and the statistic?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> If we tested every one of the 12,000 batteries, we would use up every battery we made, and there would be nothing left to sell. A measurement that destroys the thing measured is called <strong>destructive testing</strong>, and it makes a census pointless. We must sample.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Population:</strong> all 12,000 batteries in the run. <strong>Sample:</strong> the 10 tested. <strong>Variable:</strong> lifetime in hours, which is numerical, so the summary is a mean.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Statistic.</strong> Add the lifetimes: 38 + 41 + 44 + 40 + 39 + 43 + 42 + 37 + 45 + 41 = 410. Then <span style="text-decoration: overline;">x</span> = 410 &divide; 10 = <strong>41.0 hours</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>Parameter.</strong> &mu;, the mean lifetime of all 12,000 batteries. It is one fixed number, but we will never know it exactly, because finding it would require destroying the whole run.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A statistic changes.</strong> Suppose the team tests a <em>second</em> 10 batteries from the same run and gets 42, 40, 38, 44, 41, 39, 43, 40, 42, 38. Their sum is 407, so this sample has <span style="text-decoration: overline;">x</span> = 407 &divide; 10 = <strong>40.7 hours</strong>. Same run, same population, same &mu;, and two different statistics: 41.0 and 40.7. Neither is &ldquo;wrong.&rdquo; Each is the mean of the batteries that happened to be tested. That is what we mean by sample-to-sample variation.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128499;&#65039; WORKED EXAMPLE 3: A TOWN POLL</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up town has 6,000 registered voters. A newspaper phones 150 of them and asks, &ldquo;Do you favor building a new library?&rdquo; Of the 150, 87 say yes. (a) Name the population, the sample, and the type of variable. (b) Find the statistic. (c) Suppose the town later counts a mail-in ballot from <em>all</em> 6,000 voters and 3,300 say yes. What is the parameter, and how does it compare?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> The population is all 6,000 registered voters; the sample is the 150 who were phoned. The answer is yes or no, so the variable is <strong>categorical</strong> and the summary is a proportion.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>(a)</strong> Population: 6,000 voters. Sample: 150 voters. Variable: categorical.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>(b)</strong> p&#770; = 87 &divide; 150 = <strong>0.58</strong>, or 58%.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>(c)</strong> Once every voter is counted, the population proportion is known: p = 3,300 &divide; 6,000 = <strong>0.55</strong>, or 55%. The poll's statistic (p&#770; = 0.58) was close, but it was not equal to the parameter (p = 0.55). Before the full count, nobody could have known how far off it was.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The lesson inside the example.</strong> The parameter is fixed the whole time. It was 55% before the poll, during the poll, and after. What changed is what we <em>knew</em>. Statistics are how we learn about a parameter we cannot count directly. That idea, using statistics to learn about parameters, is called <strong>inference</strong>, and it is where this course is heading.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; WHY SAMPLE AT ALL? AND WHEN IS A CENSUS FINE?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">If a census gives the exact parameter, why does anyone settle for a sample? There are good reasons, and each shows up in the examples above.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Cost.</strong> Interviewing or measuring every individual in a large population can cost far more than a careful sample.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Time.</strong> A decision may be needed this week, but a full count takes months.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Destructive testing.</strong> If measuring an individual uses it up (the batteries, a crash test, a strength test on a bridge cable sample), testing everything leaves nothing to use.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A population that cannot be fully reached.</strong> You cannot list or contact every fish in a lake, every person who might read a website, or everyone who will ever visit a park.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>A population that keeps changing.</strong> The set of people shopping in a store, or the cars on a road, is different by the time you finish counting. A full count would describe a moment that is already gone.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A census is the right tool when the population is small and reachable and measuring is cheap and harmless.</strong> The 20 members of a small club, the 25 students in one class, every lunch recorded by the cafeteria register today: counting <em>all</em> of them is easy, and then the number you compute is a parameter, with no estimating needed. Choosing a sample when a census is easy would just throw away information.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128257; A STATISTIC VARIES; A PARAMETER STAYS PUT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">This is the single most important idea in the lesson, so it is worth saying slowly.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; A <strong>parameter</strong> (&mu; or p) is one fixed number describing the whole population. It is usually <strong>unknown</strong>, because we did not measure everyone.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; A <strong>statistic</strong> (<span style="text-decoration: overline;">x</span> or p&#770;) is a number we <strong>can compute</strong>, because we have the sample in hand. But a different sample from the same population would give a <strong>different</strong> statistic.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">So a statistic is a clue, not an answer. It is evidence about a parameter, and later lessons will show how to say how good that evidence is. For now, hold on to this: <strong>we calculate statistics so that we can say something careful about parameters.</strong></div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C;  border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#9878;&#65039; RESPONSIBILITY: A SMALL OR CONVENIENT SAMPLE IS STILL ONLY A STATISTIC</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<div style="margin-bottom: 14px;">Suppose a student asks the five friends sitting nearest to her whether they like the new lunch menu, and four say yes. She now has a number, 4 out of 5, or 80%. That number is a perfectly good <strong>statistic</strong>. It is not the share of the school that likes the menu. It is only the share of <em>those five friends</em>.</div><div style="margin-bottom: 14px;">Two things are tempting and both are wrong. The first is to treat a statistic as if it were the parameter, because it came out of a careful-looking calculation. The second is to think that the number becomes more trustworthy simply because it is precise (80.0%) or because the sample is large. Even a large sample is only a statistic, and a sample taken the easy way (the five people next to you, the first people through a door) may lean in a particular direction. Calculating carefully does not repair a sample that was gathered carelessly.</div><div style="margin-bottom: 0px;">The responsible sentence is: &ldquo;Of the five friends I asked, four like the menu.&rdquo; Claiming more than that requires a better way of choosing the sample, which is the work of Lesson 30.2.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10060; A COMMON ERROR: &ldquo;THE AVERAGE OF THE POPULATION&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Read this sentence from a made-up student report: &ldquo;I measured 30 students and the mean was 6.8 hours of sleep, so the average sleep of the population is 6.8.&rdquo; What is wrong?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The number 6.8 is the <strong>sample mean <span style="text-decoration: overline;">x</span></strong>, a statistic. It is the average of the <em>30 students measured</em>. It is not the average of the population, which is &mu;. The two can be close, and the sample mean is a sensible estimate of &mu;, but they are different numbers with different jobs, and in general they are not equal.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A repaired sentence:</strong> &ldquo;In my sample of 30 students, <span style="text-decoration: overline;">x</span> = 6.8 hours. That is my estimate of &mu;, the mean for all students, which I do not know.&rdquo;</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; CLASSIFY IT: PARAMETER OR STATISTIC?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Your turn.</strong> For each statement, decide <strong>parameter</strong> or <strong>statistic</strong> and say why before you open the check. The statements use the examples from this lesson, and the last one has a twist.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">#</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Statement</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Parameter or statistic?</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The mean homework time of all 20 members of a small club, every member measured.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The mean homework time of 5 members of that club, picked from the list.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The true share of all 6,000 registered voters in the town who favor the library.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The 58% of 150 phoned voters who favored the library.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The mean lifetime of all 12,000 batteries in a production run.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The mean lifetime of 10 batteries tested from the run: 41.0 hours.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The share of all lunches sold today that included fruit, found from the cafeteria register records of every lunch sold today.</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>decide first</em></td></tr></tbody></table></div>                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check your classifications</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+<div style="margin-bottom: 8px;"><strong>1. Parameter.</strong> The club is the whole population and everyone was measured, so this is a census.</div><div style="margin-bottom: 8px;"><strong>2. Statistic.</strong> Five of the 20 is a sample.</div><div style="margin-bottom: 8px;"><strong>3. Parameter.</strong> It describes the whole population, known or not.</div><div style="margin-bottom: 8px;"><strong>4. Statistic.</strong> It describes only the 150 in the sample.</div><div style="margin-bottom: 8px;"><strong>5. Parameter.</strong> Whole population; unknown because testing destroys the batteries.</div><div style="margin-bottom: 8px;"><strong>6. Statistic.</strong> Ten of 12,000 is a sample.</div><div style="margin-bottom: 8px;"><strong>7. Parameter.</strong> The population is today's lunches, and every one is counted. The question decides the population.</div><div style="margin-top: 8px;">Notice that the <em>same quantity</em> can be a parameter in one question and a statistic in another. The words &ldquo;all&rdquo; and &ldquo;every&rdquo; point to a parameter, but only if the group you have counted is the group you are asking about.</div>
+                    </div>
+                </details>
+
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C;  border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127758; WHERE PEOPLE USE THIS: POLLS AND QUALITY CHECKS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<div style="margin-bottom: 0px;">Newspapers and polling organizations typically report a percent from a sample of voters, which is a statistic, in order to estimate a parameter, the percent of the whole population that holds the view. Manufacturers do much the same when they test a few items from a batch. In each case, how the sample was chosen matters as much as the number itself, and Lesson 30.2 shows why.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A POPULATION, A SAMPLE, AND THE COMPARISON, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build a small population of 20 values, compute its parameters with formulas, then compare them with statistics from a sample of 5 that you choose. All data are made up.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk30_L1_YourName</code> (practice; you do not upload it).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> to <strong>C1</strong> type the headings <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Member</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Minutes</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Bus</code>, pressing <strong>Tab</strong> after each. In rows 2 to 21 enter members 1 to 20 in column A, the homework minutes in column B, and Yes or No in column C (does the member ride the bus?), exactly as in the table below.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Member</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Minutes</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Bus</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Member</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Minutes</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Bus</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">35</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">45</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">50</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">12</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">50</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">40</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">13</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">40</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">65</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">14</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">35</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">45</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">15</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">55</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">16</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">55</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">17</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">8</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">18</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">45</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">25</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">19</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">65</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">70</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">20</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">50</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The parameters (the whole club).</strong> In <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean of all 20</code>. In <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(B2:B21)</code> and press <strong>Enter</strong>. It gives <strong>47.5</strong>: this is &mu;. In <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Share who ride the bus</code> and in <strong>F2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(C2:C21,"Yes")/ROWS(C2:C21)</code>. It gives <strong>0.4</strong>: this is p. (COUNTIF counts the Yes entries; ROWS counts how many rows are in the range.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A sample you choose.</strong> Pick 5 members from the list yourself (for example, members 3, 7, 12, 15, 19). Copy those five rows of minutes and bus answers into <strong>H2:I6</strong> (type the headings <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Minutes</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Bus</code> in H1 and I1).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The statistics.</strong> In <strong>K1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(H2:H6)</code> for <span style="text-decoration: overline;">x</span> and in <strong>K2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(I2:I6,"Yes")/ROWS(I2:I6)</code> for p&#770;. For the example members 3, 7, 12, 15, 19 you should get <strong>53.0</strong> and <strong>0.6</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>Compare.</strong> Put a different set of 5 members into H2:I6 (change the values in place). Watch K1 and K2 change while F1 and F2 do not. The statistics move with the sample; the parameters stay where they are.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Be honest about this sample.</strong> You picked these five members by hand, which is a quick way to see the idea and not a fair way to choose a sample. Lesson 30.2 shows how to choose one that is.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; AVERAGE, COUNTIF AND ROWS IN EXCEL; PLAIN ARITHMETIC IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<strong>Excel counts and averages for you.</strong> For a numerical variable, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(range)</code> returns the mean. For a categorical variable, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(range,"Yes")/ROWS(range)</code> returns the proportion of Yes entries: COUNTIF counts the matching cells and ROWS counts all the cells in the range. Use the whole list to get a parameter and the sample rows to get a statistic; the formula is the same, only the range changes.<br /><br /><strong>Desmos Scientific</strong> does plain arithmetic, so type the sum and divide. For the battery example, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(38+41+44+40+39+43+42+37+45+41)/10</code> to get 41. For the poll, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">87/150</code> to get 0.58 and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">87/150*100</code> to get 58. For the cafeteria, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">174/40</code> to get 4.35.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; QUIZ AN AI ON FIVE CASES AND GRADE IT (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<strong>Task: quiz an AI on five cases, and grade it.</strong><br /><strong>Prompt.</strong> Give an AI tool these five cases, one per line, and ask: <em>&ldquo;For each one, say whether the number is a parameter or a statistic, name the population, and explain in one sentence. Do not skip any.&rdquo;</em><br />&nbsp;&nbsp;1. The mean homework time of all 20 members of a small club, with every member measured.<br />&nbsp;&nbsp;2. In a made-up poll of 150 voters from a town of 6,000, 58% favor a new library.<br />&nbsp;&nbsp;3. The true percent of all batteries in one production run that last more than 40 hours.<br />&nbsp;&nbsp;4. The mean lifetime of 10 batteries tested to failure from a run: 41.0 hours.<br />&nbsp;&nbsp;5. A teacher wants the mean number of absences for her own class of 25 students, and she uses the attendance record for all 25.<br /><strong>Predict.</strong> <em>Before</em> you read the AI's answers, write your own answer key for all five: parameter or statistic, and the population. Then read the AI's answers and mark each as matching or not matching your key.<br /><strong>Verify.</strong> For every miss, decide who is right by asking what group the number describes and whether every individual in that group was measured. Flag any AI answer that is right but for a weak reason (for example, &ldquo;it is a statistic because it has a decimal&rdquo;). Count how many of five the AI got right, and write one sentence about the kind of case it found hardest.<details style="margin-top: 10px; background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C0392B; border-radius: 6px; padding: 10px 16px;"><summary style="font-size: 16px; color: #0E1C42; cursor: pointer;">Check against an answer key (only after you have written your own)</summary><div style="margin-top: 8px; font-size: 16px; line-height: 1.6;"><div style="margin-bottom: 6px;"><strong>1.</strong> Parameter. The club is the whole population and a census was taken.</div><div style="margin-bottom: 6px;"><strong>2.</strong> Statistic. It describes the 150 sampled voters.</div><div style="margin-bottom: 6px;"><strong>3.</strong> Parameter. It describes the entire run, even though no one can know it without destroying the batteries.</div><div style="margin-bottom: 6px;"><strong>4.</strong> Statistic. Ten batteries is a sample.</div><div style="margin-bottom: 6px;"><strong>5.</strong> Parameter, because her own 25 students are the whole population for her question. (If she wanted to describe the whole school, the same number would be a statistic.)</div><div>Case 5 is the twist: an AI may call it a statistic automatically because it is &ldquo;a class,&rdquo; or call it a parameter without checking the group of interest. The correct reasoning depends on the stated goal.</div></div></details>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 35 minutes, plus the Excel steps and the AI task above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Name Everything</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each made-up situation, write the population, the sample, the variable, whether it is categorical or numerical, and the statistic with its symbol. <strong>(a)</strong> A school newspaper asks 50 of the school's 600 students how many hours they slept last night; the 50 answers total 360 hours. <strong>(b)</strong> A greenhouse plants 500 seedlings; a worker checks 40 of them and finds that 31 have sprouted. <strong>(c)</strong> A teacher computes the mean of all 28 quiz scores in her class and gets 81.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For (c), is 81 a parameter or a statistic? Explain what question decides your answer.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+<strong>(a)</strong> Population: 600 students. Sample: 50 students. Variable: hours slept, numerical. <span style="text-decoration: overline;">x</span> = 360 &divide; 50 = <strong>7.2 hours</strong> (a mean). <strong>(b)</strong> Population: 500 seedlings. Sample: 40 seedlings. Variable: sprouted or not, categorical. p&#770; = 31 &divide; 40 = <strong>0.775</strong>, or 77.5% (a proportion). <strong>(c)</strong> Population: the 28 students in the class; every score was used. 81 is a mean, and it is a <strong>parameter</strong> (&mu; = 81) if the question is about this class only. It would be a statistic only if she were using these 28 scores to say something about a larger group. The question decides.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Same Club, Different Samples</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the 20 homework times from the Excel table (member 1 to member 20 in order). Sample A is members 1, 5, 9, 13, 17, and Sample B is members 2, 6, 10, 14, 18. Find the mean minutes for each sample by hand or in Desmos.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compare both means with the population mean &mu; = 47.5. Which sample statistic is closer? Is either equal to &mu;?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the Bus column to find p&#770; (the share who ride the bus) for each sample, and compare with p = 0.4. In two sentences, say what this shows about statistics versus parameters.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+Sample A: the minutes are 35, 45, 25, 40, 30, with sum 175, so <span style="text-decoration: overline;">x</span> = 175 &divide; 5 = <strong>35.0</strong>. Sample B: 50, 30, 70, 35, 45, with sum 230, so <span style="text-decoration: overline;">x</span> = 230 &divide; 5 = <strong>46.0</strong>. Sample B is closer to 47.5 (off by 1.5, compared with 12.5). Neither equals the parameter. Bus riders: Sample A has members 1 and 17, so p&#770; = 2 &divide; 5 = <strong>0.4</strong>; Sample B has only member 14, so p&#770; = 1 &divide; 5 = <strong>0.2</strong>. The parameter p = 8 &divide; 20 = 0.4 does not move, but the two statistics differ from each other (and one happens to match p by luck). A statistic changes from sample to sample; the parameter stays fixed. Samples of only 5 are very changeable, so none of these should be trusted much.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Error Analysis: Repair the Claim</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">11 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate writes: &ldquo;I tested 8 batteries and the mean was 41.0 hours, so the average life of all the batteries is 41.0 hours.&rdquo; Find the mistake and rewrite the sentence correctly, using the symbols <span style="text-decoration: overline;">x</span> and &mu;.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Another classmate says: &ldquo;The poll asked 1,000 people and 52% said yes. Because 1,000 is so large, 52% is the parameter.&rdquo; Find the mistake and rewrite the sentence.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one sentence, explain why asking all 20 members of a small club for their homework time would be a reasonable census, but testing all 12,000 batteries would not.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+1. The classmate treated a statistic as the parameter. Repair: &ldquo;In my sample of 8 batteries, <span style="text-decoration: overline;">x</span> = 41.0 hours. That is my estimate of &mu;, the mean life of all the batteries, which I do not know.&rdquo; 2. A sample is a statistic no matter how large it is. Repair: &ldquo;In my sample of 1,000 people, p&#770; = 0.52, my estimate of the population proportion p.&rdquo; (A bigger sample usually helps, but it never turns a statistic into the parameter.) 3. The club is small, reachable, and measuring minutes harms nothing, so counting everyone is easy and gives a parameter. Testing a battery to the end of its life uses it up, so a census of the batteries would leave none to sell.
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 30.1 &mdash; Parameter or Statistic?</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Identify populations, samples, parameters and statistics, compute a sample proportion and mean, explain why sampling is needed, one Excel item typed as text, and an AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 30.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on parameters versus statistics, why we sample, matching variable type to summary, and careful statements about a sample number.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 30.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">You now know the vocabulary. Next you will see how the way a sample is chosen decides whether its statistic can be trusted, and you will try a sampling simulator for yourself.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 30.1 &middot; Parameter or Statistic? Why We Sample</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 24.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 8</div>
+        <div style="font-size: 12px; color: #666;">Descriptive Statistics</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 24.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Courtesy</div>
+        <div style="font-size: 12px; color: #666;">Describing data fairly</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 24.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Case Study: Telling a Dataset's Story Honestly</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Every number can be true and the story still be unfair.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">A start-to-finish case study: question, display, summaries, comparison, outliers, a traceable data story, and an honesty checklist</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Work through the seven steps in order, build the table in Excel, then mark the difference between an honest and a dishonest story. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> carry one dataset from a question through a display, fitting summaries, a comparison, and an outlier decision to a written data story.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> write a one-paragraph data story in which every number can be traced to the summary table.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> apply a seven-point honesty checklist to a data story and say what changed between a dishonest and an honest version.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> fact-check an AI-written summary against a table of statistics.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) and your OneDrive <em>Optima &rarr; Math</em> folder.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129517; THE LAST LESSON OF THE MODULE: A WHOLE STORY, START TO FINISH</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">For four weeks you have been collecting tools: dot plots and histograms, the mean and the median, quartiles and the IQR, fences for outliers, the standard deviation, and a table that sets two groups side by side. Today you use <strong>all of them on one dataset</strong>, from the first question to the final paragraph, and you decide at each step what is <em>fair</em> to the data and to the reader.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">A summary number is a courtesy or a discourtesy. It is a courtesy when it tells the reader what the data are really like. It is a discourtesy when it is true but leaves out the part that would change the reader's mind. Every number in this lesson is true. The difference between the two stories we write is what each one chooses to say and what it leaves out.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128652; THE DATASET &mdash; CONSTRUCTED, NOT REAL</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up school district wants to know whether to move riders from <strong>Route A</strong> to <strong>Route B</strong>. A made-up dispatcher recorded <strong>how many minutes late each bus arrived</strong> on 25 school days for each route. <strong>These numbers were constructed for this lesson; they are not from any real bus system.</strong> Here they are, in day order (Day 1 first):</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Route</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Minutes late on each of 25 school days</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Route A</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6, 8, 5, 7, 6, 9, 4, 6, 7, 5, 8, 6, 7, 5, 6, 10, 6, 7, 4, 8, 5, 6, 7, 6, 5</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Route B</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3, 4, 2, 5, 3, 5, 1, 3, 24, 4, 2, 5, 3, 4, 3, 31, 2, 4, 3, 5, 21, 5, 2, 3, 4</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">We will treat each route's 25 days as a <strong>sample</strong> of the days that route runs, so the standard deviation is the sample one (STDEV.S).</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10102; STEP 1 &mdash; ASK A QUESTION BEFORE YOU TOUCH THE NUMBERS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A data story answers a question. Ours is: <em>&ldquo;Which route is the better one to ride if you care about arriving on time?&rdquo;</em> Notice that &ldquo;better&rdquo; hides two different questions: <strong>How late is a typical day?</strong> and <strong>How bad can a bad day get?</strong> A rider who must never miss first period cares about the second. A rider who wants the shortest wait on an ordinary morning cares about the first. We will report on both and let the reader weigh them.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10103; STEP 2 &mdash; LOOK FIRST</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Before computing anything, draw the data. Both routes below use <strong>the same number line</strong>, from 0 to 32 minutes. Each dot is one day; red dots are the days the 1.5 &times; IQR rule will flag in Step 5.</div>
+<div style="margin: 0 0 6px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Route A: minutes late (25 days)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 560 137" width="560" height="137" role="img" aria-label="Dot plot of Route A. Values run from 4 to 10 minutes, with the tallest stack at 6 minutes." style="max-width: 100%; height: auto;"><line x1="24" y1="109.2" x2="536" y2="109.2" stroke="#0E1C42" stroke-width="2"/><line x1="24.0" y1="109.2" x2="24.0" y2="114.2" stroke="#0E1C42"/><text x="24.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="88.0" y1="109.2" x2="88.0" y2="114.2" stroke="#0E1C42"/><text x="88.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">4</text><line x1="152.0" y1="109.2" x2="152.0" y2="114.2" stroke="#0E1C42"/><text x="152.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">8</text><line x1="216.0" y1="109.2" x2="216.0" y2="114.2" stroke="#0E1C42"/><text x="216.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">12</text><line x1="280.0" y1="109.2" x2="280.0" y2="114.2" stroke="#0E1C42"/><text x="280.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">16</text><line x1="344.0" y1="109.2" x2="344.0" y2="114.2" stroke="#0E1C42"/><text x="344.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="408.0" y1="109.2" x2="408.0" y2="114.2" stroke="#0E1C42"/><text x="408.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">24</text><line x1="472.0" y1="109.2" x2="472.0" y2="114.2" stroke="#0E1C42"/><text x="472.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">28</text><line x1="536.0" y1="109.2" x2="536.0" y2="114.2" stroke="#0E1C42"/><text x="536.0" y="127.2" font-size="11" text-anchor="middle" fill="#1a2340">32</text><circle cx="88.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="88.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="51.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="41.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="120.0" cy="30.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="136.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="136.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="136.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="136.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="136.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="152.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="152.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="152.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="168.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="184.0" cy="103.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/></svg></div></div>
+<div style="margin: 0 0 6px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Route B: minutes late (25 days)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 560 126" width="560" height="126" role="img" aria-label="Dot plot of Route B. Twenty-two days sit between 1 and 5 minutes; three days are far out at 21, 24, and 31 minutes." style="max-width: 100%; height: auto;"><line x1="24" y1="98.8" x2="536" y2="98.8" stroke="#0E1C42" stroke-width="2"/><line x1="24.0" y1="98.8" x2="24.0" y2="103.8" stroke="#0E1C42"/><text x="24.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="88.0" y1="98.8" x2="88.0" y2="103.8" stroke="#0E1C42"/><text x="88.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">4</text><line x1="152.0" y1="98.8" x2="152.0" y2="103.8" stroke="#0E1C42"/><text x="152.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">8</text><line x1="216.0" y1="98.8" x2="216.0" y2="103.8" stroke="#0E1C42"/><text x="216.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">12</text><line x1="280.0" y1="98.8" x2="280.0" y2="103.8" stroke="#0E1C42"/><text x="280.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">16</text><line x1="344.0" y1="98.8" x2="344.0" y2="103.8" stroke="#0E1C42"/><text x="344.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="408.0" y1="98.8" x2="408.0" y2="103.8" stroke="#0E1C42"/><text x="408.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">24</text><line x1="472.0" y1="98.8" x2="472.0" y2="103.8" stroke="#0E1C42"/><text x="472.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">28</text><line x1="536.0" y1="98.8" x2="536.0" y2="103.8" stroke="#0E1C42"/><text x="536.0" y="116.8" font-size="11" text-anchor="middle" fill="#1a2340">32</text><circle cx="40.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="56.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="56.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="56.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="56.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="51.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="41.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="72.0" cy="30.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="88.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="88.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="88.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="88.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="88.0" cy="51.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="93.2" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="82.8" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="72.4" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="62.0" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="104.0" cy="51.6" r="4.6" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="360.0" cy="93.2" r="4.6" fill="#C0392B" stroke="#0E1C42" stroke-width="1"/><circle cx="408.0" cy="93.2" r="4.6" fill="#C0392B" stroke="#0E1C42" stroke-width="1"/><circle cx="520.0" cy="93.2" r="4.6" fill="#C0392B" stroke="#0E1C42" stroke-width="1"/></svg></div></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Route A box plot</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 560 118" width="560" height="118" role="img" aria-label="Box plot of Route A: minimum 4, Q1 5, median 6, Q3 7, maximum 10." style="max-width: 100%; height: auto;"><line x1="24" y1="92" x2="536" y2="92" stroke="#0E1C42" stroke-width="2"/><line x1="24.0" y1="92" x2="24.0" y2="97" stroke="#0E1C42"/><text x="24.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="88.0" y1="92" x2="88.0" y2="97" stroke="#0E1C42"/><text x="88.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">4</text><line x1="152.0" y1="92" x2="152.0" y2="97" stroke="#0E1C42"/><text x="152.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">8</text><line x1="216.0" y1="92" x2="216.0" y2="97" stroke="#0E1C42"/><text x="216.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">12</text><line x1="280.0" y1="92" x2="280.0" y2="97" stroke="#0E1C42"/><text x="280.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">16</text><line x1="344.0" y1="92" x2="344.0" y2="97" stroke="#0E1C42"/><text x="344.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="408.0" y1="92" x2="408.0" y2="97" stroke="#0E1C42"/><text x="408.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">24</text><line x1="472.0" y1="92" x2="472.0" y2="97" stroke="#0E1C42"/><text x="472.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">28</text><line x1="536.0" y1="92" x2="536.0" y2="97" stroke="#0E1C42"/><text x="536.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">32</text><line x1="88.0" y1="61.0" x2="104.0" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="136.0" y1="61.0" x2="184.0" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="88.0" y1="53.0" x2="88.0" y2="69.0" stroke="#0E1C42" stroke-width="2"/><line x1="184.0" y1="53.0" x2="184.0" y2="69.0" stroke="#0E1C42" stroke-width="2"/><rect x="104.0" y="46" width="32.0" height="30" fill="#BFE4F4" stroke="#0E1C42" stroke-width="2"/><line x1="120.0" y1="46" x2="120.0" y2="76" stroke="#0E1C42" stroke-width="3"/></svg></div></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Route B box plot (whiskers stop at the last unflagged value, 5)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 560 118" width="560" height="118" role="img" aria-label="Box plot of Route B: whisker from 1 to 5, Q1 3, median 4, Q3 5, and three outlier dots at 21, 24, and 31." style="max-width: 100%; height: auto;"><line x1="24" y1="92" x2="536" y2="92" stroke="#0E1C42" stroke-width="2"/><line x1="24.0" y1="92" x2="24.0" y2="97" stroke="#0E1C42"/><text x="24.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="88.0" y1="92" x2="88.0" y2="97" stroke="#0E1C42"/><text x="88.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">4</text><line x1="152.0" y1="92" x2="152.0" y2="97" stroke="#0E1C42"/><text x="152.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">8</text><line x1="216.0" y1="92" x2="216.0" y2="97" stroke="#0E1C42"/><text x="216.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">12</text><line x1="280.0" y1="92" x2="280.0" y2="97" stroke="#0E1C42"/><text x="280.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">16</text><line x1="344.0" y1="92" x2="344.0" y2="97" stroke="#0E1C42"/><text x="344.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="408.0" y1="92" x2="408.0" y2="97" stroke="#0E1C42"/><text x="408.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">24</text><line x1="472.0" y1="92" x2="472.0" y2="97" stroke="#0E1C42"/><text x="472.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">28</text><line x1="536.0" y1="92" x2="536.0" y2="97" stroke="#0E1C42"/><text x="536.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">32</text><line x1="40.0" y1="61.0" x2="72.0" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="104.0" y1="61.0" x2="104.0" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="40.0" y1="53.0" x2="40.0" y2="69.0" stroke="#0E1C42" stroke-width="2"/><line x1="104.0" y1="53.0" x2="104.0" y2="69.0" stroke="#0E1C42" stroke-width="2"/><rect x="72.0" y="46" width="32.0" height="30" fill="#BFE4F4" stroke="#0E1C42" stroke-width="2"/><line x1="88.0" y1="46" x2="88.0" y2="76" stroke="#0E1C42" stroke-width="3"/><circle cx="360.0" cy="61.0" r="5" fill="#C0392B" stroke="#0E1C42"/><circle cx="408.0" cy="61.0" r="5" fill="#C0392B" stroke="#0E1C42"/><circle cx="520.0" cy="61.0" r="5" fill="#C0392B" stroke="#0E1C42"/></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>What the picture says before any arithmetic.</strong> Route A is a tight pile centered near 6. Route B is a tight pile centered near 3 or 4 <em>with three days far off to the right</em>: a shape that is right-skewed with outliers. If we had gone straight to one average, we would never have seen those three dots.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10104; STEP 3 &mdash; CHOOSE SUMMARIES THAT FIT THE SHAPE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Route A is roughly symmetric: its mean (6.36) and median (6) are close, and the gap (0.36) is smaller than about a quarter of its IQR (\(0.25 \times 2 = 0.5\)). Mean and standard deviation would be fine for Route A. Route B is not: its mean (6.04) sits 2.04 above its median (4), and three flagged days pull it. For Route B the <strong>median and IQR</strong> describe the typical day, and the standard deviation (7.50) mostly measures those three days.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">When we compare two groups, we use <strong>the same pair for both</strong>, or the comparison is unfair. So the main comparison uses the <strong>median and IQR</strong>, and the standard deviation is reported as a second view because it carries the news about the long tail.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10105; STEP 4 &mdash; COMPARE THE GROUPS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the side-by-side summary. (Quartiles by the median-of-each-half method; on this dataset Excel's QUARTILE.INC gives exactly the same quartiles, so the two methods agree and you can check the table with either.)</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Statistic (minutes late)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Route A</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Route B</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Minimum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">7</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Maximum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">10</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">31</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">IQR</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.36</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.04</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Standard deviation (sample)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1.47</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">7.50</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Fences (1.5 &times; IQR)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2 to 10</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0 to 8</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Days flagged</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3 (21, 24, 31)</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Center.</strong> The median is 2 minutes lower on Route B (4 versus 6).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Spread of the middle half.</strong> The IQR is the same, 2 minutes, for both.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Extremes.</strong> The worst day was 10 minutes late on Route A and 31 on Route B; the standard deviation is about five times as large on Route B (7.50 versus 1.47).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The mean.</strong> The means are nearly equal (6.36 and 6.04), and that is the number that would hide everything above.</div>
+<div style="margin-bottom: 6px;"></div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10106; STEP 5 &mdash; CHECK THE OUTLIERS, THEN DECIDE: WITH AND WITHOUT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Route B's fences are \(Q_1 - 1.5 \times IQR = 3 - 3 = 0\) and \(Q_3 + 1.5 \times IQR = 5 + 3 = 8\). The days 21, 24, and 31 are above 8, so all three are flagged. Route A's fences are 2 and 10, and nothing falls outside.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A flag is a <strong>question</strong>, not a verdict. Suppose we check the dispatcher's log and find that these three late runs really happened: they are not typing errors. Then we may not delete them, because deleting true data to make a story tidier is a discourtesy to the data. Instead we <strong>report both views</strong>:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Route B</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">All 25 days</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Without 21, 24, 31 (22 days)</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.04</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3.41</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">SD (sample)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">7.50</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1.18</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Maximum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">31</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">The three days make up 76 of Route B's 151 late minutes: about half the total from 12 percent of the days. That is exactly what a reader needs to know. (Be careful with the trimmed set: once the three days are gone the quartiles tighten, and the rule would start flagging a different day. Trimming and re-flagging can go on and on, so we flag once, on the full data, and stop.)</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10107; STEP 6 &mdash; WRITE THE STORY, AND MAKE EVERY NUMBER TRACEABLE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here are two stories built from <strong>exactly the same data</strong>. Every number in both is correct. Read them both before reading on.</div>
+<div style="background: #FDECEC; border-left: 5px solid #C0392B; border-radius: 6px; padding: 14px 20px; margin: 0 0 14px 0;"><div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">THE DISHONEST VERSION (true numbers, unfair story)</div><div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Route B is the better route. Its median delay is only 4 minutes, a third lower than Route A's 6 minutes, and its mean delay (6.04 minutes) is even lower than Route A's (6.36 minutes). The middle half of its days are as steady as Route A's (an IQR of 2 minutes for both). Route B's drivers are clearly doing a better job, so every rider should switch to Route B.</div></div>
+<div style="background: #E9F7EF; border-left: 5px solid #1E8449; border-radius: 6px; padding: 14px 20px; margin: 0 0 14px 0;"><div style="font-size: 11px; color: #145A32; margin-bottom: 8px;">THE HONEST VERSION (same data, fair story)</div><div style="font-size: 17px; color: #1a2340; line-height: 1.65;">We compared how many minutes late two school bus routes ran on each of 25 school days (constructed data). On a typical day Route B ran 2 minutes less late than Route A: the median delay was 4 minutes for Route B and 6 minutes for Route A. The middle half of the days was equally steady on both routes (IQR 2 minutes each). But Route B had three days of 21, 24, and 31 minutes late (3 of 25 days, or 12 percent), which the 1.5 &times; IQR rule flags as outliers, while Route A's worst day was 10 minutes. Those three days pull Route B's mean up to 6.04 minutes, just under Route A's 6.36, and make its standard deviation 7.50 minutes against 1.47 for Route A. Without those three days, Route B's median is 3 minutes and its mean is 3.41 minutes. So Route B is better on a typical day and far worse on a bad day. With only 25 days per route, these data cannot tell us why the late days happened or whether they will keep happening.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Trace every number.</strong> A story is only as good as its numbers are checkable. Each number in the honest version comes from one place:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Number in the story</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Where it comes from</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">25 days per route</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">COUNT of each column (Step 4 table, n)</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">medians 4 and 6; &ldquo;2 minutes less late&rdquo;</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">median row; \(6 - 4 = 2\)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">IQR 2 minutes each</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">\(Q_3 - Q_1\): \(7 - 5 = 2\) and \(5 - 3 = 2\)</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">21, 24, 31; 3 of 25 days; 12 percent</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">values above the fence of 8; \(3 \div 25 = 0.12\)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Route A's worst day, 10</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">maximum of Route A</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">means 6.04 and 6.36</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">\(151 \div 25\) and \(159 \div 25\)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">SDs 7.50 and 1.47</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">STDEV.S of each column</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">without the three days: median 3, mean 3.41</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">22 remaining days; \(75 \div 22 \approx 3.41\)</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">The honest version is about 180 words. It is longer than the dishonest one, and every sentence earns its place.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10108; STEP 7 &mdash; THE HONESTY CHECKLIST FOR A DATA STORY</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Before any data story goes out, hold it up against these seven questions. They are the whole module, in a form you can use on any dataset for the rest of your life.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>1. Did I state n and the units?</strong> (25 days per route; minutes late.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>2. Did I say what my summary hides?</strong> (A median hides the tail; a mean hides the typical day; any one number hides the spread.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>3. Did I avoid claiming a cause?</strong> The data show <em>that</em> Route B had three bad days, not <em>why</em>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>4. Did I keep the axis honest?</strong> A bar chart that starts at 6 instead of 0 makes a 0.36-minute gap look like nine times a 0.04 gap, so start bars at zero (dot plots and box plots may use any axis, but say what it is).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>5. Did I report both views when they differ?</strong> (With and without the outliers; median and mean.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>6. Did I describe the spread as well as the center?</strong> (IQR, SD, and the largest value.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>7. Did I say what the data cannot tell?</strong> (Why the days were late; whether it will happen again; anything about days not recorded.)</div>
+<div style="margin-bottom: 6px;"></div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127942; WHERE ANALYSTS DO THIS</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">People who work with public records, such as sports results, weather readings, and wage figures, face the same choices you just made: which summary to report, whether to show the spread, and what to do with the extreme values. The habits are the same ones in your checklist: state how many observations there are, say what a single number hides, and be careful about claiming a cause. (This is a general description; no real data are used in this lesson.)</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; SIDE-BY-SIDE TABLE IN EXCEL, ARITHMETIC IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel</strong> builds the table (Activity 1): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(range,1)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(range,3)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX(range)</code>. Excel's quartiles can differ slightly from the by-hand ones; on this dataset they agree.<br /><br /><strong>Desmos Scientific</strong> checks the plain arithmetic in a story, one expression at a time: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">3/25</code> &rarr; 0.12 (the 12 percent); <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(6-4)/6</code> &rarr; 0.3333 (&ldquo;a third lower&rdquo;); <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">5+1.5*(5-3)</code> &rarr; 8 (Route B's upper fence); <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">151/25</code> &rarr; 6.04; <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(151-76)/22</code> &rarr; 3.4091. Desmos does not take a list and return a median or standard deviation; Excel does.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; THE EXCEL TABLE, FROM LESSON 24.1, IN ONE PARAGRAPH</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;">In Lesson 24.1 you built a <strong>side-by-side summary table</strong>: a row for each statistic, a column for each group, and a <em>B minus A</em> column that does the subtraction for you. Today's table is the same idea. This time the table is the <em>workbook that your story comes from</em>: each number you write in a sentence should be a cell you can point to.</div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Give an AI tool the summary table below (violin and trumpet practice minutes, constructed) and ask: <em>&ldquo;Write one paragraph, for a school newsletter, that describes how the two groups compare.&rdquo;</em> Then compare its paragraph with the one in the box below, which was drafted by an AI from this table.<br />
+            <strong>Predict.</strong> Predict before you read: where would a writing tool most likely slip: in copying numbers, in noticing the unusual days, or in explaining <em>why</em>? Which of these can you check against the table in under a minute?<br />
+            <strong>Verify.</strong> Fact-check <strong>every</strong> sentence against the table: a number that matches, a number that does not, a claim the table cannot support at all. Underline each number and put a check or a cross beside it. <strong>Three statements in the draft below are wrong or unsupported.</strong> Find all three and say what the table actually shows. A good draft from an AI can be a head start, but you are the one who signs the story.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; THE AI DRAFT TO CHECK (CONSTRUCTED)</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up music teacher kept practice logs, in minutes per day, for 20 days for a violin group and 20 days for a trumpet group. <strong>All numbers are constructed.</strong> Here is the summary table and an AI-written paragraph based on it:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Statistic (minutes practiced)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Violin</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Trumpet</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Days (n)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">30.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">24.50</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">30</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">22.5</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q1 (by hand)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">28</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q3 (by hand)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">32</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">26.5</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">IQR</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.5</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Minimum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">25</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Maximum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">35</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">60</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">SD (sample)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2.70</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">11.66</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Days flagged by the 1.5 &times; IQR rule</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3 (0, 45, 60)</td></tr>
+</tbody></table></div>
+<div style="background: #F4F6FA; border-left: 5px solid #6b7a99; border-radius: 6px; padding: 14px 20px; margin: 0 0 6px 0;"><div style="font-size: 11px; color: #4a5878; margin-bottom: 8px;">AI DRAFT (CONSTRUCTED FOR THIS EXERCISE)</div><div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Over 20 days each (constructed practice logs), violin players practiced a median of 30 minutes per day, while trumpet players practiced a median of 24.5 minutes. The violin days were very steady (IQR 4 minutes, standard deviation 2.70 minutes), while the trumpet days varied much more (standard deviation 11.66 minutes). Neither group had any unusual days. The trumpet players practiced less because their instrument is harder to play. Overall, violin practice was more consistent.</div></div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 40 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Build the Side-by-Side Table for the Bus Routes in Excel</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a new workbook and save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk24_BusStory_YourName.xlsx</code> in your OneDrive <em>Optima &rarr; Math</em> folder. Make two sheets, <em>Data</em> and <em>Summary</em> (the <strong>+</strong> button at the bottom, then double-click a tab to rename it; spell the names exactly).</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">On <em>Data</em>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Route A</code> in <strong>A1</strong> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Route B</code> in <strong>B1</strong>. Type the 25 Route A values in <strong>A2:A26</strong> and the 25 Route B values in <strong>B2:B26</strong>, in the order printed in the dataset. Check: A26 is 5, B26 is 4, and the status bar shows Count: 25 when you click a column letter.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">On <em>Summary</em>, type the headings <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Statistic</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Route A</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Route B</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">B minus A</code> in <strong>A3:D3</strong>. In <strong>A4</strong> to <strong>A15</strong>, type these labels, one per row: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Days (n)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Median</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">SD (sample)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Minimum</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Q1</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Q3</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Maximum</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">IQR</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lower fence</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Upper fence</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Days flagged</code>.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Click <strong>B4</strong> and type these, pressing <strong>Enter</strong> after each (Enter moves down): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(Data!A$2:A$26)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(Data!A$2:A$26)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(Data!A$2:A$26)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(Data!A$2:A$26)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN(Data!A$2:A$26)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(Data!A$2:A$26,1)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(Data!A$2:A$26,3)</code> , <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX(Data!A$2:A$26)</code> (these fill B4 to B11). Then in <strong>B12</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B10-B9</code>; in <strong>B13</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B9-1.5*B12</code>; in <strong>B14</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B10+1.5*B12</code>.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>B15</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(Data!A$2:A$26,&quot;&lt;&quot;&B13)+COUNTIF(Data!A$2:A$26,&quot;&gt;&quot;&B14)</code>. It counts the days below the lower fence plus the days above the upper fence; the quotation marks and the <strong>&amp;</strong> join the symbol and the fence cell into a test such as &ldquo;&gt;8&rdquo;.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">6</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Select <strong>B4:B15</strong>, point at the small square at the lower-right corner, and <strong>drag it one column right</strong> to fill <strong>C4:C15</strong> (the column letters inside the formulas move from A to B, and the cell references move with them). Click <strong>D4</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C4-B4</code>, and drag its fill handle down to <strong>D15</strong>. Select <strong>B5:D14</strong>, and on the <em>Home</em> tab, <em>Number</em> group, choose <strong>Number</strong> (2 decimals).</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check yourself</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Your Summary should read like this (Days flagged is a whole number; if your count is not 25, a value is missing or doubled; if Q1 or Q3 is off, check the 1 and 3 at the end of the QUARTILE.INC formulas):<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Row label</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Route A</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Route B</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">B minus A</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Days (n)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">25</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">25</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.36</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.04</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-0.32</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-2.00</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">SD (sample)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1.47</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">7.50</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.03</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Minimum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-3.00</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-2.00</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">7.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-2.00</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Maximum</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">10.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">31.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">21.00</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">IQR</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.00</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Lower fence</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-2.00</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Upper fence</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">10.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">8.00</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">-2.00</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Days flagged</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td></tr>
+</tbody></table></div>
+
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Mark What Changed</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Read the dishonest and honest stories side by side. On paper, list <strong>every difference</strong> you can find: things the honest story <em>added</em>, <em>removed</em>, or <em>changed</em>. Aim for at least six.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each difference, name the checklist item (1 to 7) it belongs to.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Added: (1) the sample size and units, 25 days and minutes late; (2) the three flagged days, 21, 24, and 31, and the fact that they are 3 of 25 days, 12 percent; (3) Route A's worst day, 10 minutes; (4) the standard deviations, 7.50 and 1.47; (5) the with-and-without view (median 3, mean 3.41) next to the all-days view; (6) a closing sentence on what the data cannot tell. Removed: (7) the claim that Route B's drivers are doing a better job (a cause the data cannot show); (8) &ldquo;every rider should switch&rdquo; (a recommendation the data do not support on their own); (9) the unqualified &ldquo;Route B is the better route&rdquo;, replaced by &ldquo;better on a typical day and far worse on a bad day&rdquo;. Changed: the line about equal IQRs is kept but is no longer alone: it now sits beside the extremes it was hiding. Checklist items: 1 (n and units), 2 and 6 (what the median hides, spread), 3 (cause), 5 (both views), 7 (what the data cannot tell). The dishonest version uses only true numbers, so it passes a number check and fails an honesty check.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Fact-Check the AI Draft</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the practice summary table in the box above. For each sentence of the AI draft, find the number or claim in the table, or find that the table cannot support it.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write the <strong>three</strong> statements that are wrong or unsupported, and for each one write what the table actually shows (or what additional evidence you would need).</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (1) &ldquo;a median of 24.5 minutes&rdquo; for the trumpet group is wrong: 24.5 is the <em>mean</em>; the median is 22.5. (2) &ldquo;Neither group had any unusual days&rdquo; is wrong: the trumpet group has three days flagged by the 1.5 &times; IQR rule (0, 45, and 60; fences 10.25 and 36.25); the violin group has none. (3) &ldquo;practiced less because their instrument is harder to play&rdquo; is unsupported: the table shows <em>that</em> the trumpet group practiced less (median 22.5 versus 30), not <em>why</em>; nothing in the table measures difficulty. The other numbers (median 30, IQR 4, SDs 2.70 and 11.66) are correct, and &ldquo;violin practice was more consistent&rdquo; is supported.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Optional: Check Your Numbers in the Widget</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">5 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open the <em>compare-distributions</em> widget again (below, or from Lesson 24.1). In its paste-your-own-data boxes, paste the 25 Route A values into Group A and the 25 Route B values into Group B (commas or spaces are fine).</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compare its table with yours: n, mean, median, SD, quartiles, IQR, and the number of outliers. If a number differs, find which side has the slip.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        The widget should show n = 25 and 25; means 6.36 and 6.04; medians 6 and 4; sample SDs 1.47 and 7.50; IQR 2 for both; and three outliers for Route B (21, 24, 31) and none for Route A. If you use its Spreadsheet (QUARTILE.INC) toggle the quartiles do not change on this dataset.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Compare Two Distributions</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">Optional (Activity 4). Paste the Route A and Route B values into the two data boxes, then compare the widget's summary table with the one you built in Excel. Use the &ldquo;Say it in words&rdquo; panel to see how it would phrase center, spread, and shape.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/compare-distributions.html" width="100%" height="1750" style="border: none; display: block;" title="Compare Two Distributions" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/compare-distributions.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 24.3 &mdash; Capstone Data Story</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">The module's capstone written assignment: given two constructed lists, you produce the five-number summaries and standard deviations, the display, and a 150 to 250 word honest data story.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 24.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five multiple-choice questions on honest reporting choices and reading a summary table.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Module 8 Wrap-Up</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next: the module wrap-up (the module outro survey) and the module's two VR experiences.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Module 9 &mdash; The Normal Distribution</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Then on to the next module, which builds a model for bell-shaped data.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 24.3 &middot; Case Study: Telling a Dataset's Story Honestly</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

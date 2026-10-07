@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 19.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 7</div>
+        <div style="font-size: 12px; color: #666;">Data &amp; Data Displays</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 19.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">Honesty</div>
+        <div style="font-size: 12px; color: #666;">Representing data truthfully</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 19.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Displaying Categorical Data</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A picture is only as honest as its labels &mdash; and a good picture starts with a good table.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Bar charts, circle graphs, and the honest-display checklist</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, run the Display Builder, practice the Desmos angle entries, and complete the three activities at the bottom. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> construct a bar chart from a frequency table with a title, labeled axes, and a zero baseline.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> construct a circle graph by computing each angle as relative frequency \(\times 360^\circ\) and checking the total.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> choose between a bar chart and a circle graph for a given dataset and defend the choice.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> critique a categorical display against a checklist for honest labeling.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook, pencil, graph paper, and (for the circle graph) a protractor or a printed circle.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Display Builder embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128202; THE TABLE BECOMES A PICTURE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A table is exact, but a picture lets the eye compare in a glance. For <strong>categorical</strong> data two displays do most of the work: the <strong>bar chart</strong> and the <strong>circle graph</strong> (also called a pie chart). Both start from the frequency table you built yesterday. Here is a small constructed table to carry through today &mdash; the favorite sport of 40 surveyed students:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Sport</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Frequency</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Relative frequency</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Percent</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Soccer</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">14</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.35</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">35%</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Basketball</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">11</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.275</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">27.5%</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Swimming</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">8</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.20</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20%</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Tennis</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.125</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">12.5%</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Volleyball</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">0.05</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5%</td></tr>
+<tr style="background: #FDF3E3;"><td style="padding: 7px 14px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8;"><strong>Total</strong></td><td style="padding: 7px 14px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8;"><strong>40</strong></td><td style="padding: 7px 14px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8;"><strong>1</strong></td><td style="padding: 7px 14px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8;"><strong>100%</strong></td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Check the totals first: \(14 + 11 + 8 + 5 + 2 = 40\), and the percents add to \(35 + 27.5 + 20 + 12.5 + 5 = 100\).</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; THE BAR CHART</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>bar chart</strong> draws one bar per category, with the bar's length showing the frequency (or the relative frequency). The rules are few, and each one protects the reader:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Equal widths, equal gaps.</strong> Only the length carries information.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Start at zero.</strong> A bar's length is supposed to be proportional to its value; if the axis starts above zero, a bar twice as long no longer means twice as much. (Week 21 returns to this.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Label everything.</strong> A title saying what was measured and on whom, both axes with units, and every category named.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Order the bars on purpose.</strong> If the categories have a natural order (grade levels, months), keep it. If not, ordering from tallest to shortest makes comparisons easy.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="margin: 0 0 6px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Favorite Sport of 40 Surveyed Students</strong> (constructed data)</div>
+<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;"><div style="width: 100px; font-size: 15px; color: #1a2340; text-align: right;">Soccer</div><div style="flex: 1; background: #F4F6FA; border-left: 2px solid #0E1C42;"><div style="width: 100.0%; background: #2196D0; color: #fff; font-size: 14px; padding: 3px 8px; box-sizing: border-box;">14</div></div></div>
+<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;"><div style="width: 100px; font-size: 15px; color: #1a2340; text-align: right;">Basketball</div><div style="flex: 1; background: #F4F6FA; border-left: 2px solid #0E1C42;"><div style="width: 78.6%; background: #2196D0; color: #fff; font-size: 14px; padding: 3px 8px; box-sizing: border-box;">11</div></div></div>
+<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;"><div style="width: 100px; font-size: 15px; color: #1a2340; text-align: right;">Swimming</div><div style="flex: 1; background: #F4F6FA; border-left: 2px solid #0E1C42;"><div style="width: 57.1%; background: #2196D0; color: #fff; font-size: 14px; padding: 3px 8px; box-sizing: border-box;">8</div></div></div>
+<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;"><div style="width: 100px; font-size: 15px; color: #1a2340; text-align: right;">Tennis</div><div style="flex: 1; background: #F4F6FA; border-left: 2px solid #0E1C42;"><div style="width: 35.7%; background: #2196D0; color: #fff; font-size: 14px; padding: 3px 8px; box-sizing: border-box;">5</div></div></div>
+<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;"><div style="width: 100px; font-size: 15px; color: #1a2340; text-align: right;">Volleyball</div><div style="flex: 1; background: #F4F6FA; border-left: 2px solid #0E1C42;"><div style="width: 14.3%; background: #2196D0; color: #fff; font-size: 14px; padding: 3px 8px; box-sizing: border-box;">2</div></div></div>
+<div style="font-size: 13px; color: #666; text-align: center;">Horizontal axis: number of students (starts at 0). Vertical axis: sport.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Reading it takes seconds: soccer leads, basketball is a close second, and volleyball is last. A bar chart is the best tool when you want to <em>compare</em> categories, including when there are many of them.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127856; THE CIRCLE GRAPH</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>circle graph</strong> divides a circle into slices, one per category, with each slice's angle proportional to its share of the whole. Since a full circle is \(360^\circ\), <strong>angle = relative frequency \(\times 360^\circ\)</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example.</strong> Soccer: \(0.35 \times 360 = 126^\circ\). Basketball: \(0.275 \times 360 = 99^\circ\). Swimming: \(0.20 \times 360 = 72^\circ\). Tennis: \(0.125 \times 360 = 45^\circ\). Volleyball: \(0.05 \times 360 = 18^\circ\). <em>Check:</em> \(126 + 99 + 72 + 45 + 18 = 360\). Every circle graph you draw has this check built in.</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 24px; margin: 6px 0 14px 0;"><div style="width: 170px; height: 170px; border-radius: 50%; background: conic-gradient(#0E1C42 0.0% 35.0%, #2196D0 35.0% 62.5%, #55C8E8 62.5% 82.5%, #C7922C 82.5% 95.0%, #8A9BC4 95.0% 100.0%);" role="img" aria-label="Circle graph of favorite sport"></div><div><div style="font-size: 16px; color: #0e1c42; margin-bottom: 8px;"><strong>Favorite Sport, 40 students</strong> (constructed)</div><div style="font-size: 15px; color: #1a2340; margin-bottom: 4px;"><span style="display: inline-block; width: 14px; height: 14px; background: #0E1C42; border-radius: 3px; margin-right: 8px; vertical-align: middle;"></span>Soccer &mdash; 35%</div><div style="font-size: 15px; color: #1a2340; margin-bottom: 4px;"><span style="display: inline-block; width: 14px; height: 14px; background: #2196D0; border-radius: 3px; margin-right: 8px; vertical-align: middle;"></span>Basketball &mdash; 27.5%</div><div style="font-size: 15px; color: #1a2340; margin-bottom: 4px;"><span style="display: inline-block; width: 14px; height: 14px; background: #55C8E8; border-radius: 3px; margin-right: 8px; vertical-align: middle;"></span>Swimming &mdash; 20%</div><div style="font-size: 15px; color: #1a2340; margin-bottom: 4px;"><span style="display: inline-block; width: 14px; height: 14px; background: #C7922C; border-radius: 3px; margin-right: 8px; vertical-align: middle;"></span>Tennis &mdash; 12.5%</div><div style="font-size: 15px; color: #1a2340; margin-bottom: 4px;"><span style="display: inline-block; width: 14px; height: 14px; background: #8A9BC4; border-radius: 3px; margin-right: 8px; vertical-align: middle;"></span>Volleyball &mdash; 5%</div></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">The circle graph shines at one job: showing how a <strong>whole</strong> divides into a <strong>few</strong> parts &mdash; and it only makes sense when the categories do not overlap and together make up the whole. With more than about six slices, or slices close in size, the eye cannot judge angles well, and a bar chart wins. Never use a circle graph when the percents do not total 100% because people could choose more than one answer.</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#9989; THE HONEST-DISPLAY CHECKLIST (KEEP THIS)</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">Before you show anyone a categorical display: <strong>(1)</strong> Does the title say <em>what</em> was measured and <em>on whom</em>? <strong>(2)</strong> Are the axes labeled with units, and the categories named? <strong>(3)</strong> Do the bars start at zero? <strong>(4)</strong> Is the sample size \(n\) stated? <strong>(5)</strong> If it is made-up or a classroom survey, does it say so? A display that fails these checks may still be pretty &mdash; it is no longer honest.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Display Builder</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">Start with a categorical dataset. <strong>(1)</strong> Switch between the bar chart, the circle graph, and the frequency and relative frequency tables &mdash; which view makes the biggest category easiest to spot? Which makes small differences easiest to compare? <strong>(2)</strong> Edit the title and axis labels and watch the &ldquo;Is it labeled?&rdquo; checklist change. <strong>(3)</strong> Enter your own small dataset (for example, the lunch survey from yesterday) and look at how the widget handles percents that need rounding.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/display-builder.html" width="100%" height="900" style="border: none; display: block;" title="The Display Builder" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/display-builder.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; ANGLES IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            The circle-graph rule is one line. In <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">Desmos</a>, for soccer type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.35*360</code> &rarr; 126. Or start from the frequency itself: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">14/40*360</code> &rarr; 126. For basketball, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">11/40*360</code> &rarr; 99. Add all five angles as a check: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">126+99+72+45+18</code> &rarr; 360. If your total misses 360, find the slip before drawing.<br /><br /><strong>In Excel</strong> you can already build the table's percent column (Lesson 19.2). Next week we will use it to let Excel draw the chart itself; for now, notice how much easier it is to catch a bad total in a column of numbers than in a finished picture.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Describe three datasets to an AI tool and ask which display fits each, and why: <em>(a) how a family's monthly budget divides among five spending categories; (b) the number of students in each of 12 school clubs; (c) how favorite pizza topping differs among 9th, 10th, 11th, and 12th graders.</em><br />
+            <strong>Predict.</strong> Decide yourself. (a) A circle graph or a bar chart &mdash; it is parts of a whole with few categories. (b) A bar chart; twelve slices would be unreadable. (c) Side-by-side (grouped) bars for comparing groups, or a two-way table.<br />
+            <strong>Verify.</strong> Challenge one recommendation: ask the AI to defend a circle graph for the 12 clubs, then judge whether its defense holds up. Notice whether its answer depends on the number of categories or whether it merely sounds confident either way.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Draw the Bar Chart</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">On graph paper (or with the Display Builder), draw a bar chart for the sports table above. Include a title, both axis labels, and an axis that starts at 0.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Run the five-point honest-display checklist on your own chart and fix anything that fails.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Bars should have heights 14, 11, 8, 5, 2 on a scale starting at 0, labeled with sport names, a title such as &ldquo;Favorite Sport of 40 Surveyed Students,&rdquo; and &ldquo;Number of students&rdquo; on the frequency axis. Stating n = 40 completes the checklist.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Angles and the Circle</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute every angle in Desmos using the pattern \(\text{relative frequency} \times 360\). Check that they total \(360^\circ\).</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Using a protractor (or a printed circle), draw the circle graph and label each slice with its percent.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        126&deg;, 99&deg;, 72&deg;, 45&deg;, 18&deg; &mdash; total 360&deg;. Percents on the slices: 35%, 27.5%, 20%, 12.5%, 5%.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Choose and Critique</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each situation, name the better display and say why in one sentence: (a) how a pizza's 8 equal slices were eaten by 3 people; (b) the number of absences on each of the 5 school days; (c) the percent of class time spent on 15 different activities.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate shows a bar chart titled just &ldquo;Results&rdquo; with no axis labels, no sample size, and bars that start at 40. List every problem and say how you would repair each.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) A circle graph: a whole divided among a few parts. (b) A bar chart (days compared; order is natural: Monday to Friday). (c) A bar chart: 15 categories is too many for a circle. Critique: the title says nothing about what or who; axes are unlabeled; n is missing; and a baseline of 40 exaggerates differences. Repairs: informative title, labeled axes with units, stated n, zero baseline.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 19.3 &mdash; Draw It Honestly</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: build both displays from a frequency table, compute the angles, choose between displays, and critique a poorly labeled chart. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 19.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on bar charts, circle graphs, angles, and honest labeling.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Week 20 &mdash; Numerical Data</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next week we meet displays for numerical data: line plots, stem-and-leaf plots, histograms, and box plots.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 19.3 &middot; Displaying Categorical Data</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

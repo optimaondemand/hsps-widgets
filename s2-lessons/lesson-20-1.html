@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 20.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 7</div>
+        <div style="font-size: 12px; color: #666;">Data &amp; Data Displays</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 20.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">Honesty</div>
+        <div style="font-size: 12px; color: #666;">Representing data truthfully</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 20.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Displaying Numerical Data</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Two displays that keep every value in plain sight &mdash; the most transparent pictures in statistics.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Line plots, stem-and-leaf plots, and a first look at COUNTIF</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, run the Display Builder, follow the Excel steps, and complete the three activities at the bottom. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> build a line plot from a frequency table, showing every value on the number line.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> construct and read a stem-and-leaf plot, with a key, ordered leaves, and empty stems shown.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe a display in two parts: where the data are centered, and what is unusual (gaps, outliers, skew).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use COUNTIF in Excel to build a frequency table and check its total.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook, pencil, and (helpful) graph paper.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Display Builder embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WHEN THE DATA ARE NUMBERS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Last week you displayed <strong>categorical</strong> data: counts in groups. This week we turn to <strong>numerical</strong> data, where the values themselves are measurements or counts and the <em>spread</em> of those values is the story. Where are most of the values? Are there gaps? Is there one value far from the rest? A good display answers those questions at a glance &mdash; and, because this module's virtue is honesty, it does so without hiding anything.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Today's two displays are the simplest in the family, and both have a pleasant property: <strong>they keep every individual value visible.</strong> A <strong>line plot</strong> stacks a mark above a number line; a <strong>stem-and-leaf plot</strong> uses the digits of the numbers themselves as the bars. Both are best for small datasets.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10006; THE LINE PLOT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>line plot</strong> (also called a dot plot) draws a number line and puts one mark &mdash; an &times; or a dot &mdash; above the line for every observation. Equal values stack up. It suits <strong>discrete</strong> numerical data with a modest number of distinct values. Here are the quiz scores (out of 10) of 20 students &mdash; <em>made-up data for teaching</em>:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Step 1: a frequency table.</strong> Tally each score and check that the frequencies total \(n = 20\).</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Score</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">5</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">6</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">7</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">8</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">9</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">10</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Total</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Frequency</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Step 2: the plot.</strong> The number line must run over <em>every</em> value from the smallest to the largest &mdash; including any value that nobody scored. Skipping an empty value would hide a gap, and gaps are information.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Quiz Scores of 20 Students (constructed data)</strong></div>
+<div style="display: flex; justify-content: center; align-items: flex-end; border-bottom: 2px solid #0E1C42; padding: 0 10px;"><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div><div style="width: 44px; text-align: center; display: flex; flex-direction: column-reverse; align-items: center; min-height: 109px;"><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div><div style="color: #2196D0; font-size: 18px; line-height: 1.15;">&times;</div></div></div>
+<div style="display: flex; justify-content: center;"><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">4</div><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">5</div><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">6</div><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">7</div><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">8</div><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">9</div><div style="width: 44px; text-align: center; font-size: 15px; color: #1a2340; padding-top: 3px;">10</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Each &times; is one student. Horizontal axis: score out of 10.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading it.</strong> The scores pile up around 8; the single &times; marks at 4 and 5 form a tail running to the left. We call a shape like this <strong>skewed left</strong>: the longer tail points toward the smaller values. The most common score (the <strong>mode</strong>) is 8, and the median is also 8, because the 10th and 11th of the ordered scores are both 8.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127807; THE STEM-AND-LEAF PLOT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The line plot works when the same value repeats. With measurements that rarely repeat &mdash; minutes, heights, prices &mdash; a better idea is to split each number into a <strong>stem</strong> (all digits but the last) and a <strong>leaf</strong> (the last digit). The stems go down a column; each value's leaf is written beside its stem. Turn your head sideways and the rows become bars &mdash; but unlike bars, you can read every original value back.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example.</strong> Twenty-two students record their walking time to school, in minutes (<em>constructed</em>): 6, 8, 9, 12, 13, 15, 15, 17, 18, 19, 21, 22, 24, 24, 27, 28, 31, 33, 35, 38, 41, 52. <em>Teacher's voice:</em> these run from 6 to 52, so the stems are the tens digits 0 through 5, and the leaves are the ones digits. I put every value in once, then I order the leaves in each row, then I write the key.</div>
+<div style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 6px; padding: 12px 18px; margin: 0 auto 14px auto; max-width: 420px; font-family: Consolas, Monaco, monospace; font-size: 16px; color: #0E1C42; line-height: 1.6; white-space: nowrap; overflow-x: auto;">0&nbsp;|&nbsp;6&nbsp;8&nbsp;9<br&nbsp;/>1&nbsp;|&nbsp;2&nbsp;3&nbsp;5&nbsp;5&nbsp;7&nbsp;8&nbsp;9<br&nbsp;/>2&nbsp;|&nbsp;1&nbsp;2&nbsp;4&nbsp;4&nbsp;7&nbsp;8<br&nbsp;/>3&nbsp;|&nbsp;1&nbsp;3&nbsp;5&nbsp;8<br&nbsp;/>4&nbsp;|&nbsp;1<br&nbsp;/>5&nbsp;|&nbsp;2</div><div style="font-size: 14px; color: #666; text-align: center; margin-top: 6px;">Key: 2 | 4 means 24 minutes. n = 22.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Three habits make a stem-and-leaf plot honest: <strong>(1) a key</strong>, so the reader knows what &ldquo;2 | 4&rdquo; means; <strong>(2) ordered leaves</strong> in each row, so you can read off the median; <strong>(3) every stem shown</strong>, even a stem with no leaves, so that gaps stay visible. Repeated values get repeated leaves &mdash; the two 15s appear as <em>5 5</em>, the two 24s as <em>4 4</em>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading it.</strong> Most students walk 10 to 40 minutes. The single leaf 2 on stem 5 (52 minutes) stands well apart from the rest &mdash; a possible <strong>outlier</strong>, a value unusually far from the others. The median is the middle of 22 ordered values: the average of the 11th and 12th, which are 21 and 22, so the median is 21.5 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127793; DECIMALS, AND THE TWO-SENTENCE RULE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Leaves may be the tenths digit. Fifteen seedlings are measured in inches (<em>constructed</em>): 3.2, 3.8, 4.1, 4.4, 4.7, 5.0, 5.1, 5.3, 5.6, 5.9, 6.2, 6.4, 6.8, 7.1, 9.4. The stem is the whole-inch part, the leaf the tenths digit:</div>
+<div style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 6px; padding: 12px 18px; margin: 0 auto 14px auto; max-width: 420px; font-family: Consolas, Monaco, monospace; font-size: 16px; color: #0E1C42; line-height: 1.6; white-space: nowrap; overflow-x: auto;">3&nbsp;|&nbsp;2&nbsp;8<br&nbsp;/>4&nbsp;|&nbsp;1&nbsp;4&nbsp;7<br&nbsp;/>5&nbsp;|&nbsp;0&nbsp;1&nbsp;3&nbsp;6&nbsp;9<br&nbsp;/>6&nbsp;|&nbsp;2&nbsp;4&nbsp;8<br&nbsp;/>7&nbsp;|&nbsp;1<br&nbsp;/>8&nbsp;|&nbsp;<br&nbsp;/>9&nbsp;|&nbsp;4</div><div style="font-size: 14px; color: #666; text-align: center; margin-top: 6px;">Key: 5 | 3 means 5.3 inches. n = 15. Note the empty stem 8.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">The empty stem 8 is deliberate: it shows that nothing lay between 7.1 and 9.4, which makes the 9.4 seedling jump out. <strong>Whenever you describe a display, say two things:</strong> where the data are centered or concentrated, and anything unusual &mdash; gaps, outliers, a long tail. Here: &ldquo;Most seedlings are between 3 and 7 inches, centered near 5.3 inches; one seedling at 9.4 inches stands well apart from the rest.&rdquo;</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; STRENGTHS AND LIMITS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Both keep every value.</strong> You can recover the original data from the plot &mdash; something a bar chart or histogram cannot offer.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Both are for small datasets</strong> &mdash; roughly under 50 values. With 400 values a stem-and-leaf plot becomes a wall of digits and a line plot runs off the page.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A line plot needs repeating values</strong> (discrete data, or measurements rounded to whole numbers). For measurements like 5.3 and 6.8 that almost never repeat, use a stem-and-leaf plot, or in the next lesson, a histogram.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Tomorrow's histogram trades away the individual values to handle bigger data. Keep today's two in your toolbox for the small cases &mdash; they are the most transparent displays there are.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Display Builder (numerical data)</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">Switch to a numerical dataset. <strong>(1)</strong> Compare the line plot, the stem-and-leaf plot, and the frequency table of the <em>same</em> data &mdash; which keeps every value visible? Which shows the shape fastest? <strong>(2)</strong> Edit the title, axis label, and unit and watch the &ldquo;Is it labeled?&rdquo; checklist change. <strong>(3)</strong> Enter your own small dataset (for example, the days absent from Activity 1 below) and see how the stems and the number line are chosen.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/display-builder.html" width="100%" height="900" style="border: none; display: block;" title="The Display Builder (numerical data)" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/display-builder.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: COUNTIF BUILDS THE FREQUENCY TABLE</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            You made frequency tables by hand with a tally. Excel counts for you with <strong>COUNTIF</strong>, which counts the cells in a range that match a condition. Here is the whole recipe for the quiz scores.<br /><br /><strong>1.</strong> Open a <em>Blank workbook</em>. In cell <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Score</code>. In <strong>A2:A21</strong> type the 20 scores, one per cell: <em>7, 6, 7, 7, 9, 9, 6, 8, 4, 5, 8, 8, 10, 8, 9, 8, 6, 9, 10, 7</em>.<br /><strong>2.</strong> In <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code> and in <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Frequency</code>. In <strong>D2:D8</strong> type the values 4, 5, 6, 7, 8, 9, 10, one per cell &mdash; every value in the range, including any that do not occur.<br /><strong>3.</strong> Click cell <strong>E2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF($A$2:$A$21,D2)</code>, then press <strong>Enter</strong>. It should show <strong>1</strong>. The dollar signs lock the data range; <strong>D2</strong> is free to change as you copy down.<br /><strong>4.</strong> Click <strong>E2</strong> again, point at the small square at its lower-right corner until the pointer becomes a thin <strong>+</strong>, and drag down to <strong>E8</strong>. Each cell now counts the matching score in column D.<br /><strong>5.</strong> In <strong>E9</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(E2:E8)</code> &mdash; the total check. It must say <strong>20</strong>. As a second check, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A21)</code> counts how many numbers you typed. If the two disagree, a score is missing from column D or mistyped in column A.<br /><br />Your frequencies should read 1, 1, 3, 4, 5, 4, 2. From these you can draw the line plot by hand, one &times; per count. <strong>In Desmos</strong>, relative frequencies stay one-line entries: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">5/20</code> &rarr; 0.25 for the share of students who scored 8.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Give an AI tool this stem-and-leaf plot as text and ask it to list every data value, then the minimum, maximum, and median: <em>Key: 2 | 4 means 24. Stem 1: 2 3 5 5 7. Stem 2: 1 4 4 8. Stem 3: 0 6.</em><br />
+            <strong>Predict.</strong> Read it yourself first. Values: 12, 13, 15, 15, 17, 21, 24, 24, 28, 30, 36 &mdash; eleven values. Minimum 12, maximum 36, median (the 6th value) 21.<br />
+            <strong>Verify.</strong> Compare the AI's list with yours, value by value. Did it count the repeated leaves (the two 15s, the two 24s)? Did it say 11 values? A language tool can misread a plot written as text, especially repeated leaves; do not take its median on trust &mdash; count to the middle yourself.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Line Up the Absences</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Eighteen students report how many school days they missed in the semester (<em>constructed</em>): 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 6. Build a frequency table with a total check, then draw the line plot. Remember to include every value from the smallest to the largest on the number line.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Describe the display in two sentences: where is the data centered, and what is unusual?</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check your plot</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Frequencies: 0 days: 5, 1: 6, 2: 3, 3: 2, 4: 1, 5: 0, 6: 1 &mdash; total 18. The center is around 1 day. Unusual: nobody missed exactly 5 days, and the single student with 6 days is separated from the rest by a gap. The shape is skewed right: a longer tail toward larger values.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Grow the Seedling Plot</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Make a stem-and-leaf plot for these twelve heights in centimeters (<em>constructed</em>): 14.2, 15.8, 16.1, 16.4, 17.0, 17.3, 17.9, 18.2, 18.5, 19.4, 20.1, 23.6. Use stems of whole centimeters and write a key.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find the median from the plot, and say what is unusual.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Stems 14 through 23 &mdash; including the empty stems 21 and 22. Row 17 reads <em>0 3 9</em>. Key: 17 | 3 means 17.3 cm. The median of 12 values is the average of the 6th and 7th, 17.3 and 17.9, which is <strong>17.6 cm</strong>. The 23.6 stands apart after a gap (empty stems 21 and 22).
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Find the Flaws</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate shows this stem-and-leaf plot of bike-trip lengths in kilometers: <em>1 | 5 2 8; 2 | 4 1; 4 | 0 3.</em> There is no key. List every problem and write a repaired version, assuming the trip lengths were 12, 15, 18, 21, 24, 40, and 43.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one or two sentences, explain to a partner why a stem-and-leaf plot is a poor choice for 400 trip lengths.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Problems: no key; leaves not in order (5 2 8 should be 2 5 8; 4 1 should be 1 4); stem 3 is skipped, which hides the gap between 24 and 40. Repaired: <em>1 | 2 5 8; 2 | 1 4; 3 | (empty); 4 | 0 3</em>, with the key <em>1 | 2 means 12 km</em>. For 400 values the plot would run to many hundreds of digits &mdash; it stops summarizing and just reprints the data.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 20.1 &mdash; Line Up the Data</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: draw line plots and stem-and-leaf plots, read one, and build a COUNTIF frequency table in Excel. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 20.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on line plots, stem-and-leaf plots, and COUNTIF.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 20.2 &mdash; Histograms and Box Plots</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">What to do when there are too many values to show one by one.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 20.1 &middot; Displaying Numerical Data</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

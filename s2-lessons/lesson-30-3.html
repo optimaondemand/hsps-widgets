@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 30.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 30.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Fair, representative sampling</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 30.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Sampling Methods: Seven Ways to Choose a Sample</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">The way you choose the people decides who gets heard. Learn the seven common ways, and learn to tell the look-alikes apart.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Learn the procedure for each sampling method, classify a described plan, say which methods let you generalize, and pick a sensible method for a goal.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read the worked examples, run the sampling simulator, draw two samples in Excel, and write your own one-sentence description of each method. Plan on about 90 minutes. Every town, school, orchard, and factory on this page is constructed (made up).</div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe each of the seven sampling methods (<strong>simple random, stratified, cluster, systematic, judgment, quota, convenience</strong>) in one sentence of my own and give the procedure for drawing the sample.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>classify</strong> a described sampling plan, including the look-alikes: stratified versus cluster, quota versus stratified, systematic with a hidden pattern, and voluntary response as a kind of convenience sample.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> say which methods are <strong>probability (random)</strong> methods and which are <strong>non-probability</strong> methods, and what that means for generalizing from the sample to the population.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>choose</strong> a sensible method for a described goal, justify the choice, and point to where bias could enter.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). You will save a practice workbook as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk30_Sampling_YourName.xlsx</code>. You do not upload it for this lesson.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From earlier this week: the difference between a population and a sample, and why random choice matters (including the 1936 magazine poll).</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: A SAMPLE SPEAKS FOR PEOPLE WHO WERE NEVER ASKED</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When you survey 100 people and report what &ldquo;the town&rdquo; thinks, you are speaking for thousands of people who never answered. That is a serious thing to do, and it carries a duty: to choose your sample so that the people you did not ask have a fair chance of being represented, or else to say plainly that they were not.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Each sampling method is a different answer to the question &ldquo;<strong>who gets picked, and who decides?</strong>&rdquo; Sometimes <em>chance</em> decides. Sometimes <em>a person</em> decides, and people are not neutral: we pick those who are near, familiar, friendly, or agree with us, often without noticing. Learning the seven methods is learning to see who decided, so that you can claim only what your method allows.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128202; TWO FAMILIES: CHANCE DECIDES OR A PERSON DECIDES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Start with one split that organizes everything else. A <strong>probability sample</strong> (also called a <strong>random sample</strong>) is one where <strong>chance does the choosing</strong> and every member of the population has a known, nonzero chance of being picked. A <strong>non-probability sample</strong> is one where a person&rsquo;s choice, or the sample members&rsquo; own choice, decides who is in.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Four of the seven methods are probability methods: <strong>simple random, stratified, cluster,</strong> and <strong>systematic</strong> (with a random start). Three are non-probability methods: <strong>judgment, quota,</strong> and <strong>convenience</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Why the split matters.</strong> Because chance did the choosing, a probability sample lets us use the mathematics of chance. We can say how far an estimate will typically stray from the truth, and later in this module you will learn to put a number on it. A non-probability sample has no such tool. Worse, the errors tend to push in one direction, and <strong>taking a bigger sample does not fix that</strong>: a large convenience sample is just a large sample of the easy-to-reach. (You will see this with your own eyes in the simulator below.) One caution in the other direction: random choice protects you from the <em>chooser&rsquo;s</em> bias, but it does not rescue a survey whose chosen people refuse to answer, and a single random sample can still be unlucky by chance.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; THE SEVEN METHODS AT A GLANCE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Read across each row: <em>how the sample is chosen</em>, <em>what it is good for</em>, and <em>where bias can creep in</em>. Then write each method in a sentence of your own (Activity 1 asks you to).</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Method</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Random?</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">How the sample is chosen</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Strength</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Weakness (where bias can enter)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Simple random</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Number everyone on a complete list and let a random number generator pick n of them. Every group of n is equally likely.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Fair to everyone; easy to explain; the standard to measure other methods against.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Needs a complete list. One sample can still miss a small group by luck, especially when n is small.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Stratified</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Split the population into <em>strata</em> (groups that are alike inside, such as grade levels), then take a random sample <em>from every group</em>, usually in proportion to its size.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Every group is guaranteed a voice; estimates are usually steadier than simple random when the groups really differ.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">You must know each member&rsquo;s group in advance. More setup work.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Cluster</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Split the population into many small <em>clusters</em> that each look like a mini-population (classes, orchard rows, city blocks). Pick some clusters at random, then survey <em>everyone in the chosen clusters</em>.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Cheap and practical when you have no list of individuals but clusters are easy to list and visit.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Only a few clusters are chosen, so if they happen to be alike, the sample misses the rest. Usually more variable than simple random.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Systematic</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes (random start)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Put the population in a list, compute k = N &divide; n, pick a random start from 1 to k, then take every kth member.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Fast, evenly spread across the list, no need to draw n random numbers.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">If the list repeats a pattern that lines up with k, every pick can fall on the same kind of member (periodicity).</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Judgment</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A person picks the members they believe are typical or most useful.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Quick; can use real expertise; sometimes a sensible first look.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Personal choice drifts toward the familiar and easy to reach; different pickers give different samples; no way to measure chance error.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Quota</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An interviewer must fill set counts from each group (for example 50 men and 50 women) but fills each count with <em>whoever is handy</em>.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Looks balanced; group totals match the population; cheap.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Inside each quota, who is picked is not random. It looks like stratified but lacks the random draw, so the easy-to-reach are over-represented.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Convenience</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Whoever is easiest to reach: the first people you meet, a nearby class, or (a variant) people who <em>volunteer</em> by answering an open poll.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Cheapest and quickest.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">The easy-to-reach may differ from everyone else. <strong>Voluntary response</strong> adds a second problem: people with strong feelings are the most likely to respond.</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><em>A note on judgment versus convenience.</em> Both are non-random, and the line between them can blur. The difference is intent: in a judgment sample a person deliberately <em>aims</em> at members they think are representative; in a convenience sample nobody aims at all, they simply take what is nearest.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; LOOK-ALIKES: FOUR PAIRS THAT GET MIXED UP</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Most classification mistakes come from four pairs. Keep the one-line test for each.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Stratified versus cluster.</strong> Stratified takes <em>a few from every group</em>. Cluster takes <em>every member of a few groups</em>. Test: &ldquo;After sampling, did every group have someone in the sample?&rdquo; If yes, stratified. If whole groups were left out entirely, cluster. (Also: strata are chosen to be <em>different from each other</em> and alike inside; clusters are meant to be <em>mini-versions of the whole</em>.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Quota versus stratified.</strong> Both fill a set number from each group. Test: &ldquo;<em>How</em> were the people inside each group picked?&rdquo; By a random draw from a list, stratified. By whoever was convenient or chosen by the interviewer, quota.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Systematic versus simple random.</strong> Both start from a list. Simple random draws n random numbers. Systematic draws <em>one</em> random start and then follows a fixed step. If the list has a hidden rhythm, the fixed step can march in time with it (see Worked Example 2).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; padding-left: 16px;">&#9654; <strong>Voluntary response versus a random sample.</strong> An open poll in which anyone may respond is a convenience sample in which the <em>respondents choose themselves</em>. A large number of responses does not make it random.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127859; WORKED EXAMPLE 1 &mdash; THE PLAN CLASSIFIER (SIX PLANS)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed scenarios, not real.</em> Use these three questions in order on any described plan.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Question 1: Who or what decides who is in?</strong> A random device or random numbers (probability family), or a person or the volunteers themselves (non-probability family)?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Question 2 (random plans): how are the groups used?</strong> No groups, just a list: simple random. A random draw <em>from every</em> group: stratified. <em>Whole</em> randomly chosen groups: cluster. A random start and a fixed step: systematic.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Question 3 (non-random plans): what steered the choice?</strong> A picker&rsquo;s belief about who is typical: judgment. Set counts per group filled by whoever is handy: quota. Whoever is nearest or whoever volunteers: convenience.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 10px;">Now classify six plans, and for each, name where bias could enter.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Plan 1.</strong> Harbor Middle (made up) has 600 students. The office numbers them 1 to 600 and a spreadsheet draws 40 numbers at random. <em>Q1:</em> a random device. <em>Q2:</em> one list, no groups. <strong>Simple random.</strong> <em>Bias:</em> the selection itself is fair. The remaining risks are students who do not answer, and plain bad luck from a small sample.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Plan 2.</strong> A made-up orchard has 40 rows of 25 trees. The inspector draws 4 row numbers at random and counts the apples on <em>every</em> tree in those 4 rows. <em>Q1:</em> random. <em>Q2:</em> whole groups. <strong>Cluster</strong> (the rows are the clusters). <em>Bias:</em> only 4 rows were visited; if those happen to be on the sunny slope, the rest of the orchard is missed. A stratified plan would take a few trees from <em>every</em> row instead.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Plan 3.</strong> A made-up town has four neighborhoods with a resident list for each. The survey team draws residents at random from each list, a number proportional to the neighborhood&rsquo;s population. <em>Q1:</em> random. <em>Q2:</em> a random draw from every group. <strong>Stratified.</strong> <em>Bias:</em> small, but the plan assumes the lists are complete and that the neighborhood is a useful way to split the town.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Plan 4.</strong> At a made-up mall, an interviewer must collect 30 teens and 30 adults and fills each count with whoever walks past and agrees to talk. <em>Q1:</em> a person (and the shoppers who agree). <em>Q3:</em> set counts per group, filled by who is handy. <strong>Quota.</strong> <em>Bias:</em> the counts look balanced, but the people at that mall at that hour are not the town. It resembles stratified, but nobody drew a random sample from each group.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Plan 5.</strong> The principal of a made-up school chooses 12 students she believes are &ldquo;typical of the school&rdquo; to answer a survey. <em>Q1:</em> a person. <em>Q3:</em> picked because the picker thinks they are typical. <strong>Judgment.</strong> <em>Bias:</em> she is most likely to think of students she knows, such as the helpful, the talkative, or the ones she sees in the hall. A different principal would choose a different 12.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; padding-left: 16px;">&#9654; <strong>Plan 6.</strong> A made-up town page posts a link: &ldquo;Tell us what you think of the new bus route!&rdquo; and 300 people respond. <em>Q1:</em> the respondents themselves. <em>Q3:</em> whoever chose to answer. <strong>Convenience, the voluntary-response variant.</strong> <em>Bias:</em> people who feel strongly (very happy or very annoyed) are the most likely to respond, and anyone who never sees the page cannot respond at all. Three hundred answers does not make it random.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127981; WORKED EXAMPLE 2 &mdash; SYSTEMATIC SAMPLING AND ITS PERIODICITY DANGER</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up factory stamps 500 parts, numbered 1 to 500 in the order they come off a press. The press rotates through 10 dies, so part number 1, 11, 21, &hellip; comes from die 1, part 2, 12, 22, &hellip; from die 2, and so on. Suppose die 7 is worn and every part it makes (parts 7, 17, 27, &hellip;, 497) is defective. That is 50 defective parts out of 500, so the <strong>true defect rate is 50 / 500 = 10%</strong>. The inspector does not know this and wants to estimate it from a sample of 50 parts.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 10px;"><strong>Plan A (k = 10).</strong> k = 500 &divide; 50 = 10. Pick a random start from 1 to 10 and take every 10th part. Every pick has the same remainder when divided by 10, so <em>every pick comes from the same die</em>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; If the random start is 3: parts 3, 13, 23, &hellip;, 493. That is 50 parts, all from die 3, with <strong>0 defective</strong>: an estimate of 0%.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; If the random start is 7: parts 7, 17, 27, &hellip;, 497. That is 50 parts, all from die 7, with <strong>50 defective</strong>: an estimate of 100%.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Any other start also gives 0%. Not one of the ten possible samples gives the true 10%. The method is random (the start is chosen by chance), yet it is badly biased for <em>this</em> list, because the step k lines up with the 10-die cycle.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 10px;"><strong>Plan B (k = 7).</strong> A step that does not match the cycle behaves much better. With a start of 3 and a step of 7, the parts are 3, 10, 17, 24, &hellip;, and that visits all ten dies in turn. That sample has 72 parts, of which 7 are defective, an estimate of 7 / 72 &asymp; 9.7%, close to the true 10%.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The lesson.</strong> Before using a systematic sample, ask: <em>does this list repeat on a cycle?</em> Production runs, calendars (every 7th day is always the same weekday), seating charts, and household lists with a fixed pattern can all repeat. If you suspect a cycle, shuffle the list first, change the step so it does not match, or use simple random sampling instead.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127795; WORKED EXAMPLE 3 &mdash; PROPORTIONAL ALLOCATION IN A STRATIFIED SAMPLE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> To draw a stratified sample in proportion to group size, give each group the same <em>share</em> of the sample that it has of the population:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; text-align: center;"><strong>n<sub>group</sub> = n &times; (group size &divide; N)</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up school has N = 1,200 students: 360 freshmen, 324 sophomores, 300 juniors, and 216 seniors. The council wants a stratified sample of n = 100.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Freshmen:</strong> 100 &times; 360 / 1,200 = <strong>30</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Sophomores:</strong> 100 &times; 324 / 1,200 = <strong>27</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Juniors:</strong> 100 &times; 300 / 1,200 = <strong>25</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Seniors:</strong> 100 &times; 216 / 1,200 = <strong>18</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check:</strong> 30 + 27 + 25 + 18 = 100. These numbers were chosen so every share comes out whole. Within each grade, the students are then chosen by a random draw from that grade&rsquo;s list.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 10px;"><strong>The rounding problem.</strong> Real numbers rarely come out whole. A made-up orchard has N = 1,000 trees in four blocks of 280, 270, 240, and 210 trees, and the grower wants n = 30.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Block</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Trees</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">30 &times; trees &divide; 1,000</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Rounded to a whole number</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">A</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">280</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">8.4</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">8</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">B</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">270</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">8.1</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">8</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">C</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">240</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">7.2</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">7</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">D</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">210</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">6.3</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">6</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>Total</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>1,000</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>30.0</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>29</strong></td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Rounding each block gives 8 + 8 + 7 + 6 = <strong>29</strong>, one short of 30. A tidy fix is the <em>largest remainder</em> rule: keep the whole-number parts (8, 8, 7, 6), then give each missing tree to the block whose decimal part was largest. Here one is missing, and Block A has the largest leftover (0.4), so the sample is <strong>9, 8, 7, 6</strong>, which adds to 30. Any reasonable rule is acceptable as long as you state it and the numbers add to n.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; RESPONSIBILITY CHECKPOINT: WHAT EACH FAMILY LETS YOU CLAIM</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>probability sample</strong> lets you say: &ldquo;Because chance chose these people, my estimate should land near the truth, and I can later state how far off it is likely to be.&rdquo; That is permission to <em>generalize</em> to the population you sampled from, as long as that population is the one you care about.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">A <strong>non-probability sample</strong> lets you say only: &ldquo;Here is what these people said.&rdquo; It might happen to be close to the truth, but you cannot show that it is, and you cannot attach an honest margin of error to it. The responsible sentence is the narrow one: <em>&ldquo;Of the 300 people who answered our online poll, 80% disliked the new route; we cannot say how the whole town feels.&rdquo;</em> (The 80% is a made-up illustration.)</div>
+</div>
+
+<div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+    <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#128101; Try It Yourself: The Sampling Simulator</div>
+    <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">The simulator holds a made-up town of 200 people drawn as dots. Keep <em>Average minutes of homework</em> selected and leave the sample size at 20 for the whole exercise.<br /><strong>Task 1.</strong> With <em>Simple random</em> chosen, click <em>Draw a sample</em>, then <em>Draw another</em> several times. Watch the estimate in <em>Your estimate</em> jump around. This is ordinary chance variation.<br /><strong>Task 2.</strong> Now cycle through the seven choices in the <em>Method</em> menu: <em>Simple random</em>, <em>Stratified (by neighborhood)</em>, <em>Cluster (whole groups of 10)</em>, <em>Systematic (every kth)</em>, <em>Pick people yourself (judgment)</em>, <em>Quota (not random)</em>, and <em>Convenience (nearest the entrance)</em>. For each, read the short description under the menu and draw one sample. For the judgment method, click about 20 dots you think look typical of the town, then click <em>Use my picks</em>. Write each estimate in your notebook.<br /><strong>Task 3.</strong> Go back to <em>Simple random</em> and click <em>Repeat 100 times</em>. The dot strip shows 100 estimates, with the <em>Mean of the estimates</em> and the <em>Spread (std. deviation)</em>. Repeat this for stratified, cluster, systematic, quota, and convenience. (For the judgment method, <em>Repeat 100 times</em> will explain why it does not make sense: your picks are the same every time.)<br /><strong>Task 4.</strong> Click <em>Reveal the true values</em>. The true average is about 68 minutes, and each method now shows its <em>Bias</em>, the mean of the estimates minus the truth. Expect roughly this (your numbers will wobble a little from run to run): simple random, stratified, cluster, and systematic all center close to the truth (within about a minute or two); <strong>quota</strong> is about 4 to 5 minutes too low; <strong>convenience</strong> is about 15 minutes too low. A method whose estimates cluster tightly around the <em>wrong</em> value is precisely wrong.<br /><strong>Task 5.</strong> Compare the <em>Spread</em> numbers. Over many draws, stratified is steadier than simple random (about 2.5 minutes versus about 4), and cluster is much more spread out (about 11). Systematic is steady in this town (about 2), but remember Worked Example 2: this town&rsquo;s list has no repeating cycle, and a list that does can make it badly biased. Click <em>Compare all methods</em> to see them side by side.<br /><strong>Task 6.</strong> Click <em>Try n = 60 with Convenience</em>. Tripling the sample size barely helps: convenience is still about 12 minutes low, while simple random stays centered. Write one sentence on why a bigger sample does not fix bias.<br /><strong>Task 7.</strong> Look back at your judgment estimate. <em>Your own bias may differ</em> from your classmates&rsquo;, because it depends on which dots you chose. Compare your estimate with the true value and ask: which dots did I pick first, and why?</div>
+    <iframe src="https://optimaondemand.github.io/hsps-widgets/sampling-simulator.html" width="100%" height="1100" style="border: none; display: block;" title="The Sampling Simulator" allowfullscreen></iframe>
+    <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/sampling-simulator.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+</div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127981; WHERE PEOPLE USE THIS &middot; MATCHING THE METHOD TO THE JOB</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">Different jobs favor different methods. Quality-control teams commonly check production lines with systematic or random sampling, and have to watch for cycles in the process. Researchers often use cluster sampling when they have no list of individual people but can list schools, clinics, or city blocks. Large surveys frequently combine methods, for example grouping a population into strata and then sampling clusters within each. Details differ from one organization to the next, so look up the design before relying on any survey&rsquo;s numbers.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: DRAW A SYSTEMATIC SAMPLE AND A PROPORTIONAL ALLOCATION</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Systematic sample.</strong> Put your roster in column A. Number the rows with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROW()-1</code> (if row 1 holds a heading, the first member is in row 2 and gets ID 1). Compute k = N &divide; n, then pick the start with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,k)</code>, where k is the number or the cell holding it. A member is selected when its ID is the start plus a whole number of steps: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(MOD(ID-start,k)=0,"yes","")</code>. In other words, the picks are start, start + k, start + 2k, and so on. Because <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RANDBETWEEN</code> redraws every time the sheet recalculates, copy the start cell and use <strong>Paste Special &rarr; Values</strong> to freeze it before you record your sample.<br /><br />
+            <strong>Stratified, in proportion.</strong> Count each group with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(range,"group name")</code>, add the counts for N, then compute each group&rsquo;s allocation with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUND(n*group_count/N,0)</code>. Add up the rounded allocations. If they do not add to n (Worked Example 3 showed 29 instead of 30), adjust the group with the largest leftover by hand. Full click-by-click steps are in Activity 3.<br /><br />
+            <strong>Desmos Scientific</strong> is for plain arithmetic only. Type the allocation as a fraction expression: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">100*360/1200</code> gives 30, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">30*280/1000</code> gives 8.4. For the systematic step, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">500/50</code> gives 10.
+        </div>
+    </div>
+
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; GIVE AN AI FOUR SAMPLING SCENARIOS AND CATCH ITS MISSES (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;"><strong>Predict first.</strong> Here are four made-up sampling plans. Before you open any AI tool, name the method for each one, say whether it is a probability or non-probability method, and write one way bias could enter.<br /><strong>Scenario 1.</strong> A made-up bakery chain has 80 stores. The owner picks 6 stores at random and surveys every customer who walks into those stores on a Saturday.<br /><strong>Scenario 2.</strong> A school radio club posts a link on its page. The 120 students who click it and answer become the sample.<br /><strong>Scenario 3.</strong> A county lists its 5,000 registered voters alphabetically, picks a random number from 1 to 50, and then takes every 50th name.<br /><strong>Scenario 4.</strong> An interviewer stands at a bus station and must collect 40 men and 40 women. She stops the first people who are willing until each count is filled.<br /><strong>Prompt.</strong> Now give an AI tool exactly this: <em>&ldquo;For each of these four sampling plans, name the sampling method, say whether it is a probability or non-probability method, and explain one way bias could enter. [paste the four scenarios]&rdquo;</em><br /><strong>Verify.</strong> Compare its answers to yours and to the key below. Look especially for these slips: calling a quota sample &ldquo;stratified,&rdquo; calling a cluster sample &ldquo;stratified,&rdquo; calling a self-selected sample &ldquo;random&rdquo; because the number of responses is large, or saying the systematic sample is fine without asking whether the list has a cycle. Report what it got right, where it was wrong or vague, and what you did about it.<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Answer key for the AI Training task</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><table style="border-collapse: collapse; width: 100%; font-size: 15px;"><tr style="background: #0E1C42; color: #fff;"><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Scenario</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Method</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Family</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">A bias risk</td></tr><tr><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">1</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Cluster (stores are the clusters; everyone in a chosen store is surveyed)</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Probability</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Only 6 stores, and Saturday shoppers may differ from weekday shoppers.</td></tr><tr><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">2</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Convenience, voluntary-response variant</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Non-probability</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Students who follow the radio club or feel strongly are the ones who answer; 120 responses does not make it random.</td></tr><tr><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">3</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Systematic (k = 50, random start; n = 5,000 / 50 = 100)</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Probability</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Fine unless the alphabetical list has a cycle matching 50; the list is also only as complete as the registration roll.</td></tr><tr><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">4</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Quota (not stratified: the people inside each count are not drawn at random)</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Non-probability</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">Only people at that station, at that time, and willing to stop are reachable.</td></tr></table></div>
+</details>
+</div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 90 minutes, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Say It in Your Own Words, Then Classify</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">30 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In your notebook, write one sentence <em>of your own</em> for each of the seven methods, saying how the sample is chosen. Do not copy the table. Include the procedure (for example, &ldquo;find k, pick a start, take every kth&rdquo;).</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Classify each constructed plan below. Use the three questions from Worked Example 1, and for each plan write the method, the family (probability or non-probability), and one place bias could enter.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> A made-up library numbers its 5,000 cards and a computer draws 80 numbers at random. <strong>(b)</strong> A made-up bottling line takes every 40th bottle after a random start from 1 to 40. <strong>(c)</strong> A made-up county has 12 voting precincts. Three are drawn at random, and every voter leaving those three precincts is interviewed. <strong>(d)</strong> A made-up school lists students by grade and draws 25 students at random from each of the four grade lists. <strong>(e)</strong> A made-up town page posts a link and anyone may answer a poll about a new park. <strong>(f)</strong> A coach picks the 10 players he thinks are &ldquo;typical&rdquo; to ask about the team&rsquo;s practice schedule.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Pick one plan you called probability and one you called non-probability, and write one sentence on what each lets you claim about the whole population.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>Classifications.</strong> (a) Simple random, probability. Bias risk: small; the list may be missing people who have no card. (b) Systematic, probability. Risk: a cycle in the line (for example, a filler head that rotates every 40 bottles). (c) Cluster, probability. Risk: only 3 precincts, and voters leaving at one time of day may be unlike other voters. (d) Stratified, probability (equal counts per grade, not proportional). Risk: with equal counts, the largest grade is under-represented per student, so combine estimates with weights if you want a school-wide average. (e) Convenience, voluntary-response variant, non-probability. Risk: people with strong feelings respond, and many people never see the page. (f) Judgment, non-probability. Risk: the coach is likely to think of players he knows best, and a different coach would choose differently. <strong>Claims.</strong> From a probability plan you may generalize to the population (with an honest statement of how far off you might be). From a non-probability plan you may only describe the people who responded. Your own sentences for the seven methods should agree with the table in meaning but not in wording.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Choose and Justify</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each goal below, name the method you would use and defend it in two sentences: what makes it sensible, and one bias you would watch for. There is more than one defensible answer, so the justification is the point.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Goal A.</strong> A made-up company of 2,400 employees wants the average length of the commute. It has a complete employee list, and the three departments (office staff, drivers, and warehouse) are known to have very different commutes.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Goal B.</strong> A made-up school district wants the share of its students who walk to school. It has 30 schools and no student-level list. Traveling to every school is costly.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Goal C.</strong> A made-up bakery wants to check the weight of its loaves as they come off the line, quickly and with almost no setup. Nobody has had time to number the loaves.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write a one-sentence rule you could give a friend for choosing between stratified and cluster.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>Goal A:</strong> stratified, by department, in proportion to department size, with a random draw inside each. The groups are known to differ, so guaranteeing each its share steadies the estimate. Watch for: out-of-date lists. <strong>Goal B:</strong> cluster, treating each school as a cluster: draw some schools at random and survey everyone (or a random set of students) in the chosen schools. It saves travel because you visit only some schools. Watch for: with only a few schools drawn, the sample could miss a very different part of the district. <strong>Goal C:</strong> systematic, taking every kth loaf from a random start. No numbering is needed because the loaves arrive in order. Watch for: a cycle (for example, an oven that holds 12 loaves would line up with k = 12). <strong>Rule:</strong> if you can list everyone and the groups differ from each other, sample <em>from</em> every group (stratified); if listing everyone is hard but the groups are easy to list and visit, sample <em>whole</em> groups (cluster).</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel: Draw a Systematic Sample and Allocate a Stratified One</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">35 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a <strong>Blank workbook</strong>. Press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk30_Sampling_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Type the headings: <strong>A1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">ID</code>, <strong>B1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Selected?</code>, <strong>C1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wing</code>. In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROW()-1</code> and press Enter. Click the <strong>Name Box</strong> (left of the formula bar), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A2:A601</code>, press Enter, then press <strong>Ctrl+D</strong> to fill the formula down. Check that A601 shows 600.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">The roster is 600 made-up members. Put them in three wings. In <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(A2&lt;=280,"East",IF(A2&lt;=480,"West","North"))</code>, then fill down to C601 the same way (Name Box <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">C2:C601</code>, then <strong>Ctrl+D</strong>). East has IDs 1 to 280, West 281 to 480, North 481 to 600.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Systematic.</strong> In <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample size n</code> and in <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">30</code>. In <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">k = N / n</code> and in <strong>F2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A601)/F1</code> (expect 20). In <strong>E3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Random start</code> and in <strong>F3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,F2)</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>B2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(MOD(A2-$F$3,$F$2)=0,"yes","")</code> and fill down to B601 (Name Box <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">B2:B601</code>, then <strong>Ctrl+D</strong>). In <strong>E4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Number selected</code> and in <strong>F4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(B2:B601,"yes")</code>. Expect <strong>30</strong>. Press <strong>F9</strong> a few times to redraw the start: the first selected ID is always the start, then start + 20, start + 40, and so on, and the count stays 30.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">6</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Stratified allocation.</strong> In <strong>H1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wing</code>, <strong>I1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Size</code>, <strong>J1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Allocation</code>. In <strong>H2:H4</strong> type East, West, North. In <strong>I2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF($C$2:$C$601,H2)</code> and fill down to I4 (expect 280, 200, 120). In <strong>I5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(I2:I4)</code> (expect 600).</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">7</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>J2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUND($F$1*I2/$I$5,0)</code> and fill down to J4. In <strong>J5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(J2:J4)</code>. Expect 14, 10, 6, and a total of <strong>30</strong>. Change the sample size in F1 to 25 and watch the allocation recompute (12, 8, 5). Then change F1 to 33 and check whether the total still equals F1.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">8</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write two sentences: what you would do if the allocation total ever did not equal n, and how you would fix it by hand.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Section checks: A601 = 600; F2 = 20; F4 = 30 for every start; I2:I4 = 280, 200, 120; J2:J4 = 14, 10, 6 with total 30 when F1 = 30. With n = 25: 25 &times; 280/600 = 11.67 (rounds to 12), 25 &times; 200/600 = 8.33 (8), 25 &times; 120/600 = 5 (5), total 25. With n = 33: 15.4 (15), 11 (11), 6.6 (7), total 33 as well, so these sizes happen to work; a mismatch is possible for other sizes (Worked Example 3 had one). If a total ever misses n, give the missing unit to the group with the largest leftover decimal (or take the extra unit from the group with the smallest). If every row shows #NAME?, check you typed the equals sign; if every row shows &ldquo;yes&rdquo;, check the dollar signs in $F$3 and $F$2. Note: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RANDBETWEEN</code> recalculates whenever the sheet changes, so freeze the start with Copy and Paste Special &rarr; Values before you record your sample.</div>
+</details>
+</div></div>
+
+<div style="margin-bottom: 6px;"></div>
+</div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 30.3 &mdash; Name the Method, Name the Weakness</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded questions (classifying plans, systematic steps, proportional allocation) and one short written item: name the method, name the weakness, propose a fix. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 30.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on classifying plans, look-alikes, probability versus non-probability, and proportional allocation.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Sampling &amp; Study Design</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 30.3 &middot; Sampling Methods: Seven Ways to Choose a Sample</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

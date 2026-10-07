@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Semester 2 Review</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Semester 2 Finals</div>
+        <div style="font-size: 12px; color: #666;">Finals Week</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Review Lesson</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">The Semester in One Piece</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Semester 2 Review</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">From One Sample to a Population, Carefully</div>
+        <div style="font-size: 16px; color: #666;">Review Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Every question in statistics is the same question: what can one honest sample tell us about the many it came from, and how sure may we be?</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Nothing new today &mdash; a grand tour of what you already own, with the connecting doors thrown open</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read the tour in order, work the three &ldquo;check yourself&rdquo; recaps with pencil and Desmos before opening their answers, and finish with the how-to-prepare plan and the toolkit at the bottom. This page is deliberately lighter than a normal lesson &mdash; plan on about 45 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> trace how the semester's six modules build one connected argument &mdash; from displaying data, to modeling it, to sampling it, to inferring from it.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> re-run three signature computations cold: a probability about a sample mean, a regression interpretation, and a 95% interval read with its limits.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> prepare deliberately for the semester final, using my own quiz history as the map of what to review.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil &mdash; the three recaps are worked by hand before you check them.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Your Canvas quiz history for this semester &mdash; the how-to-prepare plan is built on it.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129517; THE ARC</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A year ago this course gave you <strong>probability</strong> &mdash; the grammar: sample spaces, rules, conditioning, distributions. This semester gave you <strong>statistics</strong> &mdash; the rhetoric: how to speak honestly with data when you only ever see part of the picture. The bridge between them is <strong>inference</strong>, and the cleanest way to say it is this: <em>inference is probability read in reverse.</em> Probability starts from a known population and asks what samples will look like. Inference starts from the one sample you have and asks what population could have produced it.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; ">So today's tour is not six topics to re-memorize. It is one chain with the doors between rooms thrown open &mdash; because the final, like real problems, does not announce which room it is standing in. (Lightly, as you walk: the semester also carried a character thread &mdash; Honesty in how we display, Courtesy in how we summarize, Wonder at the normal curve, Responsibility in what we claim and in how we sample, and Service in what inference is for. The tour below is that same thread seen as mathematics.)</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128202; ROOMS 7 &amp; 8 &middot; DISPLAYS AND SUMMARIES, TWO LANGUAGES FOR ONE DISTRIBUTION</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Module 7 taught you to <em>draw</em> a distribution: bar charts and circle graphs for categories; line plots, histograms, and box plots for numbers; and the discipline of spotting a display that lies. Module 8 taught you to <em>say</em> a distribution in numbers: center (mean, median), spread (SD, IQR), shape, and outliers. These are not two topics. They are <strong>two languages for the same object</strong>, and fluency means translating: a long right tail in the histogram is the mean pulled above the median in the summary; a tall box in the box plot is a large IQR.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; ">Every later module reads in both languages. When you checked a normal model you looked at a histogram <em>and</em> computed a mean and SD. When you inspected residuals you plotted them <em>and</em> summarized them. If a question on the final feels like it is about a graph, ask what number it is secretly about &mdash; and the reverse.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128276; ROOM 9 &middot; THE NORMAL MODEL, MEAN AND SD PROMOTED INTO A PREDICTIVE MACHINE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Module 9 took Module 8's two summaries and promoted them. Once you decide a distribution is well described by a mean \(\mu\) and an SD \(\sigma\), the normal model lets you <strong>predict</strong>: the percent below a value, between two values, the cutoff for the top 10%. The empirical rule gave the quick version (68, 95, 99.7); the z-score \(z = \frac{x - \mu}{\sigma}\) and the normal-area tools gave the exact one. A z-score is just &ldquo;how many SDs from the mean&rdquo; &mdash; Module 8's SD used as a ruler.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; ">And Galton's board replays Semester 1. Each ball makes a string of independent left-or-right choices &mdash; a binomial count &mdash; and the pile of balls settles into the bell. The binomial you built in the fall is the normal curve's ancestor, and Wonder was the right virtue: order emerging from many small random pushes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 8px; padding: 18px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 10px;">&#9997;&#65039; CHECK YOURSELF 1 &middot; A SAMPLE-MEAN QUESTION, MODULES 8, 9 AND 12 IN ONE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">A made-up population of quiz scores has mean \(\mu = 70\) and SD \(\sigma = 12\). A random sample of <strong>n = 36</strong> scores is taken. (a) What is the standard error of the sample mean? (b) What is the probability the sample mean exceeds 73? <strong>Before opening the answer:</strong> compute the SE, convert 73 to a z-score on the <em>sample-mean</em> scale, and find the area to the right.</div>
+        <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 0;">
+            <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Worked it? Check here</summary>
+            <div style="font-size: 17px; color: #1a2340; line-height: 1.65; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                (a) The standard error is \(\mathrm{SE} = \frac{\sigma}{\sqrt{n}} = \frac{12}{\sqrt{36}} = \frac{12}{6} = 2\). It is the SD of the sample mean &mdash; how far a typical sample mean lands from \(\mu\). (b) The sample mean has mean 70 and SD 2, and with n = 36 the normal model applies to it whatever the population's shape (the Central Limit Theorem, below). \[z = \frac{73 - 70}{2} = 1.5, \qquad P(\bar{x} &gt; 73) = 1 - 0.9332 \approx 0.0668.\] About a <strong>6.7%</strong> chance. Notice the contrast: one <em>individual</em> score above 73 has probability about 0.401 (z = 0.25 on the SD-12 scale), but a <em>mean of 36</em> above 73 is far less likely &mdash; averages cluster. Desmos: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(73-70)/(12/sqrt(36))</code> for z. Excel: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-NORM.S.DIST(1.5,TRUE)</code> or <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-NORM.DIST(73,70,2,TRUE)</code>. (All numbers are made up for practice.)
+            </div>
+        </details>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; ROOM 10 &middot; REGRESSION: DESCRIPTION, RESIDUALS REBORN, AND THE CAUSATION QUESTION</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Module 10 described <em>two</em> numerical variables at once. A scatterplot is Module 7's display; the correlation \(r\) and the least-squares line are Module 8's summaries stretched to a pair. The slope says how much the response changes, on average, per one unit of the explanatory variable; the intercept is the predicted value at zero &mdash; meaningful only if zero is a sensible input. And <strong>residuals are Module 8's deviations reborn</strong>: observed minus predicted is the same &ldquo;distance from the center&rdquo; idea, with the line replacing the mean as the center. A residual plot with no pattern says the line is a fair summary; a curve says try another model (the log-and-straighten move for exponential growth).</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; ">Then the semester's hardest honest sentence: <strong>correlation is not causation.</strong> A strong \(r\) from observational data tells you the variables move together, not why. Module 11 supplies the answer: <strong>randomized assignment</strong> breaks the link between the explanatory variable and everything lurking behind it, which is the only thing that licenses a causal claim. Responsibility, again: say only what the design supports.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 8px; padding: 18px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 10px;">&#9997;&#65039; CHECK YOURSELF 2 &middot; READING A FITTED LINE (MODULE 10)</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">A made-up study of used cars (ages 1 to 8 years) gives the fitted line \(\hat{y} = 24.0 - 1.8x\), where \(x\) is age in years and \(\hat{y}\) is predicted price in thousands of dollars. (a) Interpret the slope and the intercept in context. (b) Predict the price of a 5-year-old car. (c) Why is a prediction at \(x = 15\) unsafe? (d) In one sentence: why can these data alone not say that age <em>causes</em> the price drop? <strong>Before opening the answer:</strong> write one sentence for each part.</div>
+        <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 0;">
+            <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Worked it? Check here</summary>
+            <div style="font-size: 17px; color: #1a2340; line-height: 1.65; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                (a) <strong>Slope:</strong> for each extra year of age, the predicted price drops by about 1.8 thousand dollars ($1,800). <strong>Intercept:</strong> the predicted price at age 0 is 24.0 thousand dollars ($24,000), a sensible reading here because a brand-new car sits just outside the observed range of 1 to 8 years. (b) \(\hat{y} = 24.0 - 1.8(5) = 24.0 - 9.0 = 15.0\), about <strong>$15,000</strong>, a safe in-range prediction. (c) At \(x = 15\) the line gives \(24.0 - 27.0 = -3.0\), a negative price: the line was fit on ages 1 to 8 only, and going outside that range is <strong>extrapolation</strong>, where nothing in the data supports the straight-line pattern. (d) Age and price were only observed, not assigned, so something else that goes with age (mileage, wear, model year) could be doing the work &mdash; only a randomized experiment, where the explanatory variable is assigned by chance, lets us claim it causes the response. Desmos: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">24-1.8*5</code>. Excel for real data: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE(y_range,x_range)</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INTERCEPT(y_range,x_range)</code>.
+            </div>
+        </details>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; ROOM 11 &middot; SAMPLING, WHERE HONEST DATA COMES FROM</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Module 11 asked the question every earlier module quietly assumed away: <em>where did the data come from?</em> A simple random sample gives every member of the population the same chance of selection, which is what lets a sample stand in for the whole; stratified, cluster, and systematic samples trade convenience for structure, and convenience or voluntary-response samples fail by design. Study design is the same discipline pointed at cause: surveys, observational studies, and experiments differ in what they allow you to conclude, and random assignment, control groups, and blinding are what let an experiment speak to cause.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; ">And Module 11 named the thing Module 12 would measure: <strong>sampling variation</strong>. Two honest random samples from the same population will not give the same answer. That wobble is not an error to be ashamed of; it is the structure of the problem, and <strong>a margin of error is simply the size of that wobble, written down</strong>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128161; ROOM 12 &middot; THE CLT, INTERVALS, AND TESTS WITH REAL DATA</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Module 12 gathered every thread. The <strong>Central Limit Theorem</strong> is why Module 9's normal curve governs sample means whatever the population's shape: take samples of a decent size from a skewed, lumpy, or lopsided population and the sample means still pile into a bell centered at \(\mu\) with spread \(\sigma/\sqrt{n}\) &mdash; the standard error. Check Yourself 1 used exactly this. A <strong>confidence interval</strong> then turns that bell around: <em>estimate \(\pm\) z* \(\times\) SE</em>, the estimate plus or minus a margin of error that is a multiple of the standard error.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; ">Here is the promissory note from the fall. Semester 1's Module 6 left two schools arguing about what probability numbers <em>mean</em> and said: wait for real data. Now you have it. A simulation test asks the significance question &mdash; if nothing were going on, how often would chance alone produce a result this extreme? &mdash; and answers it by repeating the random process thousands of times and counting. An interval answers the estimation question. Both are probability read in reverse, and both rest on one fact: <strong>the sample is random, so its variation is predictable</strong>. Service is the point: so that decisions affecting many people can rest on evidence rather than impression.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 8px; padding: 18px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 10px;">&#9997;&#65039; CHECK YOURSELF 3 &middot; AN INTERVAL AND ITS LIMITS (MODULES 11 AND 12)</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">In a made-up random poll of <strong>n = 400</strong> voters, <strong>y = 220</strong> say they favor a proposal. (a) Find the 95% interval for the population proportion using \(\hat{p} \pm 1.96\sqrt{\frac{\hat{p}(1-\hat{p})}{n}}\). (b) Give the correct one-sentence reading of &ldquo;95% confident.&rdquo; (c) Name one thing this interval does <em>not</em> cover. <strong>Before opening the answer:</strong> find \(\hat{p}\), then the SE, then the margin, then both endpoints.</div>
+        <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 0;">
+            <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Worked it? Check here</summary>
+            <div style="font-size: 17px; color: #1a2340; line-height: 1.65; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                (a) \(\hat{p} = \frac{220}{400} = 0.55\). \(\mathrm{SE} = \sqrt{\frac{0.55 \times 0.45}{400}} = \sqrt{0.00061875} \approx 0.0249\). Margin \(= 1.96 \times 0.0249 \approx 0.0488\). Interval: \(0.55 \pm 0.0488\), or about <strong>(0.501, 0.599)</strong>, roughly 50.1% to 59.9%. (b) &ldquo;95% confident&rdquo; describes the <em>method</em>: if we repeated the poll many times and built an interval each time, about 95% of those intervals would capture the true proportion. It does not say there is a 95% probability that <em>this</em> interval contains it, and it does not say 95% of voters fall in the interval. (c) The interval measures only random sampling variation. It does <strong>not</strong> cover bias: a badly worded question, nonresponse (people who never answered may differ), or a list that missed part of the population &mdash; a small margin of error can sit on top of a badly wrong estimate. Desmos: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(0.55*0.45/400)</code>, then <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1.96*0.0249</code>. Excel for the endpoints: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1-1.96*SQRT(B1*(1-B1)/B2)</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1+1.96*SQRT(B1*(1-B1)/B2)</code>, with the proportion in B1 and n in B2.
+            </div>
+        </details>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A poll of 400 random voters found 55% in favor, margin of error about 5 points. Does that mean there is a 95% chance the true support is between 50% and 60%? Explain.&rdquo;</em><br />
+            <strong>Predict.</strong> Write your own answer first using Check Yourself 3: the 95% belongs to the method, not to this one interval, and the margin of error says nothing about bias or nonresponse.<br />
+            <strong>Verify.</strong> Grade the AI on the one distinction that matters. Does it slide into &ldquo;95% probability the truth is in this interval&rdquo;? Does it mention what the margin does not cover? If it gets the reading wrong, you have caught the most common misreading of the year in the wild.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128218; HOW TO PREPARE FOR THE SEMESTER FINAL</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The final is a <strong>50-question multiple-choice quiz drawn from this semester's lesson quizzes</strong>, split across modules in proportion to their size. There are no unseen question styles; it is material you have already met.</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 420px;"><tr><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334; background: #0E1C42;">Module</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334; background: #0E1C42;">Topic</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334; background: #0E1C42;">Questions on the final</th></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Module 7</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Data and data displays</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">9</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Module 8</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Descriptive statistics</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">9</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Module 9</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">The normal distribution</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">6</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Module 10</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Bivariate data and regression</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">9</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Module 11</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Sampling and study design</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">9</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Module 12</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Inference and statistical reasoning</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">8</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Total</strong></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><strong>50</strong></td></tr></table></div>        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Use your own quiz history as the map.</strong> Open this semester's lesson quiz results in Canvas. You do not need to re-take anything. Count the questions you missed in each module and rank the six modules from most missed to least.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Go to the lessons behind your misses.</strong> For each missed question, reopen the lesson it came from, find the idea, and rework the question from scratch without looking at the answer. Start with your top-ranked module, then the next. This beats rereading everything.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Remember the weights.</strong> Modules 7, 8, 10 and 11 carry nine questions each, so a shaky idea there costs more than one in the six-question Module 9. Break ties toward the heavier modules.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Rehearse the tools.</strong> Use the toolkit below. Type each Desmos entry and each Excel formula once the night before, so exam day spends no thought on syntax.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 4px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">5</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Sleep, then sit it.</strong> Prepare across the week, rest, and take the final as what it is: fifty questions you have already practiced.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129520; THE SEMESTER TOOLKIT &middot; ONE PAGE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every Excel formula below was used in a lesson this semester. Type them exactly as written. Desmos entries are plain arithmetic: Desmos does the expression-level work and Excel does the lists, areas, and regression.</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><tr><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334; background: #0E1C42;">Tool</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334; background: #0E1C42;">What it does</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334; background: #0E1C42;">Used for</th></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(range)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Mean of a list</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Center (Module 8)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(range)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Median of a list</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Center, resistant to outliers (Module 8)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(range)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Sample standard deviation</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Spread (Modules 8 and 9)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(range,1)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">First quartile; use 3 for the third</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Box plots and IQR (Modules 7 and 8)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(range,"Yes")</code><br><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS(range1,crit1,range2,crit2)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Count the cells that meet one condition, or several</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Frequency tables, two-way tables, counting simulation results</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(x,mean,SD,TRUE)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Area below x under a normal curve</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Percent below a value (Module 9)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.DIST(z,TRUE)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Area below z on the standard normal curve</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Area from a z-score (Module 9)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.INV(probability,mean,SD)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">The value with that area below it</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Cutoffs and percentiles (Module 9)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV(0.975)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">The z with that area below it</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">The 1.96 in 95% intervals (Module 12)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(x_range,y_range)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Correlation coefficient r</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Scatterplots (Module 10)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE(y_range,x_range)</code><br><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INTERCEPT(y_range,x_range)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Slope and intercept of the least-squares line</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Regression (Module 10)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RSQ(y_range,x_range)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">The square of r</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Share of variation explained (Module 10)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=LN(y)</code><br><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=EXP(value)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Natural log; undo it</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Straightening exponential data and back-transforming (Module 10)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,200)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">A random whole number in a range</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Random samples (Module 11)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(k,n,p,TRUE)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Chance of k or fewer successes; FALSE gives exactly k</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Binomial chances and simulation tests (Modules 9 and 12)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.INV(100,0.5,RAND())</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">A random binomial count</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Simulating coin-flip experiments (Module 12)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1-1.96*SQRT(B1*(1-B1)/B2)</code><br><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1+1.96*SQRT(B1*(1-B1)/B2)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Interval endpoints for a proportion, with p-hat in B1 and n in B2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">95% interval (Module 12)</td></tr><tr><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(0.55*0.45/400)</code></td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Desmos arithmetic for a standard error</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; text-align: left; border: 1px solid #D0D9E8; vertical-align: top;">Standard errors and z-scores</td></tr></table></div>    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127918; INTERACTIVES WORTH REVISITING BEFORE THE FINAL</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 10px;">If a module is on your most-missed list, replay the matching interactives from its lessons. They cost minutes, and they build the picture behind the formula.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Displays and summaries:</strong> Display Builder; Choose a Display; Catch the Graph in a Lie; Histogram and Box Plot; Statistics Explorer; Compare Distributions.<br /><strong>Normal model:</strong> Normal Explorer; Galton Board.<br /><strong>Regression:</strong> Guess the Correlation; Fit the Line; Straighten the Curve; Two-Way Table Explorer.<br /><strong>Sampling and inference:</strong> Sampling Simulator; Sample Variation; Sampling Distribution Explorer; Margin of Error Lab; Confidence Interval Simulator; Compare Two Groups; the significance simulator from the fall.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128172; WHAT TO SAY TO YOURSELF ON EXAM DAY</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;">You are not being asked to be impressive; you are being asked to be honest. Read each question for what it actually says, not for the question you were hoping for. If you do not know, reason from what you do know: what is the population, what is the sample, what is the model, what does the number actually measure? Choose the answer you can defend, not the one that merely sounds statistical. A calm, careful reader of data is exactly what this year was training, and the fifty questions in front of you are fifty chances to be one.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Semester 2 Review Activity</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">A mixed-practice set that walks the semester's rooms in exam conditions. Submit it in Canvas before you sit the final.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 4px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Semester 2 Final Exam</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Fifty multiple-choice questions, drawn from every module's lesson quizzes in proportion to its size. Keep your Desmos tab and Excel open.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Semester 2 Review &middot; From One Sample to a Population, Carefully</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

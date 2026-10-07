@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 33.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 33.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Numbers that help a community decide</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 33.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Sampling Distributions and the Central Limit Theorem</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Averages of many samples pile up in a bell shape, even when the individual values do not, and the pile has a spread we can calculate.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Sampling distribution; parent, sample, and sampling distribution; standard error (<em>&sigma;</em> &divide; &radic;<em>n</em> for a mean, &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>) for a proportion); the Central Limit Theorem; probabilities for a sample mean or sample proportion</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Sampling Distribution Explorer, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes: roughly 15 for the reading and examples, 12 for the explorer, 8 for Excel, and 38 for the activities.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> tell apart three different piles of numbers: the <strong>parent distribution</strong> (every individual value), the distribution of <strong>one sample</strong>, and the <strong>sampling distribution</strong> of a statistic across many samples.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe the center, spread (<strong>standard error</strong>), and shape of the sampling distribution of a sample mean or a sample proportion, and explain why four times the sample size halves the standard error.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> state the <strong>Central Limit Theorem</strong> in words, including what it does <em>not</em> say, and check it against a simulation.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> find the probability that a sample mean or sample proportion lands in a given range, using the standard error and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">NORM.DIST</code> in Excel.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up community group wants to know how long people wait for the city bus. They cannot ask everyone, so they ask 30 riders and find an average wait of 11.2 minutes. A second group asks 30 different riders and finds 8.9 minutes. Both groups worked honestly, and both numbers are real averages of real riders (in our story, which is constructed). So which group is right?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Neither is wrong, and neither is exactly right. Each average is one draw from a whole <em>pile</em> of averages that different groups could have gotten. In Week 31 you saw that such piles have a center, a spread, and a shape. Today we find out what decides all three. The surprise is this: waiting times are lopsided, with many short waits and a few very long ones, yet the pile of <em>averages</em> is a smooth, symmetric bell. Order comes out of lopsided randomness.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, looks like this: when you hand a community a number, you also owe them an honest account of how far a number like it could have strayed. The tool that gives you that account is the <strong>sampling distribution</strong>, and it is the foundation of everything else in this module.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every population, average, and sample in this lesson is <strong>constructed</strong> (made up) or <strong>simulated</strong> by a computer to teach the idea. None of it is real data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128202; THREE PILES OF NUMBERS: DO NOT MIX THEM UP</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Almost every mistake in this topic comes from mixing up three different piles. Each pile is a distribution, but each is made of different things.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Pile</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">What each value in the pile is</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">How many values</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">What it looks like</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Parent distribution</strong> (the population)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">One individual: one rider&rsquo;s wait</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Everyone in the population (in our simulation, 20,000)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Whatever shape the population has; here, lopsided to the right</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Distribution of one sample</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">One individual in your sample</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>n</em> (for example, 30)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A rough, lumpy copy of the parent</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Sampling distribution</strong> (of the sample mean)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">One <em>sample mean</em>: the average of one whole sample</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">As many samples as we draw (in our picture, 1,000)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Narrower than the parent, and much more symmetric</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The picture below shows all three side by side. The first two are made of <em>individuals</em>. The third is made of <em>averages</em>, one per sample. All three panels use the same axis, so you can compare the spreads directly.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><div style="background: #F8F9FA; border: 1px solid #D0D9E8; border-radius: 8px; padding: 12px; margin-bottom: 0;"><svg viewBox="0 0 640 262" width="100%" style="max-width: 640px; display: block; margin: 0 auto;" role="img" aria-label="Three panels on the same 0 to 40 minute axis. Panel 1 shows 20,000 individual waiting times, strongly right-skewed. Panel 2 shows one sample of 30 dots, also lopsided. Panel 3 shows 1,000 sample means, which form a narrow, nearly symmetric bell shape centered near 10."><rect x="0" y="0" width="640" height="262" fill="#FFFFFF"/><line x1="14" y1="200" x2="204" y2="200" stroke="#0E1C42" stroke-width="2"/><line x1="14.0" y1="200" x2="14.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="14.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">0</text><line x1="61.5" y1="200" x2="61.5" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="61.5" y="219" font-size="12" text-anchor="middle" fill="#1a2340">10</text><line x1="109.0" y1="200" x2="109.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="109.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">20</text><line x1="156.5" y1="200" x2="156.5" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="156.5" y="219" font-size="12" text-anchor="middle" fill="#1a2340">30</text><line x1="204.0" y1="200" x2="204.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="204.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">40</text><text x="109.0" y="238" font-size="12.5" text-anchor="middle" fill="#0E1C42">waiting time (minutes)</text><text x="109.0" y="22" font-size="13.5" text-anchor="middle" fill="#0E1C42" font-weight="bold">1. The parent</text><text x="109.0" y="40" font-size="12" text-anchor="middle" fill="#555">20,000 individual values</text><rect x="14.0" y="65.0" width="8.9" height="135.0" fill="#0E1C42"/><rect x="23.5" y="92.2" width="8.9" height="107.8" fill="#0E1C42"/><rect x="33.0" y="107.5" width="8.9" height="92.5" fill="#0E1C42"/><rect x="42.5" y="126.3" width="8.9" height="73.7" fill="#0E1C42"/><rect x="52.0" y="140.6" width="8.9" height="59.4" fill="#0E1C42"/><rect x="61.5" y="150.7" width="8.9" height="49.3" fill="#0E1C42"/><rect x="71.0" y="160.1" width="8.9" height="39.9" fill="#0E1C42"/><rect x="80.5" y="166.4" width="8.9" height="33.6" fill="#0E1C42"/><rect x="90.0" y="172.8" width="8.9" height="27.2" fill="#0E1C42"/><rect x="99.5" y="176.6" width="8.9" height="23.4" fill="#0E1C42"/><rect x="109.0" y="182.8" width="8.9" height="17.2" fill="#0E1C42"/><rect x="118.5" y="184.1" width="8.9" height="15.9" fill="#0E1C42"/><rect x="128.0" y="187.8" width="8.9" height="12.2" fill="#0E1C42"/><rect x="137.5" y="190.8" width="8.9" height="9.2" fill="#0E1C42"/><rect x="147.0" y="192.6" width="8.9" height="7.4" fill="#0E1C42"/><rect x="156.5" y="193.8" width="8.9" height="6.2" fill="#0E1C42"/><rect x="166.0" y="194.2" width="8.9" height="5.8" fill="#0E1C42"/><rect x="175.5" y="194.9" width="8.9" height="5.1" fill="#0E1C42"/><rect x="185.0" y="196.5" width="8.9" height="3.5" fill="#0E1C42"/><rect x="194.5" y="197.1" width="8.9" height="2.9" fill="#0E1C42"/><line x1="225" y1="200" x2="415" y2="200" stroke="#0E1C42" stroke-width="2"/><line x1="225.0" y1="200" x2="225.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="225.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">0</text><line x1="272.5" y1="200" x2="272.5" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="272.5" y="219" font-size="12" text-anchor="middle" fill="#1a2340">10</text><line x1="320.0" y1="200" x2="320.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="320.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">20</text><line x1="367.5" y1="200" x2="367.5" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="367.5" y="219" font-size="12" text-anchor="middle" fill="#1a2340">30</text><line x1="415.0" y1="200" x2="415.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="415.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">40</text><text x="320.0" y="238" font-size="12.5" text-anchor="middle" fill="#0E1C42">waiting time (minutes)</text><text x="320.0" y="22" font-size="13.5" text-anchor="middle" fill="#0E1C42" font-weight="bold">2. One sample</text><text x="320.0" y="40" font-size="12" text-anchor="middle" fill="#555">30 individual values</text><circle cx="267.8" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="239.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="296.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="286.8" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="334.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="248.8" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="258.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="362.8" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="239.2" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="258.2" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="305.8" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="391.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="239.2" cy="174.0" r="4.4" fill="#0E1C42"/><circle cx="315.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="248.8" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="286.8" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="258.2" cy="174.0" r="4.4" fill="#0E1C42"/><circle cx="248.8" cy="174.0" r="4.4" fill="#0E1C42"/><circle cx="229.8" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="296.2" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="229.8" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="229.8" cy="174.0" r="4.4" fill="#0E1C42"/><circle cx="353.2" cy="194.0" r="4.4" fill="#0E1C42"/><circle cx="229.8" cy="164.0" r="4.4" fill="#0E1C42"/><circle cx="391.2" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="258.2" cy="164.0" r="4.4" fill="#0E1C42"/><circle cx="229.8" cy="154.0" r="4.4" fill="#0E1C42"/><circle cx="258.2" cy="154.0" r="4.4" fill="#0E1C42"/><circle cx="267.8" cy="184.0" r="4.4" fill="#0E1C42"/><circle cx="239.2" cy="164.0" r="4.4" fill="#0E1C42"/><line x1="436" y1="200" x2="626" y2="200" stroke="#0E1C42" stroke-width="2"/><line x1="436.0" y1="200" x2="436.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="436.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">0</text><line x1="483.5" y1="200" x2="483.5" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="483.5" y="219" font-size="12" text-anchor="middle" fill="#1a2340">10</text><line x1="531.0" y1="200" x2="531.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="531.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">20</text><line x1="578.5" y1="200" x2="578.5" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="578.5" y="219" font-size="12" text-anchor="middle" fill="#1a2340">30</text><line x1="626.0" y1="200" x2="626.0" y2="205" stroke="#0E1C42" stroke-width="1.5"/><text x="626.0" y="219" font-size="12" text-anchor="middle" fill="#1a2340">40</text><text x="531.0" y="238" font-size="12.5" text-anchor="middle" fill="#0E1C42">waiting time (minutes)</text><text x="531.0" y="22" font-size="13.5" text-anchor="middle" fill="#0E1C42" font-weight="bold">3. Sampling distribution</text><text x="531.0" y="40" font-size="12" text-anchor="middle" fill="#555">1,000 sample means (n = 30)</text><rect x="457.4" y="197.6" width="1.8" height="2.4" fill="#C7922C"/><rect x="459.8" y="197.6" width="1.8" height="2.4" fill="#C7922C"/><rect x="462.1" y="191.6" width="1.8" height="8.4" fill="#C7922C"/><rect x="464.5" y="184.5" width="1.8" height="15.5" fill="#C7922C"/><rect x="466.9" y="170.1" width="1.8" height="29.9" fill="#C7922C"/><rect x="469.2" y="148.6" width="1.8" height="51.4" fill="#C7922C"/><rect x="471.6" y="127.1" width="1.8" height="72.9" fill="#C7922C"/><rect x="474.0" y="105.6" width="1.8" height="94.4" fill="#C7922C"/><rect x="476.4" y="90.1" width="1.8" height="109.9" fill="#C7922C"/><rect x="478.8" y="81.7" width="1.8" height="118.3" fill="#C7922C"/><rect x="481.1" y="65.0" width="1.8" height="135.0" fill="#C7922C"/><rect x="483.5" y="65.0" width="1.8" height="135.0" fill="#C7922C"/><rect x="485.9" y="96.1" width="1.8" height="103.9" fill="#C7922C"/><rect x="488.2" y="109.2" width="1.8" height="90.8" fill="#C7922C"/><rect x="490.6" y="116.4" width="1.8" height="83.6" fill="#C7922C"/><rect x="493.0" y="154.6" width="1.8" height="45.4" fill="#C7922C"/><rect x="495.4" y="160.6" width="1.8" height="39.4" fill="#C7922C"/><rect x="497.8" y="180.9" width="1.8" height="19.1" fill="#C7922C"/><rect x="500.1" y="186.9" width="1.8" height="13.1" fill="#C7922C"/><rect x="502.5" y="188.1" width="1.8" height="11.9" fill="#C7922C"/><rect x="504.9" y="195.2" width="1.8" height="4.8" fill="#C7922C"/><rect x="507.2" y="196.4" width="1.8" height="3.6" fill="#C7922C"/><rect x="509.6" y="197.6" width="1.8" height="2.4" fill="#C7922C"/><rect x="514.4" y="198.8" width="1.8" height="1.2" fill="#C7922C"/><line x1="61.3" y1="61" x2="61.3" y2="200" stroke="#C0392B" stroke-width="2" stroke-dasharray="5 3"/><line x1="483.0" y1="61" x2="483.0" y2="200" stroke="#C0392B" stroke-width="2" stroke-dasharray="5 3"/></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 6px;">Simulated, made-up waiting times (mean about 10.0 minutes, SD about 9.9). Panel 1: 20,000 values. Panel 2: one sample of 30 (its mean is 10.8). Panel 3: the means of 1,000 samples of 30 (their mean is 9.9 and their SD is 1.83). The dashed red lines mark the centers.</div></div></div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; CENTER, SPREAD, AND SHAPE OF A SAMPLING DISTRIBUTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Read the numbers in the caption above. The parent has an SD of about 10 minutes, but the 1,000 sample means have an SD of only about 1.8. The pile of averages is far narrower than the pile of individuals. That narrowing is not an accident, and it has a formula.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>sampling distribution</strong> is the distribution of a statistic (a sample mean, a sample proportion) over all the random samples of the same size that we could draw from the same population. We describe it the way we describe any distribution.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Center.</strong> The sampling distribution of the sample mean is centered at the population mean <em>&mu;</em>. Fair random samples do not lean high or low, so over many samples the highs and lows balance. For a sample proportion, the center is the true proportion <em>p</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Spread.</strong> The spread of a sampling distribution has its own name: the <strong>standard error</strong> (SE). It is the standard deviation of the pile of sample statistics, and it answers &ldquo;how far does a statistic like this typically land from the center?&rdquo; (In Week 31 you called this the typical swing; standard error is the formal name.) For a sample mean, <strong>SE = <em>&sigma;</em> &divide; &radic;<em>n</em></strong>, where <em>&sigma;</em> is the population standard deviation. For a sample proportion, <strong>SE = &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>)</strong>. You already met the second formula in Week 31, in the 0.0980, 0.0490, 0.0245 pattern for <em>p</em> = 0.40.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Shape.</strong> This is where the Central Limit Theorem comes in, in the next section.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Two ideas that sound alike but are different.</strong> The <em>law of large numbers</em> says that as a single sample gets larger, its mean settles closer to <em>&mu;</em>. The <em>Central Limit Theorem</em> describes the whole pile of sample means for a <em>fixed</em> <em>n</em>: how they are scattered around <em>&mu;</em> and what shape they make. The two fit together. Because SE = <em>&sigma;</em> &divide; &radic;<em>n</em> shrinks as <em>n</em> grows, the pile crowds closer to <em>&mu;</em> (in the spirit of the law of large numbers), and the pile has a bell shape (the Central Limit Theorem).</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; THE CENTRAL LIMIT THEOREM, IN WORDS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>The Central Limit Theorem (CLT).</strong> Take random samples of size <em>n</em> from a population with mean <em>&mu;</em> and standard deviation <em>&sigma;</em>. When <em>n</em> is large enough, the sample means pile up in a distribution that is approximately <strong>normal</strong>, with mean <em>&mu;</em> and standard deviation <em>&sigma;</em> &divide; &radic;<em>n</em>. This holds <strong>whatever the shape of the population</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Look at what each part of that sentence does. &ldquo;Approximately normal&rdquo; is the <em>shape</em>. &ldquo;Mean <em>&mu;</em>&rdquo; is the <em>center</em>. &ldquo;<em>&sigma;</em> &divide; &radic;<em>n</em>&rdquo; is the <em>spread</em>. &ldquo;Whatever the shape of the population&rdquo; is the surprise.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>How large is &ldquo;large enough&rdquo;?</strong> There is no single magic number. A common rule of thumb is that <em>n</em> of about 30 is enough when the population is only moderately skewed. A population with a heavier tail or more extreme skew needs a bigger <em>n</em>, and a population that is already bell-shaped gives bell-shaped sample means at any <em>n</em>. For a sample proportion, you met the matching check in Week 26: the normal model works well when <em>np</em> and <em>n</em>(1 &minus; <em>p</em>) are both at least 10 (some sources use 5).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Conditions.</strong> The samples must be random, and the individual observations must be independent. A common guideline for independence when sampling without replacement is that the sample should be a small part of the population (many sources say less than about 10%).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Look back to Week 25.</strong> De Moivre&rsquo;s bell curve for coin flips was a special case: a count of heads is a sum of many 0s and 1s. The CLT says the same bell appears for sums and averages of many other kinds of values too.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: HOW MUCH NARROWER IS THE PILE OF AVERAGES?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The Sampling Distribution Explorer (below) has a made-up, strongly right-skewed population of waiting times with mean about 9.73 and standard deviation <em>&sigma;</em> about 9.47. Use SE = <em>&sigma;</em> &divide; &radic;<em>n</em> to predict the standard error at <em>n</em> = 1, 5, 30, and 100. Then compare with how lopsided the pile of means still is at each <em>n</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> At <em>n</em> = 1 each &ldquo;sample&rdquo; is a single person, so the pile of means is just the parent: SE = 9.47 &divide; 1 = <strong>9.47</strong>. At <em>n</em> = 5: &radic;5 &asymp; 2.236, so SE = 9.47 &divide; 2.236 &asymp; <strong>4.24</strong>. At <em>n</em> = 30: &radic;30 &asymp; 5.477, so SE &asymp; <strong>1.73</strong>. At <em>n</em> = 100: &radic;100 = 10, so SE = <strong>0.95</strong>. The table&rsquo;s last column uses <em>skew</em>, a number that measures lopsidedness: 0 means symmetric, and a positive number means a long right tail. The skew values come from checking 6,000 simulated sample means at each <em>n</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sample size <em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Predicted SE = 9.47 &divide; &radic;<em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Skew of the sample means (about)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Reading</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9.47</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.63</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Same as the parent: strongly lopsided</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4.24</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.73</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Narrower, but still clearly lopsided</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">30</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.73</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.34</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Close to a bell, with a slight right lean left over</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.95</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.19</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Nearly symmetric</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Going from <em>n</em> = 1 to <em>n</em> = 100, the standard error falls from 9.47 to 0.95, one tenth as large, because &radic;100 = 10. At the same time the skew falls from about 1.63 to about 0.19. This is the CLT at work, and it is also an honest caveat: at <em>n</em> = 5 the pile is <em>not</em> yet a bell, and at <em>n</em> = 30 a slight lean remains for this population. &ldquo;Large enough&rdquo; depends on how lopsided the parent is. The skew values are approximate, and your own run will differ a little because the draws are random.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Sampling Distribution Explorer</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Seven tasks.</strong> This page is long (about twice as tall as the frame), so scroll inside the frame. Its sections are numbered. <strong>(1)</strong> In section 1, <em>Parent population</em>, choose the strongly right-skewed waiting times. <strong>(2)</strong> In section 2, press the <em>n = 1</em> quick button, then <em>Draw 1000</em>. In section 4, <em>Every sample mean so far</em>, the histogram of means sits on the same axis as the parent; at <em>n</em> = 1 it should look like the parent. <strong>(3)</strong> Press <em>Clear</em>, press the <em>n = 5</em> button, and press <em>Draw 1000</em>. Then do the same for <em>n</em> = 30 and for <em>n</em> = 100, pressing <em>Clear</em> each time. Watch the pile narrow and become more symmetric. <strong>(4)</strong> At <em>n</em> = 30, tick <em>Zoom to the means</em> and <em>Show the bell curve the theory predicts</em>, and see how well the curve fits. <strong>(5)</strong> Read the data-versus-theory numbers in section 5 and compare the spread of your sample means with the parent&rsquo;s spread divided by &radic;<em>n</em>. <strong>(6)</strong> Press <em>Compare n</em> to compare several sample sizes together. <strong>(7)</strong> Change the parent in section 1 to the lopsided population with a heavy tail and repeat <em>n</em> = 30. Does it look as bell-shaped as before? Section 6, <em>What to notice</em>, will help. Your numbers will differ a little each time, because the draws are random. All data here are simulated, and samples are drawn with replacement.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/clt-explorer.html" width="100%" height="1100" style="border: none; display: block;" title="Sampling Distribution Explorer" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/clt-explorer.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is long, so scroll inside the frame.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: THE PROBABILITY THAT A SAMPLE MEAN LANDS IN A RANGE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up daily puzzle takes players a mean of <em>&mu;</em> = 42 minutes with a standard deviation <em>&sigma;</em> = 9 minutes. The times are moderately skewed. A club picks a random sample of <em>n</em> = 36 players. What is the probability that the <strong>sample mean</strong> is between 40 and 45 minutes?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Step 1, check the conditions.</strong> The sample is random, and <em>n</em> = 36 is at least 30 for a population that is only moderately skewed, so the CLT says the sample means are approximately normal. <strong>Step 2, find the center and spread of the sampling distribution.</strong> Center: <em>&mu;</em> = 42. Standard error: SE = 9 &divide; &radic;36 = 9 &divide; 6 = <strong>1.5</strong> minutes. <strong>Step 3, standardize.</strong> For 45: <em>z</em> = (45 &minus; 42) &divide; 1.5 = <strong>2</strong>. For 40: <em>z</em> = (40 &minus; 42) &divide; 1.5 = <strong>&minus;1.33</strong>. <strong>Step 4, find the area</strong> between them. In Excel: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(45,42,1.5,TRUE)-NORM.DIST(40,42,1.5,TRUE)</code>. The two areas are 0.9772 and 0.0912, and the difference is <strong>0.8860</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Answer.</strong> About <strong>88.6%</strong>. In plain words: if the club kept drawing random samples of 36 players, about 89 in 100 of the sample means would land between 40 and 45 minutes. Notice what this does <em>not</em> say: it is not a claim about individual players. A single player&rsquo;s time can easily be 55 minutes.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A common error.</strong> If you used 9 (the standard deviation of <em>individuals</em>) as the spread instead of 1.5, the same Excel formula would give 0.2185, about 22%. That number answers a different question (for a bell-shaped population, the chance that <em>one</em> player is between 40 and 45) and is far too small for a sample mean. The sampling distribution is narrower than the parent. Always divide by &radic;<em>n</em>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: THE SAME IDEA FOR A SAMPLE PROPORTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> In a made-up school, 62% of students ride the bus (so <em>p</em> = 0.62). A random sample of <em>n</em> = 150 students is chosen. What is the probability that the <strong>sample proportion</strong> who ride the bus is less than 0.55?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Check the condition.</strong> <em>np</em> = 150 &times; 0.62 = 93 and <em>n</em>(1 &minus; <em>p</em>) = 150 &times; 0.38 = 57, both at least 10, so the sampling distribution of <em>p</em>-hat is approximately normal. <strong>Center:</strong> 0.62. <strong>Spread:</strong> SE = &radic;(0.62 &times; 0.38 &divide; 150) = &radic;0.001571 &asymp; <strong>0.0396</strong>. <strong>Standardize:</strong> <em>z</em> = (0.55 &minus; 0.62) &divide; 0.0396 &asymp; <strong>-1.77</strong>. <strong>Find the area</strong> in Excel: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(0.55,0.62,SQRT(0.62*0.38/150),TRUE)</code>, which gives <strong>0.0387</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> About <strong>3.9%</strong>, roughly 1 chance in 26. A sample of 150 from this school would rarely show a bus share as low as 55% if the true share is 62%. If one did, that would be a hint to look again at the claim that 62% ride the bus. (Reasoning like this is the seed of ideas you will keep building in this module.)</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 4: FOUR TIMES AS MANY, HALF THE STANDARD ERROR</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> In Worked Example 2 the club used <em>n</em> = 36. Suppose it uses <em>n</em> = 144 instead. Find the new standard error, and find the probability that the sample mean lands within 1 minute of <em>&mu;</em> = 42 (between 41 and 43) at each sample size.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Since 144 = 4 &times; 36 and &radic;144 = 12, SE = 9 &divide; 12 = <strong>0.75</strong>, exactly half of 1.5. Now the probability. With <em>n</em> = 36 and SE 1.5: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(43,42,1.5,TRUE)-NORM.DIST(41,42,1.5,TRUE)</code> gives <strong>0.4950</strong>. With <em>n</em> = 144 and SE 0.75: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(43,42,0.75,TRUE)-NORM.DIST(41,42,0.75,TRUE)</code> gives <strong>0.8176</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Quadrupling the sample size halves the standard error (1.5 to 0.75). The chance that a sample mean is within 1 minute of the truth rises from about 50% to about 82%. Bigger samples buy precision, but with diminishing returns: to cut the standard error to a third you would need nine times as many players. The next lesson turns this square-root pattern into a poll&rsquo;s margin of error.</div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#9888;&#65039; THREE COMMON MISCONCEPTIONS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>&ldquo;The CLT says my data become normal when I take a big sample.&rdquo;</strong> No. A large sample of lopsided waiting times is still lopsided; its histogram looks like the parent. It is the <em>sample means</em>, collected over many samples, that become bell-shaped.<br />
+            <strong>&ldquo;Once <em>n</em> = 30, the means are always normal.&rdquo;</strong> No. Thirty is a rule of thumb for moderately skewed populations. In the explorer&rsquo;s heavy-tail population the means at <em>n</em> = 30 still show a noticeable right lean (a skew of about 0.53 in our check), and at small <em>n</em> the skewed populations are far from bell-shaped.<br />
+            <strong>&ldquo;The standard error is just the standard deviation.&rdquo;</strong> No. The standard deviation <em>&sigma;</em> describes how individuals vary. The standard error <em>&sigma;</em> &divide; &radic;<em>n</em> describes how sample <em>means</em> vary. They are different piles, and the second is smaller.
+        </div>
+    </div>
+    <div style="background: #E8F6FB; border-left: 5px solid #2196D0; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #1B6A94; margin-bottom: 8px;">&#128220; A MOMENT IN THE HISTORY OF MATHEMATICS &middot; FROM DE MOIVRE TO LAPLACE: THE LONG ROAD TO THE CLT</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.6;">You met Abraham de Moivre in Week 25. In the 1730s he found that the pattern of heads in many coin flips (the binomial pattern) is well approximated by a bell-shaped curve. That was a result about one special chance process, and it raised an obvious question: is the bell shape a quirk of coins, or something deeper? Pierre-Simon Laplace, a French mathematician, took the idea much further. In work usually dated to around 1810, he is generally credited with the first general central-limit result, showing that the bell shape appears for sums and averages of many chance effects, not only coin flips. Historians usually add that the arguments of that era were not as careful as modern mathematics demands. The name &ldquo;central limit theorem&rdquo; and the polished modern proofs came later, in the twentieth century, and many mathematicians contributed along the way. What took generations of pencil-and-paper work you can now watch in seconds: when you press <em>Draw 1000</em> in the explorer, the computer does the averaging for you, and the bell appears. And here is a thought on wonder: nothing in the population &ldquo;knows&rdquo; about bells, yet averaging pulls a bell out of almost any shape. This is a short sketch; historians would add many names and details.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: THE PROBABILITY OF A SAMPLE MEAN, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will rebuild Worked Examples 2 and 3 in a spreadsheet so you can change the numbers and watch the answers move. Everything here is made up. This is a practice build; you do not upload it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk33_L1_YourName</code>. Rename the first sheet <strong>SampleMean</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Quantity</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code>. Then type these labels in column A and numbers in column B: <strong>A2</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Population mean</code>, <strong>B2</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">42</code>; <strong>A3</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Population SD</code>, <strong>B3</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">9</code>; <strong>A4</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample size n</code>, <strong>B4</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">36</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Standard error.</strong> In <strong>A5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Standard error</code>. Click <strong>B5</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B3/SQRT(B4)</code>, and press <strong>Enter</strong>. It should show <strong>1.5</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Two areas.</strong> In <strong>A6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">P(mean at most 45)</code>. In <strong>B6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(45,B2,B5,TRUE)</code> and press Enter. In <strong>A7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">P(mean at most 40)</code>. In <strong>B7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(40,B2,B5,TRUE)</code> and press Enter. The <strong>TRUE</strong> asks for the area to the left of the number, and the third item, <strong>B5</strong>, is the <em>standard error</em>, not the population SD.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Subtract.</strong> In <strong>A8</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">P(40 to 45)</code>. In <strong>B8</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B6-B7</code> and press Enter.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Show the answers as percents.</strong> Select <strong>B6:B8</strong>. On the <strong>Home</strong> tab, in the <strong>Number</strong> group, click the <strong>%</strong> (Percent Style) button, and then click <strong>Increase Decimal</strong> once or twice.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Change the sample size.</strong> Click <strong>B4</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">144</code>, and press Enter. The standard error should drop to <strong>0.75</strong> and B8 should change to about <strong>99.6%</strong>. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">36</code> to put it back.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A proportion.</strong> On the same sheet, type in <strong>D1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Proportion version</code>. In <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">True p</code> and in <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.62</code>. In <strong>D3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n</code> and in <strong>E3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">150</code>. In <strong>D4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Standard error</code> and in <strong>E4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(E2*(1-E2)/E3)</code>. In <strong>D5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">P(p-hat below 0.55)</code> and in <strong>E5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(0.55,E2,E4,TRUE)</code>. In <strong>D6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n times p</code> and in <strong>E6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E3*E2</code>. In <strong>D7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n times (1-p)</code> and in <strong>E7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E3*(1-E2)</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-top: 6px;"><strong>Check yourself.</strong> No random draws are involved, so everyone&rsquo;s numbers should match. B5 = 1.5; B6 &asymp; 0.9772; B7 &asymp; 0.0912; B8 &asymp; 0.8860 (88.6%). With <em>n</em> = 144, B8 &asymp; 0.9961. For the proportion: E4 &asymp; 0.0396; E5 &asymp; 0.0387; E6 = 93; E7 = 57 (both at least 10, so the normal model is reasonable). If your answers differ, the usual culprits are using B3 (the SD) instead of B5 (the standard error) inside <strong>NORM.DIST</strong>, or leaving out <strong>TRUE</strong>.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; STANDARD ERROR AND A SAMPLE-MEAN Z-SCORE IN DESMOS; SAMPLE-MEAN AND SAMPLE-PROPORTION AREAS IN EXCEL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Desmos Scientific</strong> is plain arithmetic here. For the standard error of a mean, find the square root of <em>n</em> first with the square-root button (for example, &radic;36 = 6), then divide: 9 &divide; 6 = 1.5. For the <em>z</em>-score of a sample mean, use the standard error as the divisor: type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(45-42)/1.5</code> and you should get 2. Compare with the wrong version <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(45-42)/9</code>, which gives 0.33. For a proportion, work inside the root: 0.62 &times; 0.38 &divide; 150, then take the square root of that result. Desmos Scientific does not give normal areas in this course, so we use Excel for those.<br />
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(x, mean, sigma/SQRT(n), TRUE)</code> gives the area to the left of <em>x</em> for a sample mean. For a sample proportion use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(x, p, SQRT(p*(1-p)/n), TRUE)</code>. For the area between two values, subtract one result from the other. The two traps: the third item is the <em>standard error</em>, not <em>&sigma;</em>, and the last item must be <strong>TRUE</strong>.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI WHAT THE CLT SAYS; CHECK IT AGAINST THE SIMULATION</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;In plain language, what does the Central Limit Theorem say? What happens to the histogram of sample means as the sample size n gets bigger, for a strongly skewed population? Does n = 30 always guarantee a normal shape?&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide what a careful answer must say: it is the <em>sample means</em> (not the data) that become approximately normal; the center stays at <em>&mu;</em>; the spread is <em>&sigma;</em> &divide; &radic;<em>n</em>; and 30 is a rule of thumb for moderate skew, not a guarantee.<br />
+            <strong>Verify.</strong> Open the Sampling Distribution Explorer. With the right-skewed parent, draw 1000 sample means at <em>n</em> = 5 and then at <em>n</em> = 30, and tick <em>Show the bell curve the theory predicts</em>. Then switch to the heavy-tail parent at <em>n</em> = 30. Compare with the AI&rsquo;s claims. Did it say the <strong>data</strong> become normal (wrong)? Did it say <em>n</em> = 30 guarantees normality for <strong>any</strong> population (wrong)? Did it mix up the standard deviation with the <strong>standard error</strong> (wrong)? Did it give the spread as <em>&sigma;</em> &divide; &radic;<em>n</em> (right)? Rewrite its worst sentence so that it is true. <strong>Verdict.</strong> A confident tone is not evidence; the simulation is.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 38 minutes, plus the explorer and the Excel steps above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Run, Record</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In the explorer, choose the <strong>two clusters</strong> parent (made up; mean about 49.86, SD about 25.95). Before you draw anything, <strong>predict</strong> the standard error <em>&sigma;</em> &divide; &radic;<em>n</em> at each sample size and write a one-line guess of the shape of the sample means. Use Desmos or Excel for the arithmetic.<div style="overflow-x: auto; margin: 8px 0;"><table style="width: 100%; border-collapse: collapse; min-width: 420px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sample size <em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Predicted SE</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Predicted shape</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Spread you measured</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Shape you saw</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8;">1</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8;">30</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8;">100</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td><td style="padding: 6px 10px; border: 1px solid #D0D9E8;">&nbsp;</td></tr></tbody></table></div></div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Now <strong>run</strong> it: for each <em>n</em>, press <em>Clear</em>, press the matching <em>n</em> button, and press <em>Draw 1000</em>. <strong>Record</strong> the spread of the sample means (from the data-versus-theory numbers in section 5) and describe the shape you see in section 4.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compare prediction and result. Within roughly what percent do they agree? Finish this sentence: &ldquo;Even though the parent has two clusters, the sample means &hellip;&rdquo;</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Predicted SEs: 25.95 &divide; &radic;1 = <strong>25.95</strong>; 25.95 &divide; &radic;5 &asymp; <strong>11.61</strong>; 25.95 &divide; &radic;30 &asymp; <strong>4.74</strong>; 25.95 &divide; 10 = <strong>2.59</strong>. Shape guesses will vary; check them against the picture. 2. Your measured spreads will differ a little from run to run; in the builders&rsquo; checks the spread of the means matched <em>&sigma;</em> &divide; &radic;<em>n</em> to within about 3%, so a measured value within a few percent of each prediction is normal. At <em>n</em> = 1 you should see the two clusters of the parent. 3. Example: &ldquo;Even though the parent has two clusters, the sample means form a narrow, single-humped pile around the parent mean, and the pile gets narrower as <em>n</em> grows.&rdquo; Describe what you actually saw for <em>n</em> = 5 and <em>n</em> = 30 in your own words.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Which Pile Is It?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">11 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each statement, decide whether it describes the <strong>parent distribution</strong> (P), the <strong>distribution of one sample</strong> (S), or the <strong>sampling distribution</strong> of the sample mean (M). <strong>(a)</strong> The histogram of all 20,000 waiting times in the made-up population. <strong>(b)</strong> The histogram of the 30 waiting times one volunteer collected. <strong>(c)</strong> The histogram of 1,000 sample means, one from each of 1,000 samples of 30. <strong>(d)</strong> Its standard deviation is <em>&sigma;</em> &divide; &radic;<em>n</em>. <strong>(e)</strong> Its standard deviation is <em>&sigma;</em>. <strong>(f)</strong> Its shape is approximately normal when <em>n</em> is large enough, whatever the shape of the population.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate says, &ldquo;I took a sample of 100 lopsided waiting times, so by the Central Limit Theorem my histogram of those 100 values will be a bell.&rdquo; Which pile did she confuse with which? Say what is true instead.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">True or false, and why: &ldquo;If I double the sample size, the standard error of the mean is cut in half.&rdquo;</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) P. (b) S. (c) M. (d) M. (e) P (the standard deviation of the individuals; a single sample&rsquo;s SD estimates it). (f) M. 2. She confused the distribution of <em>one sample</em> (S) with the <em>sampling distribution</em> of the mean (M). A sample of 100 lopsided values still looks lopsided, like the parent. What becomes bell-shaped is the pile of <em>sample means</em> across many samples. 3. False. SE = <em>&sigma;</em> &divide; &radic;<em>n</em>, and doubling <em>n</em> divides the SE by &radic;2 &asymp; 1.41, not by 2. To halve the SE you must <em>quadruple</em> <em>n</em>.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Worked, Then Your Turn</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Worked example (follow along).</strong> A made-up population of bean-plant heights is bell-shaped with <em>&mu;</em> = 50 cm and <em>&sigma;</em> = 12 cm. A random sample of <em>n</em> = 16 plants is measured. Find the probability that the sample mean is greater than 53 cm. <em>Steps:</em> the population is bell-shaped, so the sample means are normal even at <em>n</em> = 16. SE = 12 &divide; &radic;16 = 12 &divide; 4 = 3. <em>z</em> = (53 &minus; 50) &divide; 3 = 1. The area to the right is 1 &minus; <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(53,50,3,TRUE)</code>, which is <strong>0.1587</strong>, about 15.9%. In words: about 16 in 100 samples of 16 would average more than 53 cm.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn, a mean.</strong> A made-up population of daily walking distances has <em>&mu;</em> = 20 and <em>&sigma;</em> = 8 (kilometers per week, say), and is only mildly skewed. A random sample of <em>n</em> = 64 people is taken. Find the standard error, then the probability that the sample mean is greater than 21.5. Use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-NORM.DIST(21.5,20,SE,TRUE)</code> after you compute SE.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn, a proportion.</strong> In a made-up town, 25% of residents prefer a new park location (<em>p</em> = 0.25). A random sample of <em>n</em> = 300 residents is chosen. Check <em>np</em> and <em>n</em>(1 &minus; <em>p</em>), find the standard error, and find the probability that the sample proportion is greater than 0.30.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        2. SE = 8 &divide; &radic;64 = 8 &divide; 8 = <strong>1</strong>; <em>z</em> = (21.5 &minus; 20) &divide; 1 = 1.5; probability = 1 &minus; <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">NORM.DIST(21.5,20,1,TRUE)</code> = <strong>0.0668</strong>, about 6.7%. 3. <em>np</em> = 300 &times; 0.25 = 75 and <em>n</em>(1 &minus; <em>p</em>) = 225, both at least 10. SE = &radic;(0.25 &times; 0.75 &divide; 300) = &radic;0.000625 = <strong>0.025</strong>; <em>z</em> = (0.30 &minus; 0.25) &divide; 0.025 = 2; probability = <strong>0.0228</strong>, about 2.3%. Excel: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-NORM.DIST(0.30,0.25,SQRT(0.25*0.75/300),TRUE)</code>.
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 33.1 &mdash; Sampling Distributions and the CLT</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded items on the three piles, standard error, and what the CLT does and does not say, including two probability questions you can answer with Excel&rsquo;s NORM.DIST, plus one short written application.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 33.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the sampling distribution, standard error, the Central Limit Theorem, and probabilities for a sample mean or proportion.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 33.2 &mdash; Margin of Error: How Far Can a Poll Miss?</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next lesson turns the spread of sampling distributions into a margin of error.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 33.1 &middot; Sampling Distributions and the Central Limit Theorem</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

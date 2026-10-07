@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 20.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 7</div>
+        <div style="font-size: 12px; color: #666;">Data &amp; Data Displays</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 20.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">Honesty</div>
+        <div style="font-size: 12px; color: #666;">Representing data truthfully</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 20.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Choosing the Right Display</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">The right display depends on three questions &mdash; and every display hides something.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Strengths and weaknesses of six displays, and Florence Nightingale's rose diagrams</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work through the Display Chooser, practice the Excel and Desmos entries, and complete the three activities at the bottom. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> choose a display for a dataset by asking what kind of variable, how many values, and what question is being answered.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> state one strength and one weakness for each of the bar chart, circle graph, line plot, stem-and-leaf plot, histogram, and box plot.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compare two groups with box plots using their five-number summaries and interquartile ranges.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why a statistician might show more than one display of the same data.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Display Chooser embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129517; THE QUESTION BEHIND EVERY DISPLAY</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You now have six displays: <strong>bar chart</strong>, <strong>circle graph</strong>, <strong>line plot</strong>, <strong>stem-and-leaf plot</strong>, <strong>histogram</strong>, and <strong>box plot</strong>. (In Week 21 you will add the scatter plot and the line graph for <em>two</em> variables.) Knowing how to draw each is half the skill. The other half is choosing &mdash; and the choice is never &ldquo;which is prettiest?&rdquo; It is &ldquo;<strong>what question am I answering, with what kind of data, for how many values?</strong>&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Honesty is this module's virtue, and display choice is where honesty gets practical: the same numbers can be made to say different things by the picture you choose. A good statistician picks the display that lets the data speak, and says what the display cannot show.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128209; THREE QUESTIONS TO ASK</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>1. What kind of variable?</strong> Categorical (groups) &rarr; bar chart or circle graph. Numerical (measurements or counts) &rarr; line plot, stem-and-leaf, histogram, or box plot.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>2. How many values?</strong> Fewer than about 50 &rarr; line plot or stem-and-leaf plot can show every value. Dozens to thousands &rarr; histogram or box plot.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>3. What do you want the reader to see?</strong> Shape, clusters, and gaps &rarr; histogram. A quick five-number summary or a side-by-side comparison of several groups &rarr; box plots. Exact values &rarr; stem-and-leaf. Parts of a whole &rarr; circle graph. Comparing categories &rarr; bar chart.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every choice involves a trade-off. Here is the whole table, in one place to keep:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Display</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Best for</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Strength</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Weakness</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Bar chart</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Categorical, any number of categories</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Easy to compare lengths</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Misleads if the axis does not start at 0</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Circle graph</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Parts of a whole, a few categories</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Shows share of the whole</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Hard to compare close slices; useless with many slices</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Line plot</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Small numerical data with repeats</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Every value visible; gaps clear</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Needs repeated values; poor for large data</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Stem-and-leaf</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Small numerical data (under about 50)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Every value recoverable; shows shape</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Unwieldy for large data</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Histogram</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Larger numerical data</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Shows shape, clusters, gaps</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Loses individual values; bin width can change the story</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Box plot</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Summary and comparing groups</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Compact; compares groups side by side</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Hides clusters and gaps inside the box</td></tr>
+</tbody></table></div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE &mdash; COMPARING TWO CLASSES</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Two classes take the same 100-point test. The teacher wants to compare how the scores are <em>spread</em>, not just the middle. Five-number summaries (<em>constructed</em>): Class P: 52, 64, 72, 80, 95. Class Q: 60, 68, 72, 76, 88. <em>Teacher's voice:</em> the question is about comparing two groups' spreads, so side-by-side box plots on a single axis are the natural choice.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Class P (constructed)</strong></div>
+<div style="position: relative; height: 54px; max-width: 460px; margin: 0 auto;"><div style="position: absolute; left: 20.0%; width: 71.7%; top: 26px; border-top: 2px solid #0E1C42;"></div><div style="position: absolute; left: 20.0%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 91.7%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 40.0%; width: 26.7%; top: 8px; height: 38px; background: #E8F6FB; border: 2px solid #0E1C42; box-sizing: border-box;"></div><div style="position: absolute; left: 53.3%; top: 8px; height: 38px; border-left: 3px solid #C7922C;"></div></div><div style="position: relative; height: 18px; max-width: 460px; margin: 0 auto; border-top: 1px solid #D0D9E8;"><div style="position: absolute; left: 20.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">52</div><div style="position: absolute; left: 40.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">64</div><div style="position: absolute; left: 53.3%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">72</div><div style="position: absolute; left: 66.7%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">80</div><div style="position: absolute; left: 91.7%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">95</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Test score</div></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Class Q (constructed)</strong></div>
+<div style="position: relative; height: 54px; max-width: 460px; margin: 0 auto;"><div style="position: absolute; left: 33.3%; width: 46.7%; top: 26px; border-top: 2px solid #0E1C42;"></div><div style="position: absolute; left: 33.3%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 80.0%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 46.7%; width: 13.3%; top: 8px; height: 38px; background: #E8F6FB; border: 2px solid #0E1C42; box-sizing: border-box;"></div><div style="position: absolute; left: 53.3%; top: 8px; height: 38px; border-left: 3px solid #C7922C;"></div></div><div style="position: relative; height: 18px; max-width: 460px; margin: 0 auto; border-top: 1px solid #D0D9E8;"><div style="position: absolute; left: 33.3%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">60</div><div style="position: absolute; left: 46.7%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">68</div><div style="position: absolute; left: 53.3%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">72</div><div style="position: absolute; left: 60.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">76</div><div style="position: absolute; left: 80.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">88</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Same axis, same scale.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">The two classes have the <em>same median</em>, 72. But Class P's IQR is \(80 - 64 = 16\) and Class Q's is \(76 - 68 = 8\). The middle half of Class Q's scores fits in a box half as wide, so Class Q is more consistent, while Class P has more students at both the high and low ends. What the box plots cannot tell us is <em>why</em>, or whether either class has clusters inside the box. If the teacher wanted that, a histogram of each class would be the next display to draw.</div>
+    </div>
+
+    <div style="background: #E8F6FB; border-left: 5px solid #2196D0; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #1B6A94; margin-bottom: 8px;">&#128220; A MOMENT IN THE HISTORY OF MATHEMATICS &middot; FLORENCE NIGHTINGALE'S ROSE DIAGRAMS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.6;">Florence Nightingale (1820&ndash;1910) is remembered as the nurse of the Crimean War, but she was also a statistician &mdash; in 1858 she became the first woman elected to the Statistical Society of London (today's Royal Statistical Society). After the war she wanted to persuade British officials that most soldiers' deaths in the military hospitals had been caused by disease that better sanitation could prevent, not by wounds in battle. A table of numbers had not moved them, so she and her collaborators designed a new picture: a circular diagram, now called a <em>rose</em> or polar-area diagram, in which each month of the war is a wedge and the wedge's <em>area</em> shows the number of deaths, with colors separating deaths from preventable disease, from wounds, and from other causes. As the story is usually told, the wedges for preventable disease were so much larger than the others in the early months that the message could be read from across a room. She was choosing a display to fit a question and an audience &mdash; exactly today's skill. It is also worth noticing that people judge <em>area</em> in wedges less accurately than <em>length</em> in bars, so a modern statistician might draw the same data as a bar chart. The lesson is not that one display is right forever, but that the choice of display is part of the argument.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Display Chooser</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">Each scenario describes a dataset and a question. <strong>(1)</strong> First classify the data (numerical or categorical, one variable or two), <em>then</em> pick a display. <strong>(2)</strong> Read the verdict: Best fit, Works with a trade-off, or Poor fit. When the verdict is not &ldquo;Best fit,&rdquo; read why. <strong>(3)</strong> Use the compare button to put up to three displays of the same data next to each other, and decide which one you would show to a skeptical reader.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/display-chooser.html" width="100%" height="1000" style="border: none; display: block;" title="The Display Chooser" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/display-chooser.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL AND DESMOS: YOUR WEEK 20 TOOLKIT</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel &mdash; COUNTIF on text.</strong> COUNTIF also counts matching <em>words</em>. If the lunch choices are typed in <strong>A2:A31</strong>, the formula <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF($A$2:$A$31,"Pizza")</code> counts the pizzas. Better: put the category names in a column, point the formula at them (<code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF($A$2:$A$31,D2)</code>) and copy down, as you did for numbers; check that the counts total 30.<br /><strong>Excel &mdash; COUNTIFS for bins</strong> (Lesson 20.2) works on any numerical column: two conditions, left-in, right-out.<br /><strong>Desmos.</strong> The IQR comparison above is one subtraction each. Write the subtraction so you can see it: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">80-64</code> &rarr; 16 and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">76-68</code> &rarr; 8.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Describe this dataset to an AI tool and ask for the single best display, then make it defend the choice against one alternative: <em>&ldquo;The heights in centimeters of 300 students.&rdquo;</em><br />
+            <strong>Predict.</strong> Decide first. Numerical, one variable, many values: a histogram shows the shape; a box plot would summarize; a stem-and-leaf plot would be far too long for 300 values.<br />
+            <strong>Verify.</strong> Ask the AI to defend a stem-and-leaf plot for all 300 values and judge whether it can. Did it answer your actual question, or merely produce a confident-sounding paragraph? Whatever it recommends, you are still the one who must be able to say why.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Choose and Say Why</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each, name the best display and give one sentence of reasoning: (a) the number of students in each of 6 school clubs; (b) 18 students' scores on a 10-point quiz; (c) the weight in grams of 500 apples from an orchard; (d) the test scores of four classes, to compare how spread out each is; (e) how a 24-hour day divides among sleep, school, meals, and other.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Pick one of your five and name a second display that would also work, and what it would cost you.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) Bar chart (categorical; categories compared). (b) Line plot or stem-and-leaf (small, discrete). (c) Histogram (many continuous values; shape). (d) Side-by-side box plots (comparing spreads of several groups). (e) Circle graph (parts of a whole, few categories). A second display for (b): a histogram would also work but loses the individual scores.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Same Data, Two Stories</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Set A and Set B from Lesson 20.2 share a five-number summary. Write what a reader would wrongly conclude if shown only the box plots. Then say which single display you would show instead, and why.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one sentence, say how a bin width that is too wide can mislead.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Seeing only the box plots, a reader would think the two datasets look alike and might guess Set B also has one hump. A histogram (bins of width 5) shows that Set B has two clusters. A bin that is too wide merges neighboring clusters into one bar and can erase a real gap.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Read the Rose</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In three sentences, explain why Florence Nightingale chose a picture instead of a table for her audience, and what an honest reader should still ask about her diagram.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Choose one display from today's table and write its strength and its weakness in your own words, as if for a younger student.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        A picture lets a viewer take in the comparison in seconds, where a table needs study; she was persuading busy officials. An honest reader should still ask where the numbers came from, how reliable the recorded causes were, and whether wedge <em>areas</em> are being judged fairly. Answers for the second part will vary; look for a strength and a weakness that are both specific to that display.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 20.3 &mdash; Choose and Defend</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: choose displays for six scenarios, compare two classes with five-number summaries, and critique a bin-width choice. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 20.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on choosing among displays and their strengths and weaknesses.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Week 21 &mdash; Two Variables, Misleading Graphs, and Excel Charts</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Scatter plots, line graphs, how graphs lie, and the Excel charting lab.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 20.3 &middot; Choosing the Right Display</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

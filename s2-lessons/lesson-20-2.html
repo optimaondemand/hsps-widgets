@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 20.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 7</div>
+        <div style="font-size: 12px; color: #666;">Data &amp; Data Displays</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 20.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">Honesty</div>
+        <div style="font-size: 12px; color: #666;">Representing data truthfully</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 20.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Histograms and Box Plots</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">The histogram shows the shape; the box plot shows the summary &mdash; and each one hides what the other reveals.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Histograms, bin width, the five-number summary, and box plots</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, run the Histogram and Box Plot widget, follow the Excel steps, and complete the three activities at the bottom. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> build a histogram from a frequency table using the left-in, right-out bin rule and a total check.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> find the five-number summary and interquartile range by the median-of-each-half method and draw a box plot.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain how bin width can change what a histogram shows.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain what a box plot cannot show that a histogram can, using two datasets with the same five-number summary.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook, pencil, and graph paper.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Histogram and Box Plot widget embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; TOO MANY VALUES FOR A LINE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Thirty-three values is already awkward for a line plot; three thousand is impossible. When the dataset grows we give up showing each value and start showing <em>where the values pile up</em>. Today's two displays do that in two different ways: the <strong>histogram</strong> shows the whole <em>shape</em>; the <strong>box plot</strong> shows a five-number <em>summary</em>. They are meant to be read together &mdash; and today you will see why.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Both are drawn for <strong>numerical</strong> data. Today's example is <strong>made-up</strong>: 33 values on a 0 to 100 scale, which we will call Set A.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127959;&#65039; THE HISTOGRAM</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>histogram</strong> divides the number line into equal-width intervals called <strong>bins</strong> (or classes), counts how many values fall in each, and draws a bar whose height is that count. Two rules separate it from a bar chart: <strong>the bars touch</strong>, because the horizontal axis is a continuous number line with no gaps between the categories; and <strong>the bar's position matters</strong>, because the bins are ordered pieces of one scale.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every value must land in exactly one bin, so we need a rule for values on a boundary. Throughout this course, <strong>each bin includes its left endpoint but not its right</strong>: the bin 40&ndash;50 holds values from 40 up to, but not including, 50, written \([40, 50)\). A value of exactly 50 belongs to the next bin.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example.</strong> Set A sorted: 12, 22, 27, 31, 34, 37, 39, 40, 40, 42, 44, 46, 47, 48, 49, 49, 50, 51, 51, 52, 53, 54, 56, 58, 60, 60, 64, 68, 72, 77, 82, 86, 88. With bins of width 10 starting at 10, I tally each bin, left endpoint in, right endpoint out:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Bin</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[10,20)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[20,30)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[30,40)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[40,50)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[50,60)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[60,70)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[70,80)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">[80,90)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Total</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Frequency</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">9</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">8</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">33</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Check:</em> \(1 + 2 + 4 + 9 + 8 + 4 + 2 + 3 = 33\) &mdash; every value counted once.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Set A (constructed), bin width 10</strong></div>
+<div style="display: flex; justify-content: center; align-items: flex-end; height: 150px; border-bottom: 2px solid #0E1C42; border-left: 2px solid #0E1C42; max-width: 460px; margin: 0 auto;"><div style="flex: 1; height: 11.1%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 22.2%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">2</div><div style="flex: 1; height: 44.4%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">4</div><div style="flex: 1; height: 100.0%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">9</div><div style="flex: 1; height: 88.9%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">8</div><div style="flex: 1; height: 44.4%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">4</div><div style="flex: 1; height: 22.2%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">2</div><div style="flex: 1; height: 33.3%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">3</div></div>
+<div style="display: flex; max-width: 460px; margin: 0 auto;"><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">10</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">20</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">30</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">40</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">50</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">60</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">70</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">80</div><div style="font-size: 12px; color: #1a2340;">90</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Horizontal axis: value; bars include the left endpoint.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading it.</strong> One hump, in the 40s and 50s, with a small tail trailing off to the right. Set A is roughly symmetric around its single peak.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127917; BIN WIDTH IS A CHOICE &mdash; AND CHOICES CAN HIDE THINGS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The histogram has a setting that the other displays do not: the bin width. The same data with narrower bins looks bumpier; with wider bins it smooths out. Here is Set A again with bins of width 5:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Set A (constructed), bin width 5</strong></div>
+<div style="display: flex; justify-content: center; align-items: flex-end; height: 150px; border-bottom: 2px solid #0E1C42; border-left: 2px solid #0E1C42; max-width: 460px; margin: 0 auto;"><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 0.0%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;"></div><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 33.3%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">2</div><div style="flex: 1; height: 33.3%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">2</div><div style="flex: 1; height: 66.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">4</div><div style="flex: 1; height: 83.3%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">5</div><div style="flex: 1; height: 100.0%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">6</div><div style="flex: 1; height: 33.3%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">2</div><div style="flex: 1; height: 50.0%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">3</div><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 16.7%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">1</div><div style="flex: 1; height: 33.3%; background: #2196D0; border-right: 1px solid #fff; color: #fff; font-size: 13px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">2</div></div>
+<div style="display: flex; max-width: 460px; margin: 0 auto;"><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">10</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">15</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">20</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">25</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">30</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">35</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">40</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">45</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">50</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">55</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">60</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">65</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">70</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">75</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">80</div><div style="flex: 1; text-align: left; font-size: 12px; color: #1a2340; margin-left: -6px;">85</div><div style="font-size: 12px; color: #1a2340;">90</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Same 33 values; narrower bins.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Neither picture is wrong, but each tells the story at a different resolution. Too-wide bins can erase a real feature; too-narrow bins can make random wobble look like structure. An honest histogram says what bin width it used, and a careful reader tries more than one. The Histogram and Box Plot widget below lets you drag the bin width and watch.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128230; THE FIVE-NUMBER SUMMARY AND THE BOX PLOT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The <strong>five-number summary</strong> is the minimum, the first quartile \(Q_1\), the median, the third quartile \(Q_3\), and the maximum. The <strong>quartiles</strong> cut the ordered data into four parts holding about a quarter of the values each. The <strong>box plot</strong> draws them: a box from \(Q_1\) to \(Q_3\), a line inside at the median, and lines (whiskers) out to the minimum and maximum.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>How to find the quartiles by hand</strong> (the &ldquo;median of each half&rdquo; method): order the data; find the median; split the data into a lower half and an upper half &mdash; <em>leaving out the median itself when the number of values is odd</em>; then \(Q_1\) is the median of the lower half and \(Q_3\) the median of the upper half.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example, small set.</strong> Eleven puzzle times in minutes (<em>constructed</em>): 3, 5, 6, 6, 8, 9, 11, 12, 14, 15, 21. There are 11 values, so the median is the 6th: <strong>9</strong>. The lower half (without the 9) is 3, 5, 6, 6, 8, whose median is <strong>6</strong>. The upper half is 11, 12, 14, 15, 21, whose median is <strong>14</strong>. Five-number summary: <strong>3, 6, 9, 14, 21</strong>. The <strong>interquartile range</strong>, \(\text{IQR} = Q_3 - Q_1 = 14 - 6 = 8\), is the width of the box &mdash; the span of the middle half of the data.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Puzzle times (constructed)</strong></div>
+<div style="position: relative; height: 54px; max-width: 460px; margin: 0 auto;"><div style="position: absolute; left: 12.0%; width: 72.0%; top: 26px; border-top: 2px solid #0E1C42;"></div><div style="position: absolute; left: 12.0%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 84.0%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 24.0%; width: 32.0%; top: 8px; height: 38px; background: #E8F6FB; border: 2px solid #0E1C42; box-sizing: border-box;"></div><div style="position: absolute; left: 36.0%; top: 8px; height: 38px; border-left: 3px solid #C7922C;"></div></div><div style="position: relative; height: 18px; max-width: 460px; margin: 0 auto; border-top: 1px solid #D0D9E8;"><div style="position: absolute; left: 12.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">3</div><div style="position: absolute; left: 24.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">6</div><div style="position: absolute; left: 36.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">9</div><div style="position: absolute; left: 56.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">14</div><div style="position: absolute; left: 84.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">21</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Box from Q1 to Q3; gold line is the median; whiskers reach the minimum and maximum.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example, Set A.</strong> Set A has 33 values, so the median is the 17th, which is 50. The lower half is the first 16 values and the upper half the last 16. Their medians are 40 and 60. Five-number summary: <strong>12, 40, 50, 60, 88</strong>.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 8px;"><strong>Set A (constructed)</strong></div>
+<div style="position: relative; height: 54px; max-width: 460px; margin: 0 auto;"><div style="position: absolute; left: 12.0%; width: 76.0%; top: 26px; border-top: 2px solid #0E1C42;"></div><div style="position: absolute; left: 12.0%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 88.0%; top: 16px; height: 22px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 40.0%; width: 20.0%; top: 8px; height: 38px; background: #E8F6FB; border: 2px solid #0E1C42; box-sizing: border-box;"></div><div style="position: absolute; left: 50.0%; top: 8px; height: 38px; border-left: 3px solid #C7922C;"></div></div><div style="position: relative; height: 18px; max-width: 460px; margin: 0 auto; border-top: 1px solid #D0D9E8;"><div style="position: absolute; left: 12.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">12</div><div style="position: absolute; left: 40.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">40</div><div style="position: absolute; left: 50.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">50</div><div style="position: absolute; left: 60.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">60</div><div style="position: absolute; left: 88.0%; transform: translateX(-50%); font-size: 13px; color: #1a2340; padding-top: 2px;">88</div></div><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Five-number summary 12, 40, 50, 60, 88.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><em>A note on conventions.</em> Spreadsheets and calculators sometimes compute quartiles by a slightly different rule, and for some datasets the answers differ a little. For Set A the two rules agree. We will study the difference carefully in Week 22; for now, use the median-of-each-half method and state that you did.</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#128269; THE SURPRISE &mdash; ONE BOX PLOT, TWO DIFFERENT SHAPES</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">There is a second dataset, Set B, also with 33 values on the same scale. Its five-number summary is <strong>exactly the same</strong>: 12, 40, 50, 60, 88. So the two box plots are identical. But Set B is not one hump. Counted in bins of width 5, its middle looks like <em>two clusters</em> &mdash; 8 values in [40, 45) and 15 across [55, 70), with only 1 value in each of [45, 50) and [50, 55). <strong>A box plot cannot show this.</strong> It hides gaps and clusters inside the box. A histogram shows them. That is why you rarely trust one display alone.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Histogram and Box Plot, Side by Side</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>(1)</strong> Start with the preset &ldquo;Set A: one hump,&rdquo; then switch to &ldquo;Set B: two clusters.&rdquo; Compare the two box plots, then the two histograms. <strong>(2)</strong> For Set B, drag the bin-width slider up to 10 and watch the two clusters blur together. What does that teach you about bin width? <strong>(3)</strong> Hover over a bar to see which values it holds and where they sit on the box plot. <strong>(4)</strong> Ignore the outlier-fence setting for now; we meet it in Week 22. Use &ldquo;Median of each half&rdquo; for the quartile toggle.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/histogram-boxplot.html" width="100%" height="900" style="border: none; display: block;" title="Histogram and Box Plot, Side by Side" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/histogram-boxplot.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: COUNTIFS BUILDS THE HISTOGRAM TABLE</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            Last lesson you used COUNTIF to count how many cells equal a value. A histogram needs to count how many cells fall <em>between</em> two values &mdash; two conditions at once, which is <strong>COUNTIFS</strong> (the same idea with an S). Recipe for Set A:<br /><br /><strong>1.</strong> New sheet. In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code>; in <strong>A2:A34</strong> type the 33 values of Set A.<br /><strong>2.</strong> In <strong>C1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lower</code>, <strong>D1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Upper</code>, <strong>E1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Frequency</code>. In <strong>C2:C9</strong> type 10, 20, 30, &hellip; 80. In <strong>D2:D9</strong> type 20, 30, 40, &hellip; 90.<br /><strong>3.</strong> Click <strong>E2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS($A$2:$A$34,"&gt;="&amp;C2,$A$2:$A$34,"&lt;"&amp;D2)</code> and press <strong>Enter</strong>. The first condition says &ldquo;at least the lower edge&rdquo;; the second says &ldquo;less than the upper edge&rdquo; &mdash; exactly the left-in, right-out rule. You should see <strong>1</strong>.<br /><strong>4.</strong> Drag the fill handle down to <strong>E9</strong>. Your column should read 1, 2, 4, 9, 8, 4, 2, 3.<br /><strong>5.</strong> In <strong>E10</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(E2:E9)</code>: the total check, which must equal 33 (and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A34)</code> should also give 33). If the total is 32 or fewer, a value falls outside every bin &mdash; extend the table.<br /><br />You build the actual Excel chart from this table in Week 21. <strong>In Desmos</strong>, the median of an even-sized set is one line: for the twelve puzzle times below, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(22+23)/2</code> &rarr; 22.5.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Give an AI tool this list of counts in bins of width 10 starting at 20 and ask it to describe the histogram's shape: <em>[20,30): 2; [30,40): 4; [40,50): 6; [50,60): 6; [60,70): 3; [70,80): 2; [80,90): 1.</em><br />
+            <strong>Predict.</strong> Sketch the bars first. Heights rise to a peak over 40&ndash;60 and fall away on both sides: one hump, roughly symmetric, with the right side trailing off a little longer than the left.<br />
+            <strong>Verify.</strong> Compare the AI's description with your sketch. Did it name the right peak? Did it call the shape symmetric, skewed left, or skewed right &mdash; and does your picture support that? Language tools often swap &ldquo;left-skewed&rdquo; and &ldquo;right-skewed&rdquo; (the tail's direction names the skew, not where the peak is). Mark every claim of its that your picture does not support.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Bin It</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Twenty-four students report their minutes of daily reading (<em>constructed</em>): 22, 25, 31, 34, 36, 38, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 58, 61, 64, 67, 72, 75, 83. Make a frequency table with bins of width 10 starting at 20, using left-in, right-out. Check that the frequencies total 24.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Draw the histogram and describe its shape in two sentences.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Bins [20,30) through [80,90): 2, 4, 6, 6, 3, 2, 1 &mdash; total 24. One hump over 40&ndash;60, roughly symmetric, with the right side trailing off slightly longer. (The Excel COUNTIFS formula should reproduce these seven counts.)
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">By the Halves</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find the five-number summary and IQR for the 11 puzzle times above (3, 5, 6, 6, 8, 9, 11, 12, 14, 15, 21) as a check on the lesson, then for these twelve (<em>constructed</em>): 14, 16, 17, 19, 20, 22, 23, 25, 26, 28, 31, 35.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Explain to a partner what changes in the method when the number of values is even instead of odd.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Eleven values: 3, 6, 9, 14, 21; IQR 8. Twelve values: the median is the average of the 6th and 7th, (22 + 23)/2 = 22.5. Lower half 14, 16, 17, 19, 20, 22 has median (17 + 19)/2 = 18; upper half 23, 25, 26, 28, 31, 35 has median (26 + 28)/2 = 27. Summary: 14, 18, 22.5, 27, 35; IQR = 27 &minus; 18 = 9. With an even count no value is left out; the halves split evenly.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Same Box, Different Story</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the widget to compare Set A and Set B. Write what the two box plots tell you that is the same, and what only the histograms can tell you.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Which bin width makes Set B's two clusters easiest to see, 5 or 10? Say why, in a sentence a classmate would believe.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Same: both have minimum 12, quartiles 40 and 60, median 50, maximum 88 &mdash; the middle half spans the same 20 units. Only histograms show that Set A has one hump while Set B has two clusters with a thin middle (1 value in each of [45,50) and [50,55)). With width 5 the dip is visible; width 10 pushes the middle into bins of 9, 6, and 10 and the dip largely disappears.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 20.2 &mdash; Bars That Touch</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: build a histogram table by hand and with COUNTIFS, find five-number summaries, and explain what a box plot hides. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 20.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on histograms, bin rules, quartiles, the IQR, and box plots.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 20.3 &mdash; Choosing the Right Display</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Six displays on the table. How do you decide which one to use &mdash; and when would a good statistician use two?</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 20.2 &middot; Histograms and Box Plots</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

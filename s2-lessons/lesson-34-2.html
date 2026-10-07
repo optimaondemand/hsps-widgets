@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 34.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 34.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Honest numbers for the common good</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 34.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Comparing Two Treatments in a Randomized Experiment</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">When chance alone deals the groups, how big a gap is too big to blame on luck?</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Random assignment and what it allows you to say; shuffling the group labels to build a world where the treatment does nothing; counting the shuffles at least as extreme as the gap we saw; a rule of thumb of 5 in 100; the same gap with different spread; what a verdict does not tell you</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Two-Sample Compare interactive, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes: roughly 40 minutes for reading, examples, the interactive, and the Excel steps, and about 35 minutes for the activities.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why <strong>random assignment</strong> lets a gap that chance alone would rarely produce be credited to the treatment, and what it still does not let you say.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe a <strong>shuffle</strong> of the group labels as a world where the treatment does nothing, and use a pile of shuffled gaps to find how often <strong>chance alone</strong> makes a gap at least as big as the observed one, in either direction.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> apply the rule of thumb &ldquo;unusual if fewer than about 5 in every 100 shuffles&rdquo; and explain why the same gap can be convincing with tightly packed data and unconvincing with scattered data.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> write an honest conclusion that separates what chance can explain, what random assignment lets you say about cause, and what an unremarkable result does <strong>not</strong> show.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up gardening club plants 24 seedlings. By a random draw, 12 get fertilizer A and 12 get fertilizer B. After the same growing time, the B seedlings average <strong>10.30 cm</strong> and the A seedlings <strong>8.91 cm</strong>. B is ahead by about 1.4 cm. Is fertilizer B really better, or did B simply land the luckier seedlings?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Lesson 34.1 you compared two populations by taking a random sample from each, and you built a plausible range for the true difference. Today the setting is different. We have <em>one</em> set of subjects, and we split them into two groups by chance. The question is no longer &ldquo;how big is the difference between two populations?&rdquo; but &ldquo;<strong>could chance alone, the luck of who landed in which group, produce a gap this big?</strong>&rdquo; We will answer it by <em>simulation</em>: we will build the world where the fertilizer does nothing and see how big a gap luck alone makes.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, appears here as honesty toward the people who will use your result. A gardener, a school board, and a clinic all want to know whether a treatment works. Telling them &ldquo;this gap is bigger than luck explains&rdquo; when it is, and &ldquo;the data cannot tell us yet&rdquo; when it is not, is a real service, even when the second answer is less exciting.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every dataset in this lesson is <strong>made up</strong> (constructed) or <strong>simulated</strong> by a computer. None of it is real research data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; RANDOM ASSIGNMENT: WHY IT MATTERS, AND WHAT IT LEAVES OPEN</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In an <strong>experiment</strong>, the researcher decides who gets which treatment. In a <strong>randomized experiment</strong>, chance makes that decision, with a coin flip, a random draw, or a computer shuffle. Seedlings differ in many ways: how sturdy they were, where they sat, things nobody thought to measure. Random assignment tends to spread all of those differences across the two groups, so that, on average, neither group has the edge before the treatment starts. That is why, in Module 11, randomization was the step that makes a claim about <em>cause</em> possible.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Notice the words <em>tends</em> and <em>on average</em>. Random assignment does <strong>not</strong> make the two groups identical. By luck of the draw, one group may get a few more sturdy seedlings. So even if the two fertilizers were exactly the same, we would still expect the two group means to differ a little. Only gaps that are bigger than that luck-sized wobble point toward the treatment.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">That gives the whole plan of the lesson in three steps: (1) measure the observed gap, B minus A; (2) find out how large a gap <em>chance alone</em> makes when the groups are formed this way; (3) compare. The interactive has a box titled <em>Which tab fits?</em>. It says: if you have <strong>two random samples of two populations</strong>, you want to estimate the difference, and you use the first tab (Lesson 34.1). If you have <strong>one set of subjects split by random assignment into two treatments</strong>, you want to know whether chance alone could explain the gap, and you use the second tab, <em>Randomized experiment</em>. Today lives on the second tab.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128256; SHUFFLE THE LABELS: BUILD THE BORING WORLD</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Suppose, just for a moment, that the fertilizer makes <strong>no difference at all</strong>. In that world each seedling would have grown to the same height whichever fertilizer it received, and the labels A and B are just names we tossed on at random. Then the heights we measured would be the same, and only the label-sorting would be left to chance. Call this the <strong>boring world</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">We can act it out. Pool all 24 measured heights into one list. <strong>Shuffle</strong> the pool, deal the first 12 heights into a pretend group A and the other 12 into a pretend group B, and compute the gap, B minus A. Record it. Then shuffle again, and again, thousands of times. Every shuffle is one way the luck of the draw could have fallen if the treatment did nothing, so the pile of shuffled gaps shows what <strong>chance alone</strong> produces.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now look where our real gap sits in that pile. If it lands in the middle, chance makes gaps like ours all the time. If it lands far out in a thin tail, chance alone rarely makes a gap that big. We count the shuffles whose gap is <strong>at least as big as ours, in either direction</strong> (our gap or bigger, and the mirror image, our gap in the other direction or bigger), and divide by the number of shuffles. We count both directions because a gap of that size the other way would have impressed us just as much, so luck gets credit for both.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">How small must that share be before we call the gap <strong>unusual</strong>? A common convention, which the interactive lets you adjust, is: <strong>fewer than about 5 of every 100 shuffles</strong>. It is a convention, a place people agreed to draw a line, not a law of nature. Lesson 34.3 looks at where it comes from and what it does and does not tell you.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: DO THE SEEDLINGS PASS THE SHUFFLE TEST?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> In the made-up seedling experiment, 12 seedlings were randomly assigned to each fertilizer. Heights in cm: A: 8.1, 9.4, 7.8, 10.2, 8.9, 9.0, 7.5, 9.7, 8.4, 10.0, 8.8, 9.1. B: 10.3, 9.8, 11.2, 9.5, 10.9, 8.7, 11.6, 10.1, 9.9, 12.0, 10.4, 9.2. Find the observed gap, then use shuffles to decide whether chance alone could plausibly explain it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> First the gap. The A heights add to 106.9, so the A mean is 106.9 &divide; 12 = 8.908. The B heights add to 123.6, so the B mean is 123.6 &divide; 12 = 10.300. The observed gap, B minus A, is 10.300 &minus; 8.908 = <strong>+1.392 cm</strong>. The spreads are modest: the standard deviations are about 0.85 cm (A) and 0.98 cm (B), so most seedlings in each group are within about a centimeter of their group&rsquo;s mean.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now the boring world. A computer script (fixed starting seed, so the run can be repeated) pooled the 24 heights and shuffled them 10,000 times, each time computing B minus A. Here is the pile.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="background: #F8F9FA; border: 1px solid #D0D9E8; border-radius: 8px; padding: 12px; margin-bottom: 14px;"><svg viewBox="0 0 640 260" width="100%" style="max-width: 640px; display: block; margin: 0 auto;" role="img" aria-label="Histogram of 10000 shuffled gaps in mean seedling height. The gaps pile up in a bell shape centered at 0, ranging from about minus 1.5 to plus 1.6. Gold lines mark the observed gap of plus 1.39 and its mirror image minus 1.39. Only 13 of the 10000 shuffles landed at or beyond the gold lines."><rect x="0" y="0" width="640" height="260" fill="#FFFFFF"/><rect x="72.2" y="189.6" width="32.2" height="0.4" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="88.3" y="185.6" font-size="10" text-anchor="middle" fill="#1a2340">5</text><rect x="104.4" y="188.0" width="32.2" height="2.0" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="120.6" y="184.0" font-size="10" text-anchor="middle" fill="#1a2340">23</text><rect x="136.7" y="180.2" width="32.2" height="9.8" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="152.8" y="176.2" font-size="10" text-anchor="middle" fill="#1a2340">112</text><rect x="168.9" y="164.9" width="32.2" height="25.1" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="185.0" y="160.9" font-size="10" text-anchor="middle" fill="#1a2340">288</text><rect x="201.1" y="141.7" width="32.2" height="48.3" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="217.2" y="137.7" font-size="10" text-anchor="middle" fill="#1a2340">554</text><rect x="233.3" y="104.5" width="32.2" height="85.5" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="249.4" y="100.5" font-size="10" text-anchor="middle" fill="#1a2340">981</text><rect x="265.6" y="70.0" width="32.2" height="120.0" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="281.7" y="66.0" font-size="10" text-anchor="middle" fill="#1a2340">1377</text><rect x="297.8" y="50.1" width="32.2" height="139.9" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="313.9" y="46.1" font-size="10" text-anchor="middle" fill="#1a2340">1605</text><rect x="330.0" y="50.0" width="32.2" height="140.0" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="346.1" y="46.0" font-size="10" text-anchor="middle" fill="#1a2340">1606</text><rect x="362.2" y="66.6" width="32.2" height="123.4" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="378.3" y="62.6" font-size="10" text-anchor="middle" fill="#1a2340">1416</text><rect x="394.4" y="104.3" width="32.2" height="85.7" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="410.6" y="100.3" font-size="10" text-anchor="middle" fill="#1a2340">983</text><rect x="426.7" y="136.6" width="32.2" height="53.4" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="442.8" y="132.6" font-size="10" text-anchor="middle" fill="#1a2340">613</text><rect x="458.9" y="163.2" width="32.2" height="26.8" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="475.0" y="159.2" font-size="10" text-anchor="middle" fill="#1a2340">308</text><rect x="491.1" y="181.6" width="32.2" height="8.4" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="507.2" y="177.6" font-size="10" text-anchor="middle" fill="#1a2340">96</text><rect x="523.3" y="187.8" width="32.2" height="2.2" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="539.4" y="183.8" font-size="10" text-anchor="middle" fill="#1a2340">25</text><rect x="555.6" y="189.4" width="32.2" height="0.6" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="571.7" y="185.4" font-size="10" text-anchor="middle" fill="#1a2340">7</text><rect x="587.8" y="189.9" width="32.2" height="0.1" fill="#0E1C42" stroke="#FFFFFF" stroke-width="1"/><text x="603.9" y="185.9" font-size="10" text-anchor="middle" fill="#1a2340">1</text><line x1="40" y1="190" x2="620" y2="190" stroke="#0E1C42" stroke-width="2"/><line x1="40.0" y1="190" x2="40.0" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="40.0" y="212" font-size="13" text-anchor="middle" fill="#1a2340">&#8722;1.8</text><line x1="136.7" y1="190" x2="136.7" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="136.7" y="212" font-size="13" text-anchor="middle" fill="#1a2340">&#8722;1.2</text><line x1="233.3" y1="190" x2="233.3" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="233.3" y="212" font-size="13" text-anchor="middle" fill="#1a2340">&#8722;0.6</text><line x1="330.0" y1="190" x2="330.0" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="330.0" y="212" font-size="13" text-anchor="middle" fill="#1a2340">0</text><line x1="426.7" y1="190" x2="426.7" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="426.7" y="212" font-size="13" text-anchor="middle" fill="#1a2340">0.6</text><line x1="523.3" y1="190" x2="523.3" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="523.3" y="212" font-size="13" text-anchor="middle" fill="#1a2340">1.2</text><line x1="620.0" y1="190" x2="620.0" y2="196" stroke="#0E1C42" stroke-width="1.5"/><text x="620.0" y="212" font-size="13" text-anchor="middle" fill="#1a2340">1.8</text><text x="330" y="236" font-size="14" text-anchor="middle" fill="#0E1C42">Shuffled gap in mean height, B minus A (cm)</text><line x1="553.9" y1="30" x2="553.9" y2="190" stroke="#C7922C" stroke-width="2.5" /><line x1="106.1" y1="30" x2="106.1" y2="190" stroke="#C7922C" stroke-width="2.5" stroke-dasharray="6 4"/><text x="523.9" y="22" font-size="12" text-anchor="middle" fill="#8a6218">observed gap +1.39</text><text x="136.1" y="22" font-size="12" text-anchor="middle" fill="#8a6218">mirror image &#8722;1.39</text></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 6px;">Simulated data: 10,000 shuffles of the 24 made-up seedling heights. Each bar counts the shuffles in a 0.2 cm bin. Gold lines: the gap we saw (+1.39, solid) and its mirror image (dashed).</div></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The pile is a bell shape centered at 0, as it should be: in the boring world there is no reason for B to beat A or the reverse. A typical shuffled gap is about 0.5 cm in either direction (the spread of the 10,000 gaps is 0.46 cm), and the biggest in this run was +1.61 and the smallest &minus;1.53. Our gap of 1.39 sits right out at the edge. Only <strong>8</strong> of the 10,000 shuffles gave a gap of +1.39 or more, and <strong>5</strong> gave &minus;1.39 or less, so <strong>13</strong> shuffles in all were at least as big in either direction. That is 13 &divide; 10,000 = <strong>0.0013</strong>, about 1 shuffle in 1,000. (A count of every one of the 2,704,156 ways to split the 24 seedlings into two groups of 12 gives 0.0014, so the simulation is close, and your own interactive run will wobble a little, which is why we say &ldquo;about.&rdquo;)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> The observed gap is about <strong>+1.39 cm</strong>. Chance alone would make a gap this big only about <strong>1 time in 1,000</strong>, far below the 5-in-100 rule of thumb, so the gap is <strong>unusual</strong>. Because the seedlings were randomly assigned, we may say fertilizer B <em>caused</em> the taller growth <em>in these seedlings</em>. Whether the 1.4 cm matters to a gardener is a separate question that the shuffles do not answer.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#128256; Try It Yourself: Two-Sample Compare (Randomized experiment tab)</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Six tasks.</strong> This page is tall (about 1800 to 1850 pixels at this width), so on a phone you may need to scroll a little inside or beside the frame. <strong>(1)</strong> In section 1, <em>Choose the data</em>, leave <em>Outcome is Yes/No</em> unchecked and pick the plant growth data set about two fertilizers (every data set is made up). In section 2, <em>Look at the two groups</em>, find the blue circles (A) and orange squares (B), the dashed mean lines, and <em>Observed difference in means (B minus A)</em>. It should read about 1.39. <strong>(2)</strong> Read the box <em>Which tab fits?</em> and click the tab <strong>Randomized experiment</strong>, because this is one set of seedlings split by random assignment. <strong>(3)</strong> In section 3, <em>Shuffle the group labels</em>, press <em>Shuffle 1</em> a few times and watch the pretend groups change, then press <em>Shuffle 10</em>, <em>Shuffle 100</em>, and <em>Shuffle 1000</em>, and watch <em>Shuffles so far</em> grow. <strong>(4)</strong> Read the picture with its legend: <em>Gaps smaller than the one we saw</em>, <em>Gaps at least as big, in either direction</em>, and the gold line (our observed gap) with its dashed mirror image. How many of the thousand shuffles were at least as big as ours? Expect almost none. <strong>(5)</strong> Find the adjustable rule of thumb (&ldquo;call a gap unusual if chance alone makes one this big in fewer than about 5 of every 100 shuffles&rdquo;). Try the other data sets: quiz scores for two study methods (expect a share of about 0.015), barely a difference (about 0.76), and clear difference (essentially none). Then check <em>Outcome is Yes/No</em> and try the seeds-sprouting data set about two soil mixes (about 0.20). <strong>(6)</strong> Read the <em>Keep in mind</em> box and write one sentence about what these tools do not repair. Your numbers will differ a little each run, because the shuffles are random.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/two-sample-compare.html" width="100%" height="1850" style="border: none; display: block;" title="Two-Sample Compare" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/two-sample-compare.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is tall, so you may need a small scroll.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: SEEDS THAT SPROUT, A YES-OR-NO OUTCOME</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up gardening class sows 40 seeds. By random assignment, 20 go into soil mix A and 20 into soil mix B. After the same time, <strong>9 of the 20</strong> seeds in mix A sprouted and <strong>14 of the 20</strong> in mix B. Is that gap more than chance alone would produce?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> The outcome is Yes or No, so the statistic is a difference of proportions. Mix A: 9 &divide; 20 = 0.45. Mix B: 14 &divide; 20 = 0.70. The observed gap, B minus A, is 0.70 &minus; 0.45 = <strong>+0.25</strong>, a 25-point difference. That looks big. But there are only 20 seeds per group, so each seed moves a proportion by 0.05, and small groups wobble a lot.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The boring world says the soil mix does nothing, so the 40 seeds were going to give 23 sprouts and 17 non-sprouts whichever mix they went into. Shuffle: take 23 &ldquo;sprouted&rdquo; and 17 &ldquo;did not&rdquo; labels, deal them at random into two groups of 20, compute the gap in sprout proportions, record it, and repeat. A count of every possible deal gives a share at least as big in either direction of <strong>0.200</strong>, and a simulation of thousands of shuffles lands close to that. Said in words: about <strong>20 of every 100</strong> shuffles produce a gap of 0.25 or more in one direction or the other.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> About 0.20 is far above the 5-in-100 rule of thumb, so the gap is <strong>not unusual</strong>: chance alone makes a 25-point gap about one time in five here. The data do <em>not</em> show that mix B is better. They also do <em>not</em> show that the mixes are the same. With only 20 seeds in each group the experiment simply could not tell, and a bigger experiment would be needed to find out.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: THE SAME GAP, DIFFERENT SPREAD</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Two made-up experiments each randomly assigned 16 people to two groups of 8, and in both the B mean beat the A mean by exactly 6 points. Does the same gap mean the same strength of evidence?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> With 8 people per group there are only 12,870 ways to split the 16 scores into two groups of 8, so a computer can count <em>every</em> one instead of sampling shuffles. For each experiment I count the splits whose gap is 6 or more in either direction, then divide by 12,870.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 760px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Experiment</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Group A scores</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Group B scores</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Means (A, B)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">SDs (A, B)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Gap (B &minus; A)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Share of shuffles at least as big</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Tightly packed</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">48, 50, 51, 49, 52, 50, 51, 49</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">54, 56, 57, 55, 58, 56, 57, 55</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">50, 56</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.3, 1.3</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+6</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2 of 12,870 splits (about 0.0002)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Widely scattered</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">35, 60, 44, 58, 42, 66, 40, 63</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">41, 70, 45, 64, 52, 72, 43, 69</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">51, 57</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">12.0, 13.1</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+6</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4,608 of 12,870 splits (about 0.36)</td></tr></tbody></table></div></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In the tightly packed experiment, every A score sits within a couple of points of 50 and every B score within a couple of points of 56. Mixing the scores and dealing them out again almost never recreates a clean 6-point split: only 2 of the 12,870 ways do, so chance alone would make this gap about 2 times in 10,000. In the scattered experiment, scores run from the thirties to the seventies in <em>both</em> groups, so shuffling the labels easily makes gaps of 6 points or more in either direction: about 36 shuffles in every 100.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> The same gap of 6 is <strong>very unusual</strong> when scores are tightly packed (about 0.0002) and <strong>not unusual at all</strong> when they are scattered (about 0.36). The lesson: judge a gap <em>relative to the spread of the data</em>. A big gap against a small spread is convincing; the same gap against a large spread may be nothing but luck.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128202; PUTTING THE VERDICTS SIDE BY SIDE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here are the five made-up experiments from the interactive. Notice that the verdict depends on the <em>share</em>, not on whether the raw gap looks large to your eye. Because shuffles are random, run-to-run results move a little, which is why every share says &ldquo;about.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 640px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Data set (all made up)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Observed gap (B &minus; A)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Share of shuffles at least as big, either direction</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Verdict by the 5-in-100 rule</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Plant growth, two fertilizers (12 each)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+1.39 cm</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 0.001</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Unusual</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Quiz scores, two study methods (15 each)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+6.07 points</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 0.015</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Unusual</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Seeds sprouting, two soil mixes (20 each)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+0.25 (as a proportion)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 0.20</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Not unusual</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Barely a difference (20 each)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+0.40</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 0.76</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Not unusual</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Clear difference (10 each)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">+15.0</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">essentially 0 (0 of 20,000 shuffles)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Unusual</td></tr></tbody></table></div></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The quiz-score row is the useful borderline: about 0.015 is under 0.05, but only by a few hundredths of a whole. A different random run of shuffles would land nearby, so the verdict is steady. If a share came out near 0.05, honest reporting would say it is a close call rather than pretend the line is sharp. And the &ldquo;clear difference&rdquo; row says 0 of 20,000 because the true share is tiny, about 2 in 184,756 splits (about 0.00001). A share of 0 in a run does not mean chance can <em>never</em> do it; it means fewer than about 1 in 20,000.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; WHAT A VERDICT DOES AND DOES NOT TELL YOU</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>It can support a cause, in these subjects.</strong> When subjects were randomly assigned and the gap is unusual, we have a good reason to say the treatment caused the difference <em>for the subjects in the study</em>, because random assignment has taken away the usual rival explanations.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>It does not by itself reach beyond the subjects.</strong> Random assignment answers &ldquo;did the treatment cause the gap?&rdquo; Random <em>sampling</em> from a larger population answers &ldquo;do the results apply to that population?&rdquo; You met these as two separate questions in Module 11. A made-up study of 40 volunteers at one school, randomly assigned, can support a cause claim about those volunteers, and a claim about every student needs more than shuffles can give.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A not-unusual gap does not show &ldquo;no effect.&rdquo;</strong> In Worked Example 2, the data did not rule out chance, but 20 seeds per group is a small, noisy test. A real effect can hide in a small or scattered experiment. The honest sentence is &ldquo;this experiment could not tell,&rdquo; not &ldquo;the treatment does nothing.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>It does not repair a flawed design, and it does not measure importance.</strong> Shuffling assumes the groups were formed by random assignment. If people chose their own groups, the shuffle logic does not apply and other differences may explain the gap. And a small share says the gap is probably not luck, not that it is large or worth acting on. Real studies often use a formula-based method for the same job, one you may meet later; the shuffle shows the idea behind it.</div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#9888;&#65039; THREE COMMON MISCONCEPTIONS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>&ldquo;The share was 0.38, so the treatment has no effect.&rdquo;</strong> No. It means chance alone often makes a gap this big, so this experiment does not show an effect. It does not show there is none.<br />
+            <strong>&ldquo;The share was 0.001, so there is only a 0.1% chance the fertilizer does nothing.&rdquo;</strong> No. The share is how often <em>chance alone</em> (the boring world) would make a gap this big. It is not the probability that the fertilizer works or fails.<br />
+            <strong>&ldquo;It was a randomized experiment, so the result applies to everyone.&rdquo;</strong> Not necessarily. Random assignment supports a cause claim for the subjects studied; applying it to a wider population depends on how the subjects were chosen.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: THE GAP, AND A COUNT OF SHUFFLES AT LEAST AS BIG, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build two small things: a summary of the seedling gap, and a count of how many listed shuffles are at least as big as a gap. Everything is made up. This is a practice build; you do not upload it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk34_L2_YourName</code>. Rename the first sheet <strong>Seedlings</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Type the headings. In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">B</code>. Type the 12 A heights into <strong>A2:A13</strong> (8.1, 9.4, 7.8, 10.2, 8.9, 9.0, 7.5, 9.7, 8.4, 10.0, 8.8, 9.1) and the 12 B heights into <strong>B2:B13</strong> (10.3, 9.8, 11.2, 9.5, 10.9, 8.7, 11.6, 10.1, 9.9, 12.0, 10.4, 9.2).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Build the summary table. In <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n</code>, in <strong>D3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code>, in <strong>D4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">SD</code>, and in <strong>D5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Gap (B minus A)</code>. In <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A</code> and in <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">B</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A13)</code> and in <strong>F2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(B2:B13)</code>. In <strong>E3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A13)</code> and in <strong>F3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(B2:B13)</code>. In <strong>E4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(A2:A13)</code> and in <strong>F4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(B2:B13)</code>. You should see 12 and 12, then about <strong>8.908</strong> and <strong>10.300</strong>, then about <strong>0.848</strong> and <strong>0.983</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F3-E3</code> and press Enter. It should show about <strong>1.392</strong>. (To show three decimals, select E3:F5 and on the <strong>Home</strong> tab, <strong>Number</strong> group, click <strong>Increase Decimal</strong> as needed.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Now the counting practice. Click the <strong>+</strong> at the bottom to add a new sheet and rename it <strong>Shuffles</strong>. In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Shuffled gap</code>. In <strong>A2:A21</strong> type these 20 shuffled gaps (they are made-up shuffles of the seeds-sprouting data: 9 of 20 against 14 of 20), one per cell, top to bottom: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.05, -0.25, -0.15, 0.35, -0.05, -0.15, -0.15, -0.05, -0.05, 0.15, -0.15, 0.15, 0.15, 0.15, -0.05, 0.35, 0.05, 0.15, 0.05, 0.15</code></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>C1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Observed gap</code> and in <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUND(14/20-9/20,2)</code>. This is the observed gap, 0.70 &minus; 0.45 = 0.25. The ROUND keeps the computer from storing 0.25 as a hair under 0.25, which could make the count skip a value that is exactly equal.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Count at least as big</code> and in <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A2:A21,"&gt;="&amp;C2)+COUNTIF(A2:A21,"&lt;="&amp;-C2)</code>, then press Enter. The first part counts shuffled gaps at or above +0.25 and the second counts those at or below &minus;0.25. You should see <strong>3</strong>. In <strong>E3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Share</code> and in <strong>F3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E2/COUNT(A2:A21)</code>. You should see <strong>0.15</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Check yourself.</strong> Change C2 to 0.35 (a bigger observed gap) and watch the count drop to 2. Only 20 shuffles is far too few to decide anything, because a share built on 20 shuffles is coarse and jumpy; the interactive uses thousands, and for these data it settles near 0.20. The point here is the <em>counting rule</em>: add the tail on each side, and ties count as &ldquo;at least as big.&rdquo;</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; GAPS AND SHUFFLE SHARES IN EXCEL AND DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> Group summaries: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(range)</code>, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(range)</code>. The observed gap is one mean minus the other (B minus A), for example <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F3-E3</code>. To count shuffled gaps at least as big as the observed gap in either direction, with the observed gap in C2 and the shuffled gaps in A2:A21, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A2:A21,"&gt;="&amp;C2)+COUNTIF(A2:A21,"&lt;="&amp;-C2)</code> and divide by the number of shuffles for the share. Wrap a computed gap in <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">ROUND(...,2)</code> before comparing it to typed values.<br />
+            <strong>Desmos Scientific</strong> is plain arithmetic here. A group mean is a sum divided by a count: enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">123.6 &divide; 12</code> to get 10.3, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">106.9 &divide; 12</code> to get 8.9083&hellip;. Subtract to get the gap: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">10.3 &minus; 8.9083</code> is about 1.3917. For proportions, enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">14 &divide; 20 &minus; 9 &divide; 20</code> to get 0.25. A shuffle share is a count divided by the number of shuffles: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">13 &divide; 10000</code> gives 0.0013, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">3 &divide; 20</code> gives 0.15.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI WHETHER A TREATMENT WORKS; CHECK ITS CAUSAL LANGUAGE (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Give an AI tool these made-up facts: <em>&ldquo;A gardening club randomly assigned 24 seedlings, 12 to fertilizer A and 12 to fertilizer B. Mean heights were 8.91 cm (A) and 10.30 cm (B), with standard deviations of about 0.85 and 0.98. In 10,000 shuffles of the group labels, only about 13 gave a gap at least as big as 1.39 cm in either direction. Does fertilizer B work?&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write what a careful answer should say: the gap is about 1.4 cm; about 13 in 10,000 (about 1 in 1,000) is far below the 5-in-100 rule of thumb, so chance alone is an unlikely explanation; because assignment was random, it is fair to say B <em>caused</em> the extra growth <em>in these seedlings</em>; the answer should not claim more than that.<br />
+            <strong>Verify.</strong> Check the AI&rsquo;s number against your own, then grade its language. Did it mention <strong>random assignment</strong> as the reason a cause claim is allowed? Did it mention spread (or the shuffle share) rather than only the two means? Did it overreach, such as &ldquo;fertilizer B works on all plants,&rdquo; or &ldquo;proves&rdquo;? Now ask it a follow-up, <em>&ldquo;What if the shuffle share had been 0.40?&rdquo;</em> and check that it does <strong>not</strong> say &ldquo;so the fertilizer does nothing.&rdquo; Rewrite its weakest sentence so that it is true. <strong>Verdict.</strong> A confident paragraph is not a checked paragraph; the shuffle count and the design are.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 35 minutes, plus the Excel steps and the interactive above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Run, Record</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Copy this table into your notebook. Before you run anything, look at the dot plots for each data set in the interactive (Randomized experiment tab) and <strong>predict</strong> whether the gap will be unusual by the 5-in-100 rule. Then press <em>Shuffle 1000</em> and <strong>record</strong> about how many of every 100 shuffles were at least as big as the gap in either direction.<div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Data set</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">My prediction (unusual or not)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Shuffles at least as big (per 100)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Verdict</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Plant growth, two fertilizers</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Quiz scores, two study methods</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Seeds sprouting, two soil mixes (Yes/No)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Barely a difference</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"></td></tr></tbody></table></div></div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">The plant gap is 1.39 cm and the &ldquo;barely a difference&rdquo; gap is only 0.40, yet raw size is not the whole story. In one or two sentences, use the words <em>gap</em> and <em>spread</em> to say why we compare the gap with the shuffles instead of just looking at the number.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Press <em>Shuffle 1000</em> a second time on the quiz-score data. Did the share move? Did the verdict change? Explain in one sentence, using the words <em>random</em> and <em>chance alone</em>.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. Expected (your numbers will wobble a little): plant about 0.1 per 100 (that is, about 0 to 3 of the 1000 shuffles), unusual; quiz about 1.5 per 100 (roughly 8 to 25 of 1000), unusual; seeds about 20 per 100 (roughly 170 to 230 of 1000), not unusual; barely a difference about 76 per 100, not unusual. 2. Example: &ldquo;A gap is only big or small compared with how much the data scatter. The shuffles show how big a gap luck makes with this much spread, so they tell us whether our gap stands out.&rdquo; 3. Example: &ldquo;The share moved a little because the shuffles are random, but it stayed far below 5 in 100, so the verdict did not change; chance alone makes a gap that big only rarely.&rdquo;</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Judge the Verdict</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Case A.</strong> A made-up sleep-routine experiment randomly assigned students to two routines. In 2,000 shuffles, 34 gave a gap at least as big as the observed gap in either direction.<br /><strong>Case B.</strong> A made-up warm-up experiment. In 1,000 shuffles, 380 were at least as big.<br /><strong>Case C.</strong> A made-up tutoring experiment. In 5,000 shuffles, none were at least as big.<br />For each, find the share and say <em>unusual</em> or <em>not unusual</em> by the 5-in-100 rule.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Error analysis.</strong> A student writes about Case B: &ldquo;The share was 0.38, so the warm-up has no effect on sprint time.&rdquo; Say what is wrong and rewrite the sentence so it is true.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Error analysis.</strong> A made-up school randomly assigned 40 volunteer students to a new reading program or the usual one. The shuffle share was 0.01. A student writes: &ldquo;This proves the program works for all students in the country.&rdquo; Find two problems and rewrite the sentence.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. A: 34 &divide; 2000 = 0.017, so about 1.7 in 100, <strong>unusual</strong>. B: 380 &divide; 1000 = 0.38, so 38 in 100, <strong>not unusual</strong>. C: 0 &divide; 5000 = 0, so unusual (fewer than about 1 in 5,000; careful, not &ldquo;impossible&rdquo;). 2. The share only says chance alone often makes a gap this big, so the experiment does not show an effect. It does not show there is none. Rewrite: &ldquo;Chance alone often produces a gap this big, so this experiment does not show the warm-up changes sprint time; it could not tell.&rdquo; 3. Problems: &ldquo;proves&rdquo; is too strong (a small share says chance alone is an unlikely explanation, not proof); and the volunteers were not a random sample of all students, so the result supports a cause claim only for these volunteers. Rewrite: &ldquo;Because students were randomly assigned and the gap is unusual, the program likely caused higher scores among these volunteers; showing it works for all students would need more evidence.&rdquo;</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Count the Shuffles</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up experiment found an observed gap of <strong>0.9</strong> (B minus A). Here are 20 made-up shuffled gaps, constructed for counting practice and not from a real run: &minus;0.4, 0.2, 0.7, &minus;0.9, 0.1, 1.0, &minus;0.3, 0.5, &minus;1.1, 0.0, 0.3, &minus;0.6, 0.8, &minus;0.2, 0.4, &minus;0.8, 1.2, &minus;0.1, 0.6, &minus;0.5. Count the shuffles at least as big as 0.9 <strong>in either direction</strong>, and find the share.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Suppose the observed gap is in cell B1 and the 20 shuffled gaps are in A2:A21. What Excel formula counts the shuffles at least as big in either direction? (Type it as you would type it in a cell.)</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Count again, this time only in the <em>same direction</em> as the observed gap (0.9 or more). How does the share change? In one sentence, say why we count both directions.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. At 0.9 or more: 1.0 and 1.2 (2 shuffles). At &minus;0.9 or less: &minus;0.9 and &minus;1.1 (2 shuffles). Total 4, share 4 &divide; 20 = <strong>0.20</strong>, not unusual (and 20 shuffles is too few to rely on). 2. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A2:A21,"&gt;="&amp;B1)+COUNTIF(A2:A21,"&lt;="&amp;-B1)</code>. 3. One direction only: 2 &divide; 20 = 0.10, half as big. We count both directions because a gap of that size the other way would have impressed us equally, so chance gets credit for both tails; counting one side alone would make a gap look rarer than it is.</div>
+</details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 34.2 &mdash; Beat Chance, or Not?</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Eight auto-graded items on random assignment, shuffle shares, spread, and honest conclusions, plus a typed Excel formula and a short written conclusion about a made-up experiment. Submit in Canvas; no workbook upload.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 34.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the observed gap, what a shuffle does, counting shuffles, and reading a share.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 34.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will make this shuffle logic general: a &ldquo;boring world,&rdquo; a share at least as extreme, and what a significance verdict does and does not mean.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 34.2 &middot; Comparing Two Treatments in a Randomized Experiment</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

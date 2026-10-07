@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 33.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 33.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Using numbers to help a community decide</div>
+    </div></div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 33.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Confidence Intervals and Confidence Levels</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A single estimate hides how far it could be off. An interval estimate shows it, and the confidence level tells you how reliable the method is.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Interval estimates for a proportion and for a mean (with a known standard deviation); <em>z</em>* for 80%, 90%, 95%, and 99%; what &ldquo;95% confident&rdquo; really means; width versus confidence level and versus sample size; reading an interval next to a benchmark value</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Confidence Interval Simulator, follow the Excel steps, and complete the three activities at the bottom. The reading, interactive, and Excel steps take about 35 minutes and the activities about 40 more, so plan on about 75 minutes in all.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> build an <strong>interval estimate</strong> for a population proportion, <em>p</em>-hat &plusmn; <em>z</em>* &times; SE, and for a population mean with a known standard deviation, <em>x</em>-bar &plusmn; <em>z</em>* &times; <em>&sigma;</em>&divide;&radic;<em>n</em>, using <em>z</em>* = 1.282, 1.645, 1.960, or 2.576 for 80%, 90%, 95%, or 99%.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that a <strong>confidence level</strong> describes the long-run capture rate of the <em>method</em>, and state the correct reading of &ldquo;95% confident&rdquo; while naming three common misreadings.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> predict how an interval changes when the confidence level goes up (wider) or the sample size goes up (narrower; four times the sample gives half the width).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> check the conditions for a proportion interval and read an interval next to a benchmark value (such as 50%) without overclaiming.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Suppose a town board must decide whether to fund a new park. A random poll of 200 residents finds that 56% favor it. The board member who commissioned the poll says, &ldquo;So a majority supports it.&rdquo; Another member says, &ldquo;With only 200 people, that 56% could easily be 50%.&rdquo; Who is right? The honest answer is that a single number cannot settle it. What the board needs is the number <em>and</em> an honest statement of how far off it could be.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In the last two lessons you saw two pieces of that answer. In <strong>Sampling Distributions and the Central Limit Theorem</strong>, you saw that sample estimates pile up in a bell shape around the truth, with a spread called the <strong>standard error</strong> (SE). In <strong>Margin of Error: How Far Can a Poll Miss?</strong>, you turned that spread into a margin of error (MOE). Today you put the two pieces together into a single tool, the <strong>confidence interval</strong>, and you learn exactly what it does and does not promise.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, shows up here. People who make decisions for a community (a school board, a health clinic, a city council) deserve numbers that tell them how much to trust the numbers. An interval is a small act of service: it hands the decision-maker the estimate and its honest limits.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every population, percent, and sample in this lesson is <strong>constructed</strong> (made up) or <strong>simulated</strong> by a computer to teach the idea. None of it is real survey data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; FROM ONE ESTIMATE TO AN INTERVAL ESTIMATE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>point estimate</strong> is a single number from a sample, such as <em>p</em>-hat = 0.56. It is our best single guess, but it almost never equals the true value, because of the sampling variation you studied earlier this module. An <strong>interval estimate</strong> (also called a <strong>confidence interval</strong>) replaces the single guess with a range:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 6px; padding: 12px 18px; text-align: center; font-size: 20px; color: #0E1C42;"><strong>estimate &plusmn; <em>z</em>* &times; SE</strong></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The piece after the &plusmn; sign, <em>z</em>* &times; SE, is the margin of error you met in the last lesson. The number <em>z</em>* (read &ldquo;<em>z</em>-star&rdquo;) says how many standard errors we reach out from the estimate. It is set by the <strong>confidence level</strong> we choose. Here are the four levels you will use, from the normal model you learned in Weeks 25 and 26:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 320px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Confidence level</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"><em>z</em>* (reach out this many SEs)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Excel formula that produces it</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">80%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.282</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV(0.90)</code></td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">90%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.645</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV(0.95)</code></td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">95%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.960</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV(0.975)</code></td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">99%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.576</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV(0.995)</code></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Why those inputs? A level of <em>C</em> leaves (1 &minus; <em>C</em>) in the two tails together, so the upper cut-off has <em>C</em> + half of the leftover below it: <strong>(1 + <em>C</em>) &divide; 2</strong>. For 95% that is (1 + 0.95) &divide; 2 = 0.975, and for 99% it is 0.995.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The standard error depends on what we are estimating.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Proportion:</strong> SE = &radic;( <em>p</em>-hat(1 &minus; <em>p</em>-hat) &divide; <em>n</em> ). We use <em>p</em>-hat because the true <em>p</em> is the very thing we do not know.<br />&#9654; <strong>Mean:</strong> SE = <em>&sigma;</em> &divide; &radic;<em>n</em>, where <em>&sigma;</em> is the population standard deviation. <strong>One honest caution:</strong> in real studies nobody knows <em>&sigma;</em> ahead of time, so statisticians use a slightly different method that gives a slightly wider interval. You will meet that idea later. For now, every mean problem in this course will <em>tell</em> you <em>&sigma;</em>, which keeps the main idea clear.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Conditions to check first.</strong> The method is trustworthy when (1) the data come from a <strong>random sample</strong> (or a randomized experiment), (2) the observations are roughly <strong>independent</strong>, which a sample that is a small part of the population (a common guideline is under about 10%) supports, and (3) for a proportion, both counts are large enough that the normal model fits: <em>n</em> &times; <em>p</em>-hat and <em>n</em> &times; (1 &minus; <em>p</em>-hat) are each <strong>at least 10</strong> (some sources use 5). For a mean, the Central Limit Theorem from Lesson 33.1 does the work: a larger sample, and especially one from a roughly symmetric population, makes the normal model more trustworthy. A confidence interval cannot repair a biased sample. If the sample is not random, the interval can be tight and still miss badly.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: A PROPORTION INTERVAL</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The made-up Hollow Creek town board polls a random sample of <em>n</em> = 200 residents. Of them, <em>y</em> = 112 favor the new park. Build a 95% confidence interval for the proportion of all residents who favor it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Step 1, the estimate.</strong> <em>p</em>-hat = 112 &divide; 200 = <strong>0.56</strong>. <strong>Step 2, check the conditions.</strong> The sample is random (given), and 200 is a small part of the town. <em>n</em> &times; <em>p</em>-hat = 112 and <em>n</em> &times; (1 &minus; <em>p</em>-hat) = 88 are both at least 10, so we may proceed. <strong>Step 3, the standard error.</strong> SE = &radic;(0.56 &times; 0.44 &divide; 200) = &radic;(0.2464 &divide; 200) = &radic;0.001232 = <strong>0.0351</strong>. <strong>Step 4, the margin of error.</strong> For 95%, <em>z</em>* = 1.960, so the margin is 1.960 &times; 0.0351 = <strong>0.0688</strong>. <strong>Step 5, the interval.</strong> 0.56 &minus; 0.0688 = <strong>0.491</strong> and 0.56 + 0.0688 = <strong>0.629</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Say it in a sentence.</strong> &ldquo;We are 95% confident that the true proportion of Hollow Creek residents who favor the park is between 0.491 and 0.629, or about 49.1% to 62.9%.&rdquo; Notice that the interval runs from just below 50% to well above it. The section on benchmarks below returns to what that means. (A sentence that begins &ldquo;We are 95% confident&rdquo; is shorthand. The next section says exactly what the shorthand stands for.)</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; WHAT &ldquo;95% CONFIDENT&rdquo; REALLY MEANS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the idea that most people get wrong, so read it slowly. The true proportion is one fixed number. It does not wiggle. What wiggles is <em>our interval</em>, because each random sample gives a different <em>p</em>-hat and so a different interval. Some intervals land on the truth and some miss it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The confidence level describes the <strong>method</strong>, not any one interval: <em>if we built intervals this way again and again from fresh random samples, about 95 out of every 100 of them would capture the true value.</em> The interval we actually have either did capture it or did not, and we cannot tell which. The 95% is our confidence in the <em>procedure</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Three common misreadings</strong> (the interactive below prints these too, so you can compare):</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Misreading 1.</strong> &ldquo;There is a 95% chance the true value is inside <em>this</em> interval.&rdquo; Once the interval is built, the truth is either in it or not. The 95% belongs to the method.<br />&#9654; <strong>Misreading 2.</strong> &ldquo;95% of individual values fall inside the interval.&rdquo; The interval is about the <em>population mean or proportion</em>, not about where individual people or plants fall. Individual values spread out far more than an average does.<br />&#9654; <strong>Misreading 3.</strong> &ldquo;The next sample&rsquo;s estimate will land inside this interval 95% of the time.&rdquo; The next sample has its own <em>p</em>-hat, centered on the truth, not on our particular interval.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The best way to believe this is to watch it happen. Use the interactive next.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Confidence Interval Simulator</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Eight tasks.</strong> Start on the <em>Proportion</em> tab and pick the made-up scenario <em>walkers (35%)</em>. Set the sample size to about 400 and the confidence level to <strong>95%</strong>. <strong>(1)</strong> Press <em>Draw 1 interval</em>. Click the interval to read its endpoints. A solid line with a filled circle means the interval <strong>captured</strong> the true value; a dashed line with an open diamond and an X means it <strong>missed</strong>. <strong>(2)</strong> Press <em>Draw 100 intervals</em> and read the running <em>Captured k of N</em> count. About 95 should capture; the rest are the misses. <strong>(3)</strong> Press <em>Clear</em> and repeat a few times. Your count wiggles from run to run, and that wiggle is chance. <strong>(4)</strong> Press <em>Hide the truth</em>. This is what a real researcher sees: a pile of intervals and no way to tell which ones missed. Press it again to bring the truth back. <strong>(5)</strong> Change the level to <strong>80%</strong> and draw 100 intervals, then try <strong>99%</strong>. How does the number of misses change, and how does the width change? <strong>(6)</strong> Try the two experiments, <em>Level vs width</em> (one sample, four levels) and <em>n vs width</em> (200 intervals each at <em>n</em> = 100, 400, and 1600). If you use the walkers scenario at 95%, the average widths at <em>n</em> = 100, 400, 1600 should be about 18.6, 9.3, and 4.7 points. <strong>(7)</strong> Switch to the <em>Mean</em> tab (made-up bean plants, true mean 30 cm and standard deviation 6 cm). Draw 100 intervals at 95%. The tab uses the population standard deviation as known, just as this lesson does. <strong>(8)</strong> Read the panel <em>What 95% confidence means</em> and compare its three misreadings with the ones above. <strong>Keep <em>n</em> at 100 or more on the Proportion tab.</strong> With very small samples the proportion method captures less often than advertised, and the simulator carries a note about that. Your numbers will differ each time, because the samples are random.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/ci-simulator.html" width="100%" height="1400" style="border: none; display: block;" title="Confidence Interval Simulator" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/ci-simulator.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is tall; on a small screen you may need to scroll.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: SAME SAMPLE, FOUR CONFIDENCE LEVELS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Use the Hollow Creek sample again (112 of 200, <em>p</em>-hat = 0.56, SE = 0.0351). Build intervals at 80%, 90%, 95%, and 99%, and describe what happens to the width as the level rises.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Only <em>z</em>* changes. The margin at each level is <em>z</em>* &times; 0.0351, and the interval is 0.56 &plusmn; margin.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Level</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"><em>z</em>*</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Margin (<em>z</em>* &times; SE)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Lower</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Upper</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Width (2 &times; margin)</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">80%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.282</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0450</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.515</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.605</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0900</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">90%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.645</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0577</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.502</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.618</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.1155</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">95%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1.960</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0688</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.491</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.629</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.1376</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">99%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2.576</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0904</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.470</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.650</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.1808</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Every step up in confidence makes the interval wider: from about 0.090 wide at 80% to about 0.181 wide at 99%. This is the <strong>price of confidence</strong>. To be more sure your method catches the truth, you must cast a wider net, and a wider net says less. A 100% interval would have to be 0 to 1, which tells the board nothing. Choosing a level is a judgment about how costly a miss would be.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: FOUR TIMES THE PEOPLE, HALF THE WIDTH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The board funds a bigger poll: <em>n</em> = 800, and the same share, 448 of 800, favor the park (<em>p</em>-hat = 0.56 again). Build a 95% interval and compare its width with the <em>n</em> = 200 interval.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><em>Teacher&rsquo;s voice:</em> SE = &radic;(0.56 &times; 0.44 &divide; 800) = &radic;0.000308 = <strong>0.01755</strong>. The margin is 1.960 &times; 0.01755 = <strong>0.0344</strong>. The interval is 0.56 &minus; 0.0344 = <strong>0.526</strong> to 0.56 + 0.0344 = <strong>0.594</strong>. The width is 0.0688, exactly half of the <em>n</em> = 200 width of 0.1376. Because SE has &radic;<em>n</em> in the denominator, multiplying <em>n</em> by 4 divides SE (and so the width) by &radic;4 = 2. This is the same &ldquo;four times the people, half the margin&rdquo; pattern you saw with the margin of error.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 4: A MEAN INTERVAL WITH A KNOWN STANDARD DEVIATION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up gardener measures <em>n</em> = 36 randomly chosen bean plants in a large greenhouse after six weeks. The sample mean height is <em>x</em>-bar = 31.4 cm. Suppose the population standard deviation is known to be <em>&sigma;</em> = 6 cm (made up). Build a 95% interval for the mean height of all the plants.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Standard error.</strong> SE = <em>&sigma;</em> &divide; &radic;<em>n</em> = 6 &divide; &radic;36 = 6 &divide; 6 = <strong>1.0</strong> cm. <strong>Margin.</strong> 1.960 &times; 1.0 = <strong>1.96</strong> cm. <strong>Interval.</strong> 31.4 &minus; 1.96 = <strong>29.44</strong> and 31.4 + 1.96 = <strong>33.36</strong>. We are 95% confident that the mean height of all the plants is between about 29.4 cm and 33.4 cm. At 90%, <em>z</em>* = 1.645 and the interval is 29.76 to 33.04 cm, a little narrower.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Two reminders.</strong> The interval is for the <em>mean</em> of all plants, not for individual plants, which vary much more (a single plant could easily be 25 cm or 38 cm). And in a real greenhouse you would not know <em>&sigma;</em>; you would estimate it from the sample and use the slightly wider method mentioned earlier.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; READING AN INTERVAL NEXT TO A BENCHMARK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Often there is a benchmark value in the conversation: &ldquo;Is half the town in favor?&rdquo; or &ldquo;The seed packet says the average is 30 cm.&rdquo; An interval helps you compare, but it takes care.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Look back at Worked Example 1. The 95% interval for the park is 0.491 to 0.629, and <strong>0.50 is inside it</strong>. What can we say? The values in the interval are the ones the data leave plausible, so a true share of 50% is <strong>plausible</strong>: with 200 people we <strong>cannot rule it out</strong>. What can we <em>not</em> say? We cannot say the share <em>is</em> 50%, and we should not say the data &ldquo;accept&rdquo; 50%; every value in the interval, from 0.491 to 0.629, is just as consistent with the poll. We also should not announce &ldquo;a majority supports the park,&rdquo; because values below 0.50 are plausible too.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now look at Worked Example 3. With 800 people the 95% interval is 0.526 to 0.594, and 0.50 is <strong>outside</strong> it. Now the data point more clearly to a share above half. (Even then, the correct sentence is &ldquo;we are 95% confident the true share is between 0.526 and 0.594,&rdquo; not &ldquo;we have proved a majority.&rdquo;) The very same <em>p</em>-hat of 0.56 told a much weaker story at <em>n</em> = 200 than at <em>n</em> = 800. A bigger sample did not change the estimate; it narrowed the plausible range.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The level matters too. At 90% the interval from <em>n</em> = 200 is 0.502 to 0.618, which just barely leaves out 0.50, while the 95% interval includes it. That is a warning not to treat the edge of an interval as a bright line. For now, simply state what the interval shows and what it does not.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Keep in mind (from Weeks 30 and 31).</strong> An interval only accounts for the chance variation of random sampling. It does not repair bias, nonresponse, or bad question wording. A narrow interval from a biased sample is precisely wrong.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: BUILD AN INTERVAL TABLE, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build an interval table. Everything here is made up. This is a practice build; you do not upload it (Assignment 33.3 has you build a bigger one).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk33_L3_YourName</code>. Rename the first sheet <strong>Interval</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Proportion inputs.</strong> In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Successes y</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">112</code>. In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample size n</code> and in <strong>B2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">200</code>. In <strong>A3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample proportion</code> and in <strong>B3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1/B2</code>. In <strong>A4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Standard error</code> and in <strong>B4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(B3*(1-B3)/B2)</code>. Press Enter after each entry. Typing a formula that begins with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=</code> tells Excel to calculate.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Level table headings.</strong> In <strong>A6</strong> to <strong>F6</strong> type these headings, one per cell: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Confidence level</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">z*</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Margin</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lower</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Upper</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Width</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The four levels.</strong> In <strong>A7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.8</code>, in <strong>A8</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.9</code>, in <strong>A9</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.95</code>, and in <strong>A10</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.99</code>. Select <strong>A7:A10</strong> and, on the <strong>Home</strong> tab, in the <strong>Number</strong> group, click the <strong>%</strong> (Percent Style) button.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The formulas, row 7.</strong> In <strong>B7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV((1+A7)/2)</code>. In <strong>C7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B7*$B$4</code>. In <strong>D7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$B$3-C7</code>. In <strong>E7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$B$3+C7</code>. In <strong>F7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E7-D7</code>. The dollar signs lock the cells for the standard error and the estimate when you copy down.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Copy down.</strong> Select <strong>B7:F7</strong>, point at the small square at the lower-right corner of the selection (the fill handle), and drag it down to row <strong>10</strong>. Check your table against Worked Example 2: the 95% row should give <em>z</em>* = 1.96 (Excel shows 1.959964), a margin near 0.0688, and an interval near 0.491 to 0.629.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Mean version.</strong> Below the table, in <strong>A13</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample mean</code> and in <strong>B13</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">31.4</code>; in <strong>A14</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Known sigma</code> and <strong>B14</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">6</code>; in <strong>A15</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample size n</code> and <strong>B15</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">36</code>; in <strong>A16</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Standard error</code> and <strong>B16</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B14/SQRT(B15)</code>. Then repeat the headings and levels (rows 18 to 22) and use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV((1+A19)/2)</code> for <em>z</em>*, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B19*$B$16</code> for the margin, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$B$13-C19</code> for the lower endpoint, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$B$13+C19</code> for the upper endpoint, filling down. You should get 29.44 to 33.36 in the 95% row, matching Worked Example 4.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Try it.</strong> Change <strong>B1</strong> to <strong>448</strong> and <strong>B2</strong> to <strong>800</strong>. The whole table recalculates. Which values change, and by how much does the width shrink?</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; INTERVAL ENDPOINTS IN EXCEL; STANDARD ERROR AND MARGIN IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV((1+C)/2)</code> gives <em>z</em>* for any confidence level <em>C</em> (for example, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.S.INV(0.975)</code> gives 1.96). Then <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=z*SE</code> is the margin and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=p-m</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=p+m</code> are the interval endpoints. Fill the same row formulas down to repeat for several levels. For a mean with a known <em>&sigma;</em>, use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=sigma/SQRT(n)</code> as the standard error.<br />
+            <strong>Desmos Scientific</strong> handles plain arithmetic only here (it has no <em>z</em>* lookup, so take <em>z</em>* from the table above or from Excel). For the standard error in Worked Example 1, type 0.56 &times; 0.44 &divide; 200 and then use the <strong>square-root button</strong> on the result; you should see about 0.0351. Multiply by 1.96 for the margin (about 0.0688), then subtract and add it to 0.56 for the endpoints.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI WHAT &ldquo;95% CONFIDENT&rdquo; MEANS; GRADE IT AGAINST THE CORRECT READING</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A poll reports a 95% confidence interval of 0.49 to 0.63 for the share of voters who favor a plan. What does 95% confident mean? Explain in plain language.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide what a careful answer must say: the 95% describes the <em>method</em> (about 95 of 100 intervals built this way would capture the true value); this particular interval either did or did not; it is <em>not</em> a 95% probability that the truth lies in this interval; it is not about individual voters; and it does not cover bias or nonresponse.<br />
+            <strong>Verify.</strong> Read the AI&rsquo;s answer sentence by sentence. AI tools very often say &ldquo;there is a 95% probability the true value is in this interval,&rdquo; which is Misreading 1. Did it? Then test its claim yourself: in the Confidence Interval Simulator draw 100 intervals at 95% and count how many <em>missed</em>, then press <em>Hide the truth</em> and see that you cannot tell which ones they were. Did the AI say anything that is wrong or hand-wavy? Rewrite its worst sentence so that it is true. <strong>Verdict.</strong> A fluent answer is not a correct answer; the simulation is the referee.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 40 minutes, plus the reading, the interactive, and the Excel steps above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Run, Record</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the Confidence Interval Simulator, Proportion tab, walkers scenario, <em>n</em> about 400. <strong>Predict</strong> first: out of 100 intervals, about how many will <em>miss</em> the true value at the 80% level, at the 95% level, and at the 99% level? Write your three predictions in a table with a blank &ldquo;actual&rdquo; column.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Run</strong> <em>Draw 100 intervals</em> at each level (press <em>Clear</em> between runs) and record the number of misses (the number of dashed intervals, or 100 minus the captured count). Do each level twice if you can.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Reflect.</strong> (a) Were your actual counts close to your predictions? Were they exactly equal? Why not? (b) You saw that the 99% intervals are wider than the 80% intervals. Explain, using your miss counts, why the extra width is worth it for some decisions and not for others. (c) At 95%, you drew 100 intervals and counted 8 misses. Does that mean the method is broken? Explain.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. About 20 misses at 80%, about 5 at 95%, about 1 at 99%. 2. Your counts will differ each run, because the samples are random. Most runs of 100 intervals land at roughly 12 to 28 misses at 80%, roughly 1 to 10 at 95%, and roughly 0 to 3 at 99% (these ranges are the middle 95% of a binomial count, computed by script), so exact matches are rare but counts near the prediction are normal. 3. (a) Counts near the prediction, not exact; sampling variation again. (b) A higher level means fewer misses (the method catches the truth more often) but wider, less specific intervals; if a miss would be costly (for example a safety decision) a higher level can be worth it, and if you need a sharp estimate and can tolerate more misses, a lower level may do. (c) No. For a 95% method, 8 misses in 100 is well inside the usual wiggle (anything from about 1 to 10 is ordinary). The method is not broken; the count is just a random sample of intervals.</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Reading or Misreading?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Here are six statements about confidence intervals. For each one, write <strong>C</strong> if it is a correct reading, or write <strong>M</strong> and name the misreading (1: a probability that <em>this</em> interval holds the truth; 2: a claim about individual values; 3: a claim about the next sample&rsquo;s estimate; or O: some other overclaim).<br /><strong>(a)</strong> &ldquo;If we built intervals this way again and again from fresh random samples, about 95 in 100 would capture the true proportion.&rdquo;<br /><strong>(b)</strong> &ldquo;There is a 95% chance the true proportion of residents who favor the park is between 0.491 and 0.629.&rdquo;<br /><strong>(c)</strong> &ldquo;The 95% interval for mean bean-plant height is 29.44 to 33.36 cm, so 95% of the individual plants are between 29.44 and 33.36 cm tall.&rdquo;<br /><strong>(d)</strong> &ldquo;If we drew another random sample of 200 residents, its <em>p</em>-hat would land between 0.491 and 0.629 about 95% of the time.&rdquo;<br /><strong>(e)</strong> &ldquo;The method that produced 0.491 to 0.629 captures the true value about 95% of the time. We do not know whether this one did.&rdquo;<br /><strong>(f)</strong> &ldquo;Because the interval 0.491 to 0.629 contains 0.50, the data show that exactly 50% of residents favor the park.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Take one statement that you marked M and rewrite it into a correct sentence about the same interval.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. (a) C. (b) M, Misreading 1: the truth is one fixed number; the 95% belongs to the method, not to a probability for this interval. (c) M, Misreading 2: the interval is for the <em>mean</em> of all plants, and individual plants vary much more (with <em>&sigma;</em> = 6 cm, individual heights spread far wider than 3.9 cm). (d) M, Misreading 3: future estimates are centered on the true value, not on this particular interval, and the share of future estimates inside it need not be 95%. (e) C. (f) M, an overclaim (O): 0.50 is only one of many plausible values; the data cannot rule it out, but they do not show it is exact. 2. Example rewrite of (b): &ldquo;We used a method that captures the true proportion about 95% of the time, and it gave 0.491 to 0.629. We are 95% confident in the method, and this interval either holds the truth or it does not.&rdquo;</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Worked, Then Your Turn</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Worked.</strong> A made-up school club asks a random sample of <em>n</em> = 300 students whether they would attend a spring concert, and <em>y</em> = 135 say yes. Build a 95% interval for the share of all students who would attend. Show: <em>p</em>-hat, the conditions check, SE, margin, and the two endpoints. Then say whether 0.50 is a plausible value and what that does and does not tell the club.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (proportion).</strong> A different made-up random sample of <em>n</em> = 120 students has <em>y</em> = 84 who favor a later start time. Build a <strong>90%</strong> interval and a <strong>99%</strong> interval. Which is wider, and by how much? Then say, in one sentence, what the 99% interval says.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (mean, known <em>&sigma;</em>).</strong> A made-up random sample of <em>n</em> = 100 backpacks has a mean weight of 14.2 lb. Suppose <em>&sigma;</em> = 3 lb is known (made up). Build a 95% interval for the mean backpack weight of all students, and explain why this interval is not a range for individual backpacks.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Say it honestly.</strong> A classmate writes: &ldquo;Our 95% interval is 0.39 to 0.51, so there is a 95% chance that exactly half of students attend.&rdquo; Find the two problems and rewrite the sentence.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. <em>p</em>-hat = 135 &divide; 300 = 0.45. Conditions: random sample; 135 and 165 are both at least 10; 300 is a small part of the school (assumed). SE = &radic;(0.45 &times; 0.55 &divide; 300) = &radic;0.000825 = <strong>0.0287</strong>; margin = 1.960 &times; 0.0287 = <strong>0.0563</strong>; interval = <strong>0.394 to 0.506</strong>. Since 0.50 is inside, a 50% attendance rate is plausible; the club cannot rule it out, but the data do not show it is exactly 50%, nor that fewer than half would attend. 2. <em>p</em>-hat = 0.70, SE = &radic;(0.7 &times; 0.3 &divide; 120) = <strong>0.0418</strong>. At 90% (<em>z</em>* = 1.645): margin <strong>0.0688</strong>, interval <strong>0.631 to 0.769</strong>, width 0.138. At 99% (<em>z</em>* = 2.576): margin <strong>0.1078</strong>, interval <strong>0.592 to 0.808</strong>, width 0.216. The 99% interval is wider by about 0.078. &ldquo;We are 99% confident that between about 59% and 81% of all students favor the later start.&rdquo; 3. SE = 3 &divide; &radic;100 = <strong>0.3</strong> lb; margin = 1.960 &times; 0.3 = <strong>0.59</strong>; interval = <strong>13.61 to 14.79</strong> lb. It is a range for the <em>mean</em> of all backpacks. Individual backpacks vary with a standard deviation of 3 lb, much more than the tiny SE of 0.3 lb, so many individual backpacks fall outside this interval. 4. Problem 1: the 95% belongs to the method, not to a probability about this interval (Misreading 1). Problem 2: an interval of 0.39 to 0.51 does not single out &ldquo;exactly half&rdquo;; every value inside is plausible. Rewrite: &ldquo;We are 95% confident, using a method that captures the truth about 95% of the time, that the share of students who would attend is between about 0.39 and 0.51; 0.50 is among the plausible values.&rdquo;</div>
+</details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 33.3 &mdash; Interval Table Workbook</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Build interval tables in Excel for four made-up polls at 90%, 95%, and 99%, add one mean interval with a known standard deviation, write short answers about what the intervals do and do not say, and upload the workbook to Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 33.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on building intervals for proportions and means, what a confidence level means, and how width changes with level and sample size.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Looking ahead</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next week you will use the same simulate-first habits to compare two groups.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 33.3 &middot; Confidence Intervals and Confidence Levels</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

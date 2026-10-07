@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 31.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 31.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Honest claims from chance data</div>
+    </div>
+</div>
+
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 31.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Is the Model Consistent with the Data?</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Someone says a coin, a spinner, or a seed packet works a certain way. You have one result. Could that claim have produced it?</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Describe a claim as a model that makes data, simulate the model to see what is typical, and judge honestly whether a result fits, saying only what the evidence allows.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read the worked examples, run the model checker, simulate a coin in Excel, and write careful conclusions in your own words. Plan on about 90 minutes. Every coin, spinner, die, and seed packet on this page is constructed (made up).</div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe a <strong>data-generating process</strong> (a coin, a spinner, a die, or a &ldquo;30% of seeds sprout&rdquo; claim) as a <strong>model</strong> that could have produced the data.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>simulate</strong> the process many times and use the spread of the simulated results to see what is typical.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> judge whether an observed result is <strong>consistent</strong> with a claimed model by comparing it to the simulated spread, using a stated rule of thumb for &ldquo;unusual,&rdquo; and say what I can and cannot conclude.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> decide between <strong>sticking with the model</strong> and <strong>doubting the model</strong>, and connect this to the Semester 1 idea of asking how surprising a result would be if the claim were true, in my own words.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). You will save a practice workbook as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk31_ModelCheck_YourName.xlsx</code>. You do not upload it for this lesson.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From earlier: a statistic changes from sample to sample (this week&rsquo;s first lessons), and from Semester 1, the idea of asking how surprising a result would be if a claim were true.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: SAY NO MORE THAN THE EVIDENCE ALLOWS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A result in hand is tempting. &ldquo;We saw 36 heads, so the coin is rigged.&rdquo; &ldquo;We saw 28 heads, so the coin is fair.&rdquo; Both sentences claim more than the data can carry. Responsibility with evidence means asking two questions before speaking: <em>how often would chance alone produce a result like this?</em> and <em>what am I actually entitled to say?</em></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Today you will learn a careful way to answer both. The skill is also a kindness to everyone who hears your claim: a person who says &ldquo;this result is hard to square with the claim&rdquo; or &ldquo;this result fits the claim, though it does not settle it&rdquo; can be trusted, because the words match the evidence.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; A MODEL IS A RULE FOR HOW THE DATA COULD HAVE BEEN MADE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>data-generating process</strong> is whatever produces the numbers you see. When we write down a rule for that process, with its chances, we have a <strong>model</strong>. Four models you can picture:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A fair coin.</strong> Each flip lands heads with chance 50%, and flips do not affect each other. In 50 flips we <em>expect</em> 50 &times; 0.5 = 25 heads.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A spinner with 4 equal sections.</strong> Each spin lands on section A with chance 25%. In 50 spins we expect 50 &times; 0.25 = 12.5 landings on A. (An expected count need not be a whole number. It is a long-run average, not a prediction of any single run.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A die.</strong> If it is fair, each roll shows a six with chance 1/6. In 60 rolls we expect 60 &times; (1/6) = 10 sixes.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>&ldquo;30% of these seeds sprout.&rdquo;</strong> Each planted seed sprouts with chance 30%. Of 50 seeds we expect 50 &times; 0.3 = 15 sprouts.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Every one of these models gives a <em>claimed chance of success</em> and a number of trials. The model does not say &ldquo;exactly 25 heads.&rdquo; Real runs wobble around the expected count. The question this lesson asks is: <strong>how far from expected is too far for the model to be believable?</strong></div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128260; SIMULATE THE PROCESS, THEN LOOK AT THE SPREAD</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">We cannot ask the coin how it feels. But we can <em>run the model</em>: flip a pretend fair coin 50 times, count the heads, and write the count down. That is one <strong>simulated run</strong>. Do it 1000 times and you have a picture of what the model typically does: most runs land near 25, fewer land far away, and very few land very far away.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now place your real result on that picture. If it sits in the crowded middle, the model produces results like yours all the time. If it sits far out in a thin tail, the model rarely produces a result like yours.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A rule of thumb for &ldquo;unusual.&rdquo;</strong> Count the simulated runs that are <strong>at least as far from the expected count as your result, on either side</strong>. If that happens in <strong>fewer than 5 runs out of 100</strong> (fewer than 50 of 1000), call the result <strong>unusual under the claimed model</strong>. Otherwise it is <strong>not unusual</strong>. The &ldquo;5 in 100&rdquo; line is a convention people agree to, a place to draw a line so we can talk to each other. It is not a law of nature, and you will see results that sit right on it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Link to Semester 1.</strong> In Semester 1 you asked how surprising a result would be if a claim were true, and you marked results that fell far outside the middle range. This is the same question. Here you answer it by running the model many times and counting, instead of by a formula. Write the idea in your own words in Activity 1.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129689; WORKED EXAMPLE 1 &mdash; A FAIR COIN: 36 HEADS VERSUS 28 HEADS IN 50 FLIPS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up game claims its coin is fair. We flip it 50 times. The expected count is 25 heads.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Case A: 36 heads.</strong> That is 11 above 25. &ldquo;At least as far from expected&rdquo; means 36 or more heads, or 14 or fewer (also 11 away, on the low side). Using the exact binomial chances for 50 flips of a fair coin:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Chance of 36 or more heads = 0.001301.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; By symmetry, chance of 14 or fewer = 0.001301 as well.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; Chance of a result at least this far from 25, on either side: <strong>0.001301 + 0.001301 = 0.002602</strong>, about 1 in 384 (1 &divide; 0.002602 &asymp; 384).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A simulation of 1000 runs would show about 1000 &times; 0.002602 &asymp; 2.6 such runs, and usually between 0 and 6. That is far below the cutoff of 50. The result is <strong>unusual under the claimed model</strong>. So there is good reason to <strong>doubt</strong> that the coin is fair. We have not <em>proved</em> it is rigged: a fair coin can produce this, about once in 384 tries.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Case B: 28 heads.</strong> That is 3 above 25. At least as far means 28 or more, or 22 or fewer. The exact chance of a result at least this far on either side is <strong>0.480</strong>. A simulation of 1000 runs would show about 480 such runs, give or take about 16, so a typical reading is somewhere from about 450 to 510. That is nowhere near unusual. The result is <strong>not unusual</strong>, and the claim that the coin is fair is <strong>consistent</strong> with it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on the simulator&rsquo;s number.</strong> Every time the simulator runs 1000 new runs, the count it shows changes a little, because it is a fresh random sample of runs. It fluctuates around the exact chance times 1000. The exact values above are the targets it wobbles around.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; WORKED EXAMPLE 2 &mdash; RESULTS THAT SIT ON THE LINE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> The rule of thumb is a line, and some results land close to it. Here are four, each recomputed with the exact binomial.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Claimed model</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Result</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Expected</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">At least as far (either side)</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Exact chance</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Rule of thumb (5 in 100)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Fair coin</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">55 heads in 100 flips</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">50</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">55 or more, or 45 or fewer</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">0.368</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Not unusual</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Fair coin</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">60 heads in 100 flips</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">50</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">60 or more, or 40 or fewer</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">0.0569</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Just over the line: not unusual</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Spinner, A is 25%</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">19 of 50 spins on A</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">12.5</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">19 or more, or 6 or fewer</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">0.0481</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Just under the line: unusual</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Spinner, A is 25%</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">16 of 40 spins on A</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">10</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">16 or more, or 4 or fewer</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">0.0423</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Just under the line: unusual</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Look at the 60-heads row and the 19-of-50 row. Their chances, 0.0569 and 0.0481, are only about one percentage point apart, yet the rule of thumb puts them on opposite sides. Do not treat the line as a wall. A careful sentence for these two is: &ldquo;This result is <em>borderline</em>. It is a little harder to square with the claim than I would like, but not strongly so.&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Two more ideas from this table. First, <strong>the same distance means different things at different sample sizes</strong>: a count 5 above expected is much more unusual in 50 flips than in 100 flips, because more flips give a steadier result. Second, when the simulator shows a count like 52 or 47 out of 1000 for the borderline rows, both are fair readings of the same underlying chance near 0.05, and one can land on either side of the cutoff. When a result is this close, run it a few times and report it as borderline.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127793; WORKED EXAMPLE 3 &mdash; &ldquo;30% OF THESE SEEDS SPROUT&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up seed packet says 30% of its seeds sprout. A student plants 50 and counts sprouts. Expected: 50 &times; 0.3 = 15.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Result: 21 sprouts.</strong> That is 6 above expected. Counts at least as far are 21 or more, or 9 or fewer (also 6 below 15). The exact chance of a result at least this far on either side is <strong>0.0880</strong>. A simulation of 1000 runs would show about 88, give or take about 9. That is well above 50, so the result is <strong>not unusual under the claimed model</strong>: the packet&rsquo;s claim is consistent with 21 sprouts.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>What we may say.</strong> &ldquo;21 of 50 is a bit high, but a 30% packet would give a result at least this far from 15 about 9 times in 100, so we have no good reason to doubt the claim.&rdquo; <strong>What we may not say.</strong> &ldquo;This proves 30% of the seeds sprout.&rdquo; A packet whose true rate is 35% or 40% could produce 21 sprouts easily too. One run of 50 seeds cannot tell those models apart from 30%.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; WORKED EXAMPLE 4 &mdash; A DIE THAT MIGHT BE LOADED</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up game shop is selling a die and claims it is fair. We roll it 60 times and count sixes. The model says each roll is a six with chance 1/6, so we expect 60 &times; (1/6) = 10 sixes. We observe <strong>17 sixes</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">That is seven above expected. At least as far means 17 or more sixes, or 3 or fewer (also 7 away). Using the exact binomial for 60 rolls with chance 1/6:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Chance of 3 or fewer sixes = 0.00635.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Chance of 17 or more sixes = 0.01645.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; Sum: <strong>0.00635 + 0.01645 = 0.0228</strong>, about 2.3 in 100.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Notice that the two tails are <strong>not equal</strong> here (about 0.006 on the low side, 0.016 on the high side), because a chance of 1/6 is not a 50-50 chance. That is why we compute each tail rather than doubling one. A simulation of 1000 runs would show about 23 such runs, give or take about 5, so readings from about 13 to 32 are normal. All are below 50, so the result is <strong>unusual under the claimed model</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The careful conclusion:</strong> &ldquo;If this die were fair, a result this far from 10 sixes would happen about 2 times in 100. That is hard to square with a fair die, so I doubt the claim. I have not proved the die is loaded. To be surer, I would roll it many more times.&rdquo; (The model checker&rsquo;s custom claim takes whole-number percents, so enter 17% as a close stand-in for 1/6. Its numbers will differ very slightly from the exact ones above.)</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; CONSISTENT IS NOT PROVED, AND UNUSUAL IS NOT WRONG</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">These two sentences are the heart of the lesson. Keep them in your own words.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What you found</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What you may say</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What you may not say</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Not unusual under the claimed model</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">The result is <strong>consistent</strong> with the claim. We have no good reason to drop it. We <strong>stick with the model</strong> for now.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;The claim is proved,&rdquo; or &ldquo;the claim is true.&rdquo; Other models fit too: a coin that lands heads 55% of the time has an expected 27.5 heads in 50 flips, so 28 heads fits it well.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Unusual under the claimed model</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Either we saw a rare stroke of luck or the claim is off. The rarer the result, the more reason we have to <strong>doubt the model</strong>.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;The claim is proved wrong.&rdquo; Rare things happen: about 1 in 384 fair coins would give 36 heads in 50 (or 14 or fewer).</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Why both directions are limited.</strong> A simulation tells us how a model behaves. It does not tell us the model is the one that made our data. A result can fit several different models, and a surprising result can come from the very model we doubt. What we can do is describe how well the claim and the data agree, and let the strength of the evidence set the strength of our language: &ldquo;very hard to square,&rdquo; &ldquo;borderline,&rdquo; &ldquo;fits well.&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>One more caution: multiple looks.</strong> If you check one true model against one result, the chance of landing in the unusual 5% is about 5%. Suppose instead you check 20 separate true models, each on its own independent result. The chance that <em>none</em> falls in its 5% zone is 0.95<sup>20</sup> &asymp; 0.358. So the chance that <em>at least one</em> does is 1 &minus; 0.95<sup>20</sup> = <strong>0.642</strong>, about 64%, even though every model is true. (This calculation assumes the 20 checks are independent and each unusual zone has chance 5%. Real checks often are not independent, which changes the number but not the lesson.) If you look at many models or many results and report only the one that looks odd, you are being misleading, even if every number you report is correct. Honest reporting says how many things you checked. With 5 independent checks the same arithmetic gives 1 &minus; 0.95<sup>5</sup> = 0.226.</div>
+</div>
+
+<div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+    <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Is the Model Consistent with the Data?</div>
+    <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">This tool has two tabs. Open the second tab, <em>Is the model consistent with the data?</em>. All scenarios are made up and simulated by your browser.<br /><strong>Task 1.</strong> Under <em>Claim</em> choose <em>A fair coin (chance of heads 50%)</em>. Under <em>Preset result</em> choose <em>We saw 36 heads in 50 flips</em>. Read the histogram: the gold arrow marks your result, and the hatched bars are simulated runs at least as far from the expected count as yours. Read the line that starts <em>In ... of 1000 simulated runs</em> and the verdict line below it. Compare the count to the exact value 0.002602 &times; 1000 &asymp; 2.6.<br /><strong>Task 2.</strong> Click <em>Simulate 1000 runs again</em> five times. Write down the count each time. It changes, but it stays near the exact value. That is simulation wobble, not a different answer.<br /><strong>Task 3.</strong> Choose <em>We saw 28 heads in 50 flips</em>. Expect a count near 480 and the verdict <em>Not unusual under the claimed model</em>. Then read the panel <em>3. Sticking with the model or doubting it</em>: which of <em>Sticking with the model</em> and <em>Doubting the model</em> applies?<br /><strong>Task 4.</strong> Choose <em>We saw 60 heads in 100 flips</em> (exact 0.0569). Drag the <em>Rule of thumb</em> slider (<em>unusual if fewer than 5 in 100 runs</em>) from 5 to 6 and back, and watch whether the verdict flips as the line moves. Write one sentence on why a borderline result deserves the word &ldquo;borderline.&rdquo;<br /><strong>Task 5.</strong> Switch <em>Claim</em> to <em>A spinner with 4 equal sections (claim: section A is 25%)</em> and then to <em>30% of seeds sprout</em>. Run each preset result and match it to the exact values in the worked examples.<br /><strong>Task 6.</strong> Choose <em>Custom claim</em>. Enter a <em>Claimed chance of success (%)</em> of 17, <em>Number of trials n</em> = 60, and <em>Observed count of successes</em> = 17 for the die. Compare to Worked Example 4.<br /><strong>Task 7.</strong> Back on the fair coin, set <em>Number of trials n</em> to 500 and try an <em>Observed count of successes</em> of 270 (54% heads, exact 0.0810), then 280 (56% heads, exact 0.0083). Then set n to 50 and the count to 28 (also 56% heads, exact 0.480). Write one or two sentences on why the same percent of heads can be unusual with many flips and ordinary with few.</div>
+    <iframe src="https://optimaondemand.github.io/hsps-widgets/sample-variation.html" width="100%" height="1100" style="border: none; display: block;" title="Many Samples and Model Consistency Check" allowfullscreen></iframe>
+    <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/sample-variation.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+</div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127981; WHERE PEOPLE USE THIS &middot; CHECKING A CLAIMED RATE</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">Anyone handed a claimed rate (a sprouting rate, a defect rate, a &ldquo;fair&rdquo; game) and a count of what actually happened can run this kind of check. Methods and cutoffs differ from one field to the next, so look up how a particular organization makes the call before relying on its numbers.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: SIMULATE A COIN AND CHECK IT EXACTLY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Simulate one run of 50 flips.</strong> One way: in a cell type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.INV(50,0.5,RAND())</code> and press Enter. It returns a random head count for 50 flips of a fair coin. Coin by coin instead: in 50 cells type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(RANDBETWEEN(0,1)=1,1,0)</code> (1 = heads) and add them with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(range)</code>.<br /><br />
+            <strong>Repeat 100 times.</strong> Type the BINOM.INV formula in <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A1</code>, click the Name Box and enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A1:A100</code>, then press <strong>Ctrl+D</strong> to fill down. You now have 100 simulated runs. Press <strong>F9</strong> to redraw all 100 at once.<br /><br />
+            <strong>Count runs at least as extreme as 36 heads.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A1:A100,"&gt;=36")+COUNTIF(A1:A100,"&lt;=14")</code>. Expect 0 almost every time: the exact chance is 0.002602, so 100 runs would show only about 0.26 such runs. A milder test shows more: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A1:A100,"&gt;=31")+COUNTIF(A1:A100,"&lt;=19")</code> counts runs at least 6 from 25, which has exact chance 0.1189, so expect about 12.<br /><br />
+            <strong>Exact check.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(35,50,0.5,TRUE)</code> gives the chance of 35 or fewer heads (0.998699). So <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1-BINOM.DIST(35,50,0.5,TRUE)</code> is the chance of 36 or more (0.001301). For the fair coin the low tail matches the high tail by symmetry, so double it: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=2*(1-BINOM.DIST(35,50,0.5,TRUE))</code> = 0.002602.<br /><br />
+            <strong>Symmetry caveat.</strong> Doubling works only when the claimed chance is 0.5. For any other claim, work out each tail. The spinner example (19 of 50, claimed chance 0.25) is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(6,50,0.25,TRUE)+1-BINOM.DIST(18,50,0.25,TRUE)</code> = 0.0481, and the die example (17 sixes in 60) is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(3,60,1/6,TRUE)+1-BINOM.DIST(16,60,1/6,TRUE)</code> = 0.0228.<br /><br />
+            <strong>Desmos Scientific</strong> is for plain arithmetic only. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">50*0.5</code> for the expected heads (25), <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">60/6</code> for expected sixes (10), and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1-0.95^20</code> for the multiple-looks chance (0.642). The binomial tail chances come from Excel.
+        </div>
+    </div>
+
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; GIVE AN AI SIMULATED DATA AND ASK IF THE MODEL FITS (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;"><strong>Predict first.</strong> A made-up coin is claimed to be fair. In 50 flips it showed 33 heads. Before you open any AI tool, decide: is this result unusual under a fair coin by the 5-in-100 rule? Write your guess and one sentence of reasoning.<br /><strong>Prompt.</strong> Give an AI tool exactly this: <em>&ldquo;A coin is claimed to be fair. We flipped it 50 times and got 33 heads. Is the claimed model consistent with the data? Explain how a simulation of the claimed model would show this, and give the chance of a result at least this far from expected on either side.&rdquo;</em><br /><strong>Verify.</strong> Open the model checker, choose <em>A fair coin (chance of heads 50%)</em>, set <em>Number of trials n</em> to 50 and <em>Observed count of successes</em> to 33, and read the count out of 1000 and the verdict. Compare with the AI&rsquo;s numbers. Check three things: did it count both sides rather than only one tail, does its number agree with the simulation (it will match only roughly, not exactly), and did it avoid language like &ldquo;proves the coin is biased&rdquo; or &ldquo;proves the model is correct&rdquo;? Report what it got right, where it was wrong or too confident, and what you did about it.<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Answer key for the AI Training task</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">The expected count is 25 and 33 is 8 above, so at least as far means 33 or more, or 17 or fewer. The exact chance of 33 or more is 0.0164, so both sides together are <strong>0.0328</strong> (about 3.3 in 100). A simulation of 1000 runs reads about 33, give or take 6. Under the 5-in-100 rule this is <strong>unusual</strong>: a modest reason to doubt the coin is fair, not proof. A one-sided reading (only 33 or more) gives 0.0164, half as big; an AI that reports only one tail makes the result look more surprising than the either-side rule does. A response that says the result &ldquo;proves&rdquo; the coin is biased, or that a result that is not unusual &ldquo;proves&rdquo; a coin is fair, has overclaimed.</div>
+</details>
+</div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 90 minutes, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Run the Model Checker and Put It in Your Own Words</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">35 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Copy this list into your notebook. For each line, <strong>predict</strong> first (unusual, borderline, or not unusual), then set the model checker to that claim and result, read the count out of 1000 and the verdict, and record the exact chance from the worked examples.<br />&bull; Fair coin, 36 of 50<br />&bull; Fair coin, 28 of 50<br />&bull; Fair coin, 60 of 100<br />&bull; Spinner (A is 25%), 19 of 50<br />&bull; 30% seeds, 21 of 50<br />&bull; Die as a custom claim of 17%, 17 sixes in 60</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write two or three sentences <em>in your own words</em> explaining the idea of asking how surprising a result would be if the claim were true, and how that matches what you did in Semester 1.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For the 60-of-100 and 19-of-50 lines, write one sentence on why &ldquo;borderline&rdquo; is a better word than &ldquo;unusual&rdquo; or &ldquo;not unusual.&rdquo;</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Expected pattern (your simulated counts wobble, but stay near these targets): fair coin 36 of 50: about 3 of 1000, exact 0.002602, <strong>unusual</strong>. Fair coin 28 of 50: about 480, exact 0.480, <strong>not unusual</strong>. Fair coin 60 of 100: about 57, exact 0.0569, <strong>borderline</strong>, just above the line. Spinner 19 of 50: about 48, exact 0.0481, <strong>borderline</strong>, just below the line. 30% seeds 21 of 50: about 88, exact 0.0880, <strong>not unusual</strong>. Die (17% stand-in) 17 of 60: about 25, exact for 1/6 is 0.0228 (for 17% about 0.025), <strong>unusual</strong>. For the own-words item, look for something like: &ldquo;I imagine the claim is true, run it many times, and see how often I get a result as far from expected as mine. If that is rare, my result would be surprising if the claim were true.&rdquo; Your wording will differ, and it should say nothing like &ldquo;proves.&rdquo;</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Decide, and Say What You May Say</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up die is claimed to be fair, so 60 rolls should give an expected 10 sixes. Use the model checker (custom claim 17%, n = 60) or the exact values here to decide about each result: <strong>(a)</strong> 13 sixes, <strong>(b)</strong> 4 sixes, <strong>(c)</strong> 17 sixes. The exact chances for a fair die are 0.386 for 13, 0.054 for 4, and 0.0228 for 17.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each of (a), (b), (c), write one careful sentence that starts with &ldquo;I stick with the model because &hellip;&rdquo; or &ldquo;I doubt the model because &hellip;&rdquo; and ends with one thing you <em>cannot</em> conclude.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate says: &ldquo;I checked 20 different dice, and one of them gave a result in the unusual zone, so that one must be loaded.&rdquo; Write two sentences of response, using the multiple-looks idea.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">(a) 13 sixes: exact 0.386, <strong>not unusual</strong>. Stick with the model; you cannot conclude the die is proved fair. (b) 4 sixes: exact 0.054. This is just above the 5-in-100 line, so <strong>borderline, not unusual by the rule</strong>. Stick with the model for now but say it is on the line; you cannot conclude fairness. (c) 17 sixes: exact 0.0228, <strong>unusual</strong>. Doubt the model; you cannot conclude the die is loaded, since about 2 in 100 fair dice would do this. Classmate: if you check 20 independent fair dice, the chance at least one lands in the unusual 5% is 1 &minus; 0.95<sup>20</sup> = 0.642, so one unusual-looking die among 20 is expected even if all are fair. It is weak evidence by itself; roll that die again, many more times, as a new check.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel: Simulate a Fair Coin and Check It Exactly</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">30 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a <strong>Blank workbook</strong>. Press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk31_ModelCheck_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.INV(50,0.5,RAND())</code> and press Enter. Click the <strong>Name Box</strong> (left of the formula bar), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A1:A100</code>, press Enter, then press <strong>Ctrl+D</strong> to fill down. Column A now holds 100 simulated runs of 50 fair flips.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>C1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Runs at 36+ or 14-</code>. In <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A1:A100,"&gt;=36")+COUNTIF(A1:A100,"&lt;=14")</code>. In <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Runs at 31+ or 19-</code> and in <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A1:A100,"&gt;=31")+COUNTIF(A1:A100,"&lt;=19")</code>. Press <strong>F9</strong> ten times and write down D1 and D2 each time.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>C4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Exact: 36+ or 14-</code> and in <strong>D4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=2*(1-BINOM.DIST(35,50,0.5,TRUE))</code>. In <strong>C5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Exact: 31+ or 19-</code> and in <strong>D5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=2*(1-BINOM.DIST(30,50,0.5,TRUE))</code>. D1 and D2 are counts out of 100 runs, so compare them with 100 times D4 and D5.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write three sentences: how the simulated counts compared to the exact chances, why D1 is almost always 0 even though 36 or more heads is possible, and what you would change to see rare results show up more often (hint: more runs).</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Section checks: D4 = 0.002602 and D5 = 0.1189. Your D1 should be 0 on most presses of F9 (expected 0.26 runs per 100). D2 should wander around 12, typically from about 5 to 20. D1 is nearly always 0 because the chance is about 1 in 384 per run and you have only 100 runs; to see about 26 such runs you would need 10,000 runs. If a cell shows #NAME?, check the spelling of BINOM.INV and BINOM.DIST. If the numbers never change, press F9 to recalculate. D5 uses 30 because &ldquo;31 or more&rdquo; is 1 &minus; (&ldquo;30 or fewer&rdquo;).</div>
+</details>
+</div></div>
+
+<div style="margin-bottom: 6px;"></div>
+</div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 31.3 &mdash; Does the Claim Fit the Data?</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded questions (expected counts, exact chances, borderline results, careful conclusions) and one short written item: state the claimed model, compare the result to what simulation shows, and write a careful conclusion. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 31.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on models, consistent versus unusual, borderline results, and multiple looks.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Sampling &amp; Study Design</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 31.3 &middot; Is the Model Consistent with the Data?</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

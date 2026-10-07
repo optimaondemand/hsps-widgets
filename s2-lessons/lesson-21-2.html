@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 21.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 7</div>
+        <div style="font-size: 12px; color: #666;">Data &amp; Data Displays</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 21.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 16px; color: #0e1c42;">Honesty</div>
+        <div style="font-size: 12px; color: #666;">Representing data truthfully</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 21.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Misleading Displays</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A graph can be true in every number and still tell a lie &mdash; the honest reader learns to check.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Reading graphs defensively: five questions that catch the common distortions</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, run the Misleading Graph Lab, practice the Desmos entries, and complete the three activities at the bottom. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> recognize the cut-off axis, cherry-picked window, unequal gaps drawn equal, oversized icons, and missing context.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> quantify what a distortion changes by comparing the ratio the picture suggests with the true ratio.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain when a nonzero axis is acceptable and when it is not.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use the five-question checklist to audit a graph and describe an honest redraw.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Misleading Graph Lab embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128373;&#65039; A GRAPH CAN TELL THE TRUTH AND STILL MISLEAD</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every display you have drawn so far followed the rules. But the same numbers can be drawn in ways that make a small difference look huge, a falling trend look like a rise, or a doubling look like a quadrupling &mdash; and no number on the graph is false. The numbers are right; the <em>picture</em> misleads. Sometimes the cause is dishonesty; sometimes it is carelessness or a software default. The honest reader does not need to know which. She only needs to know how to <strong>read a graph defensively</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">This lesson teaches five questions that catch the common distortions. The examples are <strong>constructed</strong> to show the techniques; none is taken from a real newspaper, company, or person. Real graphics that use these tricks are easy to find &mdash; once you know what to look for, you will start seeing them.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128207; DISTORTION 1: THE CUT-OFF AXIS &mdash; &ldquo;ZERO START?&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A bar chart encodes a value in a bar's <em>length</em>. That only works if the bars begin at zero, because the eye compares lengths. Suppose 52% of customers of Brand A and 55% of Brand B say they are satisfied (<em>constructed</em>). Here is the same data twice:</div>
+<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; margin: 6px 0 14px 0;"><div style="flex: 1; min-width: 210px; max-width: 240px;"><div style="font-size: 15px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Axis starts at 0</strong></div><div style="display: flex;"><div style="width: 34px; position: relative; height: 150px;"><div style="position: absolute; right: 4px; bottom: 0.0%; transform: translateY(50%); font-size: 11px; color: #1a2340;">0</div><div style="position: absolute; right: 4px; bottom: 33.3%; transform: translateY(50%); font-size: 11px; color: #1a2340;">20</div><div style="position: absolute; right: 4px; bottom: 66.7%; transform: translateY(50%); font-size: 11px; color: #1a2340;">40</div><div style="position: absolute; right: 4px; bottom: 100.0%; transform: translateY(50%); font-size: 11px; color: #1a2340;">60</div></div><div style="flex: 1; display: flex; align-items: flex-end; height: 150px; border-left: 2px solid #0E1C42; border-bottom: 2px solid #0E1C42; gap: 14%; padding: 0 12%; box-sizing: border-box;"><div style="flex: 1; height: 86.7%; background: #2196D0;"></div><div style="flex: 1; height: 91.7%; background: #2196D0;"></div></div></div><div style="display: flex; margin-left: 34px; padding: 0 12%; gap: 14%;"><div style="flex: 1; text-align: center; font-size: 13px; color: #1a2340;">Brand A</div><div style="flex: 1; text-align: center; font-size: 13px; color: #1a2340;">Brand B</div></div><div style="font-size: 12px; color: #666; text-align: center; margin-top: 4px;">Honest view.</div></div><div style="flex: 1; min-width: 210px; max-width: 240px;"><div style="font-size: 15px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Axis starts at 50</strong></div><div style="display: flex;"><div style="width: 34px; position: relative; height: 150px;"><div style="position: absolute; right: 4px; bottom: 0.0%; transform: translateY(50%); font-size: 11px; color: #1a2340;">50</div><div style="position: absolute; right: 4px; bottom: 33.3%; transform: translateY(50%); font-size: 11px; color: #1a2340;">52</div><div style="position: absolute; right: 4px; bottom: 66.7%; transform: translateY(50%); font-size: 11px; color: #1a2340;">54</div><div style="position: absolute; right: 4px; bottom: 100.0%; transform: translateY(50%); font-size: 11px; color: #1a2340;">56</div></div><div style="flex: 1; display: flex; align-items: flex-end; height: 150px; border-left: 2px solid #0E1C42; border-bottom: 2px solid #0E1C42; gap: 14%; padding: 0 12%; box-sizing: border-box;"><div style="flex: 1; height: 33.3%; background: #2196D0;"></div><div style="flex: 1; height: 83.3%; background: #2196D0;"></div></div></div><div style="display: flex; margin-left: 34px; padding: 0 12%; gap: 14%;"><div style="flex: 1; text-align: center; font-size: 13px; color: #1a2340;">Brand A</div><div style="flex: 1; text-align: center; font-size: 13px; color: #1a2340;">Brand B</div></div><div style="font-size: 12px; color: #666; text-align: center; margin-top: 4px;">Looks dramatic.</div></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>The numbers behind the pictures.</strong> Truthfully, \(\dfrac{55}{52} \approx 1.058\): Brand B is about 5.8% higher. In the cut-off chart the Brand B bar rises \(55 - 50 = 5\) units above the baseline while Brand A rises only \(52 - 50 = 2\), so B's bar is drawn \(\dfrac{5}{2} = 2.5\) times as tall &mdash; a 150% difference to the eye, for a 5.8% difference in fact.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>The rule.</strong> For <em>bar charts and pictographs</em>, the axis must start at zero. Line graphs and scatter plots encode values by <em>position</em>, not length, so a labeled axis that starts higher is acceptable &mdash; but the label must be there, and the next distortion still applies.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128197; DISTORTION 2: THE CHERRY-PICKED WINDOW &mdash; &ldquo;FULL RANGE?&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A line graph shows change over time, and <em>which</em> stretch of time you show decides the story. Monthly riders (in thousands) on a made-up bus line, January to December: Jan 82, Feb 80, Mar 79, Apr 77, May 76, Jun 74, Jul 73, Aug 72, Sep 71, Oct 73, Nov 75, Dec 77.</div>
+<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 12px;"><div style="flex: 1; min-width: 280px;"><div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>The whole year</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 300 190" width="300" height="190" role="img" aria-label="The whole year" style="max-width: 100%; height: auto;"><line x1="48" y1="12" x2="48" y2="160" stroke="#0E1C42" stroke-width="2"/><line x1="48" y1="160" x2="286" y2="160" stroke="#0E1C42" stroke-width="2"/><text x="43" y="164.0" font-size="11" text-anchor="end" fill="#1a2340">65</text><line x1="48" y1="160.0" x2="286" y2="160.0" stroke="#E3E8F2"/><text x="43" y="127.0" font-size="11" text-anchor="end" fill="#1a2340">70</text><line x1="48" y1="123.0" x2="286" y2="123.0" stroke="#E3E8F2"/><text x="43" y="90.0" font-size="11" text-anchor="end" fill="#1a2340">75</text><line x1="48" y1="86.0" x2="286" y2="86.0" stroke="#E3E8F2"/><text x="43" y="53.0" font-size="11" text-anchor="end" fill="#1a2340">80</text><line x1="48" y1="49.0" x2="286" y2="49.0" stroke="#E3E8F2"/><text x="43" y="16.0" font-size="11" text-anchor="end" fill="#1a2340">85</text><line x1="48" y1="12.0" x2="286" y2="12.0" stroke="#E3E8F2"/><text x="48.0" y="174" font-size="11" text-anchor="middle" fill="#1a2340">0</text><text x="112.9" y="174" font-size="11" text-anchor="middle" fill="#1a2340">3</text><text x="177.8" y="174" font-size="11" text-anchor="middle" fill="#1a2340">6</text><text x="242.7" y="174" font-size="11" text-anchor="middle" fill="#1a2340">9</text><text x="286.0" y="174" font-size="11" text-anchor="middle" fill="#1a2340">11</text><polyline points="48.0,34.2 69.6,49.0 91.3,56.4 112.9,71.2 134.5,78.6 156.2,93.4 177.8,100.8 199.5,108.2 221.1,115.6 242.7,100.8 264.4,86.0 286.0,71.2" fill="none" stroke="#2196D0" stroke-width="2.5"/><circle cx="48.0" cy="34.2" r="3.5" fill="#0E1C42"/><circle cx="69.6" cy="49.0" r="3.5" fill="#0E1C42"/><circle cx="91.3" cy="56.4" r="3.5" fill="#0E1C42"/><circle cx="112.9" cy="71.2" r="3.5" fill="#0E1C42"/><circle cx="134.5" cy="78.6" r="3.5" fill="#0E1C42"/><circle cx="156.2" cy="93.4" r="3.5" fill="#0E1C42"/><circle cx="177.8" cy="100.8" r="3.5" fill="#0E1C42"/><circle cx="199.5" cy="108.2" r="3.5" fill="#0E1C42"/><circle cx="221.1" cy="115.6" r="3.5" fill="#0E1C42"/><circle cx="242.7" cy="100.8" r="3.5" fill="#0E1C42"/><circle cx="264.4" cy="86.0" r="3.5" fill="#0E1C42"/><circle cx="286.0" cy="71.2" r="3.5" fill="#0E1C42"/></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Horizontal: month (0 = Jan, 11 = Dec) &middot; Vertical: riders (thousands)</div></div>
+</div><div style="flex: 1; min-width: 280px;"><div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Only Sep to Dec</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 300 190" width="300" height="190" role="img" aria-label="Only Sep to Dec" style="max-width: 100%; height: auto;"><line x1="48" y1="12" x2="48" y2="160" stroke="#0E1C42" stroke-width="2"/><line x1="48" y1="160" x2="286" y2="160" stroke="#0E1C42" stroke-width="2"/><text x="43" y="164.0" font-size="11" text-anchor="end" fill="#1a2340">65</text><line x1="48" y1="160.0" x2="286" y2="160.0" stroke="#E3E8F2"/><text x="43" y="127.0" font-size="11" text-anchor="end" fill="#1a2340">70</text><line x1="48" y1="123.0" x2="286" y2="123.0" stroke="#E3E8F2"/><text x="43" y="90.0" font-size="11" text-anchor="end" fill="#1a2340">75</text><line x1="48" y1="86.0" x2="286" y2="86.0" stroke="#E3E8F2"/><text x="43" y="53.0" font-size="11" text-anchor="end" fill="#1a2340">80</text><line x1="48" y1="49.0" x2="286" y2="49.0" stroke="#E3E8F2"/><text x="43" y="16.0" font-size="11" text-anchor="end" fill="#1a2340">85</text><line x1="48" y1="12.0" x2="286" y2="12.0" stroke="#E3E8F2"/><text x="48.0" y="174" font-size="11" text-anchor="middle" fill="#1a2340">8</text><text x="127.3" y="174" font-size="11" text-anchor="middle" fill="#1a2340">9</text><text x="206.7" y="174" font-size="11" text-anchor="middle" fill="#1a2340">10</text><text x="286.0" y="174" font-size="11" text-anchor="middle" fill="#1a2340">11</text><polyline points="48.0,115.6 127.3,100.8 206.7,86.0 286.0,71.2" fill="none" stroke="#2196D0" stroke-width="2.5"/><circle cx="48.0" cy="115.6" r="3.5" fill="#0E1C42"/><circle cx="127.3" cy="100.8" r="3.5" fill="#0E1C42"/><circle cx="206.7" cy="86.0" r="3.5" fill="#0E1C42"/><circle cx="286.0" cy="71.2" r="3.5" fill="#0E1C42"/></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Horizontal: month (8 = Sep, 11 = Dec) &middot; Vertical: riders (thousands)</div></div>
+</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Over the whole year the line <em>fell</em> from 82 to 77, a change of \(77 - 82 = -5\) thousand. Since September it has <em>risen</em> from 71 to 77, a change of \(77 - 71 = +6\) thousand. A headline reading &ldquo;Ridership is climbing!&rdquo; and the second picture are not lying about the last four months &mdash; they simply do not show the first eight. <strong>Ask what comes before the graph begins.</strong></div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128198; DISTORTION 3: UNEQUAL GAPS DRAWN EQUAL &mdash; &ldquo;EQUAL GAPS?&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Suppose a town's recycling (in tons, <em>constructed</em>) is measured in 2000, 2010, 2020, and 2021: 2000: 10, 2010: 20, 2020: 60, 2021: 61. If the four readings are placed at equal spacing along the axis, the gaps of 10 years, 10 years, and 1 year look the same. But the rates are very different: \(\dfrac{20 - 10}{10} = 1\) ton per year, then \(\dfrac{60 - 20}{10} = 4\) tons per year, then \(\dfrac{61 - 60}{1} = 1\) ton per year. Equal spacing hides that growth quadrupled and then fell back. <strong>The axis must be scaled by the true gap, not by the number of readings.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">(This is why, in Lesson 21.3, you will build line graphs with the scatter chart type: it spaces points by their true values.)</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128444;&#65039; DISTORTION 4: ICONS THAT GROW IN TWO DIRECTIONS &mdash; &ldquo;SIZES TRUE?&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>pictograph</strong> uses pictures instead of bars. If the value doubles and the artist draws the icon twice as tall <em>and</em> twice as wide, the eye reads area, not height:</div>
+<div style="display: flex; justify-content: center; align-items: flex-end; gap: 36px; margin: 6px 0 14px 0;"><div style="text-align: center;"><div style="width: 40px; height: 40px; background: #2196D0; border: 2px solid #0E1C42; margin: 0 auto;"></div><div style="font-size: 13px; color: #1a2340; margin-top: 4px;">Value 100<br />icon 40 px wide and tall</div></div><div style="text-align: center;"><div style="width: 80px; height: 80px; background: #2196D0; border: 2px solid #0E1C42; margin: 0 auto;"></div><div style="font-size: 13px; color: #1a2340; margin-top: 4px;">Value 200<br />icon 80 px wide and tall</div></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">The second icon is \(\dfrac{80 \times 80}{40 \times 40} = 4\) times the area of the first, though the value only doubled. <strong>Honest pictographs repeat a same-size icon</strong> (two icons for 200, one for 100) so that the <em>count</em> carries the value.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127991;&#65039; DISTORTION 5: MISSING CONTEXT &mdash; &ldquo;LABELS, SOURCE?&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A graph with no title, no axis labels, no units, no sample size, and no source cannot be checked at all. You learned in Lesson 19.3 what an honest label contains: what was measured, on whom, in what units, how many, and where the data came from. Last week's histogram lesson added one more: <strong>bin width</strong>. A histogram drawn with the wrong bin width can erase a real gap or invent a bump.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>The defensive reader's five questions</strong> (keep these; the widget below uses the same five):</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#9989; READING A GRAPH DEFENSIVELY</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;"><strong>(1) Zero start?</strong> For bars and pictographs, does the axis begin at zero. <strong>(2) Full range?</strong> Is the whole time range shown, or only a convenient slice. <strong>(3) Equal gaps?</strong> Are equal gaps on the axis equal intervals of the variable. <strong>(4) Sizes true?</strong> Do the sizes of icons and bars match the values (length for bars, same-size icons for counts). <strong>(5) Labels, source?</strong> Are the title, units, sample size, bin width, and source given.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Misleading Graph Lab</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">Work through the five tabs: the cut-off axis, the time window, uneven spacing, icon size, and bin width. <strong>(1)</strong> In each, first say out loud what the graph seems to claim. <strong>(2)</strong> Use the fix buttons and watch the &ldquo;story meter&rdquo; change. <strong>(3)</strong> Answer the diagnosis question before you look at the explanation. <strong>(4)</strong> Finish with the defensive-reading checklist &mdash; it is the same five questions you just met. All the organizations and numbers in the widget are made up.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/misleading-graph.html" width="100%" height="900" style="border: none; display: block;" title="The Misleading Graph Lab" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/misleading-graph.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; A LITTLE DESMOS: SIZE OF A DISTORTION</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            Quantify a distortion with one visible expression. The true percent difference between 52 and 55 is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(55-52)/52*100</code> &rarr; 5.77. The drawn ratio of the cut-off bars is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(55-50)/(52-50)</code> &rarr; 2.5. And the icon area ratio is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(80/40)^2</code> &rarr; 4 (type the caret with the <strong>^</strong> key). When a graph looks dramatic, writing the two numbers side by side &mdash; <em>what the picture suggests</em> and <em>what the data say</em> &mdash; is the quickest audit.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Describe this graph to an AI tool and ask what is wrong with it: <em>&ldquo;A bar chart titled &lsquo;Satisfaction&rsquo; shows two bars, 71% and 74%. The vertical axis runs from 70 to 75. There are no axis labels or source.&rdquo;</em><br />
+            <strong>Predict.</strong> Audit it yourself first with the five questions: the axis does not start at zero, there are no labels, no source, no sample size. How tall would the second bar look compared with the first? (The bars rise 1 and 4 units above the 70 baseline, so 4 times as tall, for a true ratio of about 1.04.)<br />
+            <strong>Verify.</strong> Compare the AI's list with yours. Which problems did it catch, and which did it miss? Did it compute the apparent ratio? Then ask it a harder follow-up and watch for a confident but wrong claim, such as saying that every line graph must start at zero.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Audit the Graphs</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Run all five questions on each (all <em>constructed</em>): (a) a bar chart of two sports teams' wins, 18 and 20, on an axis from 16 to 20; (b) a line graph titled &ldquo;Sales Skyrocket!&rdquo; showing only the last three of 24 months, during which sales rose from 410 to 430 after falling from 600; (c) a pictograph of cars sold, 100 versus 200, where the 200-car icon is twice as tall and twice as wide as the 100-car icon.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each, write which question it fails and what the true comparison is.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) Fails zero start: the bars rise 2 and 4 units above the 16 baseline, so the 20-win bar looks twice as tall, but the true ratio is 20/18, about 1.11. (b) Fails full range: over 24 months sales fell from 600 to 430, while the last three months rose 20. (c) Fails sizes true: the icon has four times the area of the other, though the value is only doubled.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Fix It</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Redraw (a) from the audit with an honest axis. Then describe, in two sentences, how you would redraw (b) and (c).</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Explain to a partner why a labeled nonzero axis can be acceptable on a line graph but not on a bar chart.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) Axis from 0 to 20 or 25; bars of 18 and 20 look nearly equal. (b) Show all 24 months (and the labeled axis). (c) Use one same-size icon per 100 cars: one icon versus two. The nonzero line graph is acceptable because the reader judges <em>position</em> and slope, not bar length &mdash; though the label must be present and the time range must still be full.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Spot the Spacing</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A graph shows a club's membership in 2010, 2015, 2020, and 2021 with the four points equally spaced on the horizontal axis. The values are 40, 55, 100, and 104. Compute the rate of change (members per year) for each interval and say what the equal spacing hides.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write one sentence a younger student could use to remember the five questions.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Rates: (55 &minus; 40)/5 = 3 per year; (100 &minus; 55)/5 = 9 per year; (104 &minus; 100)/1 = 4 per year. Equal spacing treats 5-year and 1-year gaps alike, hiding that growth tripled between 2015 and 2020 and then slowed. Memory sentences will vary; look for all five ideas.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 21.2 &mdash; Read Defensively</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: audit constructed graphs with the five questions, compute what a distortion changes, and redraw honestly. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 21.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the five distortions and the defensive-reading checklist.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 21.3 &mdash; Data Displays in Excel (Lab)</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Build four honest charts in Excel and upload the workbook.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 21.2 &middot; Misleading Displays</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

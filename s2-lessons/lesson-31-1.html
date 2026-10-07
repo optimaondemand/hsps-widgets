@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 31.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 31.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Owning what a number can promise</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 31.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Sampling Variation: Many Samples, Many Estimates</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A fair random sample still misses the truth by a little, and the misses follow a pattern we can describe.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Sampling variation; the distribution of many sample proportions (center, shape, spread); bigger samples swing less; sampling variation versus bias; &ldquo;typical swing&rdquo; and &ldquo;within 5 points of the truth&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Sample Variation interactive, follow the Excel steps, and complete the three activities at the bottom. Plan on about 80 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that different random samples from the same population give different statistics (<strong>sampling variation</strong>), even when the sampling method is completely fair.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe the distribution of many sample proportions: where it is centered, what shape it has, and how spread out it is.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> show that a larger sample gives less spread (about half the swing when <em>n</em> is four times as big), using the typical swing and the share of estimates within 5 points of the truth.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> distinguish <strong>sampling variation</strong> (chance; it shrinks as <em>n</em> grows) from <strong>bias</strong> (a lean in the method; it does not shrink as <em>n</em> grows).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Two friends each toss a fair coin 10 times. One gets 3 heads and the other gets 6. Nobody cheated, and the coin did not change. Chance alone made the two results differ.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Sampling works the same way. Last week you learned that a random sample is a <em>fair</em> way to choose people, and that one fair sample can still miss the truth. Today we ask the next question: <strong>how far does a fair sample usually miss, and what happens to the misses when we draw many samples, or bigger ones?</strong> It turns out the misses are not chaos. They pile up in a shape you can see, measure, and shrink.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Responsibility</strong>, this module&rsquo;s virtue, looks like this: when you report a number from a sample, you owe your reader an honest sense of how much that number could have moved. Reporting a single figure as though it were certain is a small act of overclaiming.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every population, percent, and sample in this lesson is <strong>constructed</strong> (made up) or <strong>simulated</strong> by a computer to teach the idea. None of it is real survey data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; ONE POPULATION, MANY SAMPLES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Imagine a made-up school where exactly 40% of the students walk to school. That 40% is a <strong>parameter</strong>: one fixed number describing the whole population. Now a student council member takes a simple random sample of 25 students and records the <strong>sample proportion</strong> (the fraction in the sample who walk). That is a <strong>statistic</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">If she repeats the whole process with a fresh random sample of 25, she will almost surely get a different proportion. A third sample gives a third value. This sample-to-sample difference in a statistic is called <strong>sampling variation</strong>. It is caused by chance in <em>who</em> landed in the sample, and it happens even though:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; the population did not change (it is still 40%),<br />&#9654; the method was random, and<br />&#9654; nobody made a mistake.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">So sampling variation is not an error to be embarrassed about, and it is not bias. It is the normal behavior of a fair method. The honest question is not <em>&ldquo;will my sample hit the truth exactly?&rdquo;</em> but <em>&ldquo;how far is it likely to land?&rdquo;</em> To answer that, we need to see what happens across many samples.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: TWENTY SIMULATED SAMPLES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up school has 40% walkers. A computer program draws 20 simple random samples of <em>n</em> = 25 students. This is a <strong>simulation</strong>: the 20 values below were generated by a script with a fixed starting seed, so they are simulated, not collected from real students. For each sample the program records the number who walk, <em>k</em>, and the sample proportion <em>k</em> &divide; 25. Build a frequency table and a dot plot, then find the mean and the spread of the 20 estimates.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> First, the 20 counts of walkers, in the order they were drawn: <strong>7, 9, 10, 15, 6, 13, 12, 11, 7, 8, 10, 8, 13, 6, 8, 11, 9, 11, 8, 12</strong>. Dividing each by 25 gives the 20 sample proportions. Only two of them (the two 10s) equal the truth, 0.40. The rest are off, some by a lot.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Frequency table.</strong> I group equal values and count them.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 320px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Walkers in sample (<em>k</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sample proportion (<em>k</em> &divide; 25)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Tally</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Frequency</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.24</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">7</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.28</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">8</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.32</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; &#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">9</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.36</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">10</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.40</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">11</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.44</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">12</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.48</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">13</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.52</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; &#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">14</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.56</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&ndash;</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">15</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.60</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&#9679; </td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Dot plot.</strong> Each dot is one simulated sample. The dashed gold line marks the true 0.40.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="background: #F8F9FA; border: 1px solid #D0D9E8; border-radius: 8px; padding: 12px; margin-bottom: 14px;"><svg viewBox="0 0 640 250" width="100%" style="max-width: 640px; display: block; margin: 0 auto;" role="img" aria-label="Dot plot of 20 simulated sample proportions at n = 25. Values run from 0.24 to 0.60 and pile up near 0.40. The tallest stack is four dots at 0.32."><rect x="0" y="0" width="640" height="250" fill="#FFFFFF"/><line x1="40" y1="175" x2="620" y2="175" stroke="#0E1C42" stroke-width="2"/><line x1="40.0" y1="175" x2="40.0" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="40.0" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.20</text><line x1="92.7" y1="175" x2="92.7" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="92.7" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.24</text><line x1="145.5" y1="175" x2="145.5" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="145.5" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.28</text><line x1="198.2" y1="175" x2="198.2" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="198.2" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.32</text><line x1="250.9" y1="175" x2="250.9" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="250.9" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.36</text><line x1="303.6" y1="175" x2="303.6" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="303.6" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.40</text><line x1="356.4" y1="175" x2="356.4" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="356.4" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.44</text><line x1="409.1" y1="175" x2="409.1" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="409.1" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.48</text><line x1="461.8" y1="175" x2="461.8" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="461.8" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.52</text><line x1="514.5" y1="175" x2="514.5" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="514.5" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.56</text><line x1="567.3" y1="175" x2="567.3" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="567.3" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.60</text><line x1="620.0" y1="175" x2="620.0" y2="181" stroke="#0E1C42" stroke-width="1.5"/><text x="620.0" y="197" font-size="13" text-anchor="middle" fill="#1a2340">0.64</text><text x="330" y="221" font-size="14" text-anchor="middle" fill="#0E1C42">Sample proportion who walk (n = 25)</text><line x1="303.6" y1="30" x2="303.6" y2="175" stroke="#C7922C" stroke-width="2.5" stroke-dasharray="6 4"/><text x="303.6" y="22" font-size="13" text-anchor="middle" fill="#8a6218">true 0.40</text><circle cx="145.5" cy="164" r="8.5" fill="#0E1C42"/><circle cx="145.5" cy="144" r="8.5" fill="#0E1C42"/><circle cx="250.9" cy="164" r="8.5" fill="#0E1C42"/><circle cx="250.9" cy="144" r="8.5" fill="#0E1C42"/><circle cx="303.6" cy="164" r="8.5" fill="#0E1C42"/><circle cx="303.6" cy="144" r="8.5" fill="#0E1C42"/><circle cx="567.3" cy="164" r="8.5" fill="#0E1C42"/><circle cx="92.7" cy="164" r="8.5" fill="#0E1C42"/><circle cx="92.7" cy="144" r="8.5" fill="#0E1C42"/><circle cx="461.8" cy="164" r="8.5" fill="#0E1C42"/><circle cx="461.8" cy="144" r="8.5" fill="#0E1C42"/><circle cx="409.1" cy="164" r="8.5" fill="#0E1C42"/><circle cx="409.1" cy="144" r="8.5" fill="#0E1C42"/><circle cx="356.4" cy="164" r="8.5" fill="#0E1C42"/><circle cx="356.4" cy="144" r="8.5" fill="#0E1C42"/><circle cx="356.4" cy="124" r="8.5" fill="#0E1C42"/><circle cx="198.2" cy="164" r="8.5" fill="#0E1C42"/><circle cx="198.2" cy="144" r="8.5" fill="#0E1C42"/><circle cx="198.2" cy="124" r="8.5" fill="#0E1C42"/><circle cx="198.2" cy="104" r="8.5" fill="#0E1C42"/></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 6px;">Simulated data: 20 sample proportions, each from a random sample of 25 (true proportion 0.40, made up).</div></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Center.</strong> The 20 counts add to 194, so the mean of the 20 proportions is 194 &divide; (20 &times; 25) = 194 &divide; 500 = <strong>0.388</strong>. That is close to the truth, 0.40, though not equal to it. (Only 20 samples is a small pile, so we expect the mean to be near 0.40 but not on it.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Spread.</strong> Using the sample standard deviation of the 20 proportions (Excel&rsquo;s <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">STDEV.S</code>), I get <strong>about 0.101</strong>. I will call this the <strong>typical swing</strong>: roughly how far a single estimate lands from the center of the pile. The smallest estimate is 0.24 and the largest is 0.60, so these 20 estimates stretch across 0.36 of the number line.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Within 5 points.</strong> Which estimates landed within 5 percentage points of the truth, that is, between 0.35 and 0.45? Only the values 0.36, 0.40, and 0.44 (<em>k</em> = 9, 10, 11). Counting: 2 + 2 + 3 = <strong>7 of 20</strong>, or 35%. So 13 of the 20 fair samples missed by more than 5 points.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> In this simulated run: mean 0.388 (near 0.40), typical swing about 0.101, range 0.24 to 0.60, and 7 of 20 estimates within 5 points. <strong>None of these 20 fair samples was &ldquo;wrong.&rdquo;</strong> The swing is what chance does. A second run would give different numbers; the theory below says the typical swing for <em>n</em> = 25 is about 0.098, close to what we saw.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; CENTER, SHAPE, AND SPREAD OF THE PILE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When we collect many sample proportions from the same population and the same sample size, the pile of values (a <strong>distribution</strong> of estimates) has three features to describe, just like any data display.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Center.</strong> The pile is centered near the true value. Fair random sampling does not lean high or low, so over many samples the highs and lows balance. (With only 20 samples, the mean is near the truth but not exactly on it, as in Worked Example 1.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Shape.</strong> The pile is roughly <strong>symmetric and bell-shaped</strong> when the sample is reasonably large and the true proportion is not too close to 0 or 1: a tall middle and thinner tails on both sides. With only 20 dots the picture is lumpy; with hundreds of samples the bell shape becomes clear. You will see this in the interactive.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Spread.</strong> The typical swing tells how wide the pile is. It is the number that answers &ldquo;how far does one fair sample usually land from the truth?&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Notice what the pile does <em>not</em> do. It does not collapse onto one value. Even a perfect method produces a spread, and that spread is a property of the method and the sample size, not of anyone&rsquo;s carelessness.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Many Samples, Many Estimates</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Six tasks.</strong> Stay on the first tab, <em>Many samples, many estimates</em>. Under <em>Scenario</em> choose <em>Students who walk to school (made up)</em>; its true percent is 40%. Move the <em>Sample size n</em> slider to <strong>25</strong> (click the slider, then use the arrow keys for fine steps). <strong>(1)</strong> Press <em>Draw one sample</em> a few times and watch the sample proportion jump around. <strong>(2)</strong> Press <em>Draw 10</em>, then <em>Draw 100</em>, then <em>Draw 1000</em>. Watch the pile of estimates grow into a bell shape, and read the tiles <em>Samples drawn</em>, <em>Mean of the estimates</em>, <em>Typical swing (SD)</em>, <em>Smallest estimate</em>, and <em>Largest estimate</em>. <strong>(3)</strong> Press <em>Show the truth</em>. The tile <em>Within 5 points of the truth</em> now fills in. At <em>n</em> = 25 expect about 46%. <strong>(4)</strong> Press <em>Clear</em>, move <em>n</em> to <strong>100</strong>, and press <em>Draw 1000</em>. The typical swing should drop to about 0.049, roughly half, and about 74% of estimates should be within 5 points. <strong>(5)</strong> Press <em>Compare sample sizes</em>. It draws 500 samples each at <em>n</em> = 25, 100, and 400 and shows the three piles together (it also reveals the truth). Typical swings should be about 0.098, 0.049, and 0.025, with about 46%, 74%, and 96% within 5 points. <strong>(6)</strong> Read <em>What to notice</em> and the <em>Honest note</em>, then write one sentence: &ldquo;When I made <em>n</em> four times as big, the typical swing became about ____ as big.&rdquo; Your numbers will differ a little from these each time you draw, because the draws are random. That is sampling variation showing up in the lesson itself.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/sample-variation.html" width="100%" height="1100" style="border: none; display: block;" title="Sample Variation" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/sample-variation.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is long, so scroll inside the frame.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: FOUR TIMES AS BIG, HALF THE SWING</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The interactive ran 20,000 simulated random samples at each of three sample sizes from a made-up population with true proportion <em>p</em> = 0.40. The measured typical swings were 0.0984 (<em>n</em> = 25), 0.0489 (<em>n</em> = 100), and 0.0246 (<em>n</em> = 400). Compare them with the formula <em>&radic;(p(1 &minus; p) &divide; n)</em>, and describe what happens each time the sample size is multiplied by 4.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Here <em>p</em>(1 &minus; <em>p</em>) = 0.4 &times; 0.6 = 0.24. For <em>n</em> = 25 the formula gives &radic;(0.24 &divide; 25) = &radic;0.0096 = <strong>0.0980</strong>. For <em>n</em> = 100 it gives &radic;(0.24 &divide; 100) = &radic;0.0024 = <strong>0.0490</strong>. For <em>n</em> = 400 it gives &radic;(0.24 &divide; 400) = &radic;0.0006 = <strong>0.0245</strong>. These match the simulated values to about three decimals, so the formula and the simulation agree.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 320px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sample size <em>n</em></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Simulated typical swing</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Formula &radic;(0.24 &divide; <em>n</em>)</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Compared with the row above</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">25</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0984</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0980</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">&ndash;</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0489</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0490</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about half (0.0984 &divide; 0.0489 &asymp; 2.0)</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">400</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0246</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0245</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about half (0.0489 &divide; 0.0246 &asymp; 2.0)</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Each time <em>n</em> was multiplied by 4, the typical swing was cut to about <strong>half</strong>. That is no accident: <em>n</em> sits under a square root, and &radic;4 = 2. To halve the swing you need <em>four times</em> as many people. To cut it to a third you would need nine times as many.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Larger samples swing less, but with diminishing returns: going from 25 to 100 people (75 more) lowers the typical swing by about 0.049, while going from 100 to 400 (300 more) lowers it by only about 0.025. The formula is a tool for reading the pattern; the evidence is the simulation, which you can run yourself.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: READING &ldquo;TYPICAL SWING&rdquo; AND &ldquo;WITHIN 5 POINTS&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Using the same made-up population (<em>p</em> = 0.40), the interactive reports that about 46% of estimates at <em>n</em> = 25, about 74% at <em>n</em> = 100, and about 96% at <em>n</em> = 400 land within 5 percentage points of the truth. (a) Say in a sentence what &ldquo;typical swing 0.049&rdquo; means for <em>n</em> = 100. (b) A student reads &ldquo;46% within 5 points at <em>n</em> = 25&rdquo; and says &ldquo;so a sample of 25 is correct 46% of the time.&rdquo; Is that a fair reading? (c) A researcher wants her sample proportion to land within 5 points of the truth about 95% of the time in this population. Which of the three sample sizes comes closest?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> (a) A typical swing of 0.049 means that a single random sample of 100 usually lands within roughly 5 percentage points of the truth, give or take: sometimes closer, sometimes farther. It is a size for the usual miss, not a limit that can never be broken.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">(b) Not quite. &ldquo;Within 5 points&rdquo; is a window around the truth, not a claim of being exactly right. A better sentence is: &ldquo;If we drew many random samples of 25, about 46% of them would land within 5 points of the true percent, and the other 54% would miss by more.&rdquo; At <em>n</em> = 25 a miss of more than 5 points is actually <em>more likely than not</em>. The 46% belongs to the whole pile, not to any one sample.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">(c) 96% at <em>n</em> = 400 is the one that reaches about 95%. At <em>n</em> = 100 the share is only about 74%, and at <em>n</em> = 25 it is about 46%. Bigger samples buy more confidence that the estimate sits in a narrow window.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> (a) The usual miss is about 0.049, or about 5 points. (b) Not fair as stated; the 46% describes many samples, not the correctness of one. (c) <em>n</em> = 400. <strong>Preview.</strong> Reporting a window around an estimate, and saying how often such windows catch the truth, is what Module 12 builds into the <strong>margin of error</strong>. Today you are only seeing where it comes from: the spread of estimates across many samples.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; SAMPLING VARIATION OR BIAS?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">These two ideas both make a sample statistic miss the truth, and they are easy to mix up. Keep them apart.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 320px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;"></th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Sampling variation</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Bias</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Where it comes from</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Chance in who happens to be in the sample</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A lean built into the method (who can be chosen, who answers, how the question is worded)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Which way does it push?</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Both ways, balancing out over many samples</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Mostly one way, every time</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Where is the pile centered?</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Near the truth</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Away from the truth</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">What happens as <em>n</em> grows?</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The pile gets <strong>narrower</strong></td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The pile gets narrower but stays <strong>off-center</strong></td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Can a bigger sample fix it?</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Yes, it shrinks</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">No</td></tr></tbody></table></div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A constructed illustration.</strong> Suppose the true proportion is 0.40, but a made-up poll collects answers only from people at a gym, where (we imagine) the chance of a &ldquo;yes&rdquo; is 0.60 for everyone asked. A computer simulation of 20,000 polls at each size gives a pile centered near <strong>0.60</strong> at <em>n</em> = 25, 100, and 400, with typical swings of about 0.099, 0.049, and 0.024. The swings shrink exactly as before, yet the center stays about 0.20 above the truth every time. More people, same lean.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">This is why last week&rsquo;s lesson said a larger sample cures <em>chance</em> error but not <em>bias</em>. Today&rsquo;s interactive shows only fair random sampling, so it shows sampling variation by itself. When you read a claim, ask two questions: <strong>how was the sample chosen</strong> (bias), and <strong>how large was it</strong> (sampling variation).</div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#9888;&#65039; TWO COMMON MISCONCEPTIONS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>&ldquo;A good sample would give exactly the true value.&rdquo;</strong> No. A perfectly good random sample of 25 from a 40% population hits exactly 0.40 only about 16% of the time (the exact chance of 10 walkers out of 25 is about 0.16), so most fair samples miss. In Worked Example 1, only 2 of 20 samples landed exactly on 0.40. A miss is a sign of <em>chance</em>, not of a bad sample.<br />
+            <strong>&ldquo;A bigger population needs a bigger sample.&rdquo;</strong> Mostly not, with a caution. The typical swing depends mainly on the <em>sample size</em> <em>n</em>, not on how large the population is, as long as the sample is a small part of the population. A more exact calculation for <em>p</em> = 0.40 and <em>n</em> = 100 gives a typical swing of about 0.0485 when the population has 5,000 people and about 0.0490 when it has 500,000, nearly the same. (If you sample a large share of a small population, say a third of it, the swing does get smaller; that is not the situation most polls face.) So a poll of one town and a poll of a whole country can use similar sample sizes.
+        </div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127758; WHERE YOU MIGHT SEE THIS: THE &ldquo;PLUS OR MINUS&rdquo; IN A POLL</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">News stories about polls often add a &ldquo;plus or minus&rdquo; of some percentage points to their results; in general, that figure is there because a different random sample would have given a somewhat different number, which is the sampling variation you just measured. In Module 12 you will learn how that plus-or-minus is built and how to read it honestly.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: SIMULATE MANY SAMPLES, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will simulate sampling in a spreadsheet. Everything here is made up: a population in which 40% say &ldquo;yes.&rdquo; This is a practice build; you do not upload it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk31_L1_YourName</code>. Rename the first sheet <strong>Draws</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample</code>. In <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">25 answers (1 = yes, 0 = no)</code>. In <strong>AA1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Proportion</code>. In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1</code> and in <strong>A3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">2</code>. Select <strong>A2:A3</strong>, then drag the small square at the bottom right corner of the selection down to <strong>A21</strong>. The sample numbers should run 1 to 20.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>One person.</strong> Click <strong>B2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(RANDBETWEEN(1,100)&lt;=40,1,0)</code>, then press <strong>Enter</strong>. <strong>RANDBETWEEN(1,100)</strong> picks a random whole number from 1 to 100. Exactly 40 of those 100 numbers are 40 or less, so the <strong>IF</strong> gives 1 (a &ldquo;yes&rdquo;) with a 40% chance and 0 otherwise. Press <strong>F9</strong> (on some laptops <strong>Fn + F9</strong>) a few times and watch B2 flip between 1 and 0.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>One sample of 25.</strong> Click <strong>B2</strong> and press <strong>Ctrl + C</strong>. Click the <strong>Name Box</strong> (the small box left of the formula bar, showing the cell name), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">B2:Z2</code>, and press <strong>Enter</strong> to select those 25 cells. Press <strong>Ctrl + V</strong>. You now have 25 random answers. Click <strong>AA2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(B2:Z2)</code>, and press Enter. The average of 1s and 0s is the share of 1s, so this is the <strong>sample proportion</strong>. (<code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:Z2)</code> would give the count of yeses instead.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Twenty samples.</strong> Click <strong>B2</strong>, press <strong>Ctrl + C</strong>, click the Name Box, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">B2:Z21</code>, press Enter, and press <strong>Ctrl + V</strong>. Then click <strong>AA2</strong>, press <strong>Ctrl + C</strong>, select <strong>AA3:AA21</strong> in the Name Box, and press <strong>Ctrl + V</strong>. Column AA now holds 20 sample proportions, one per row. Press <strong>F9</strong> to see all of them redrawn at once.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Freeze the estimates.</strong> Select <strong>AA2:AA21</strong> and press <strong>Ctrl + C</strong>. Click the <strong>+</strong> beside the sheet tabs to add a sheet and rename it <strong>Results</strong>. In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Estimate</code>, then right-click <strong>A2</strong> and, under <strong>Paste Options</strong>, choose <strong>Values</strong> (the clipboard icon marked 123); or use <strong>Home</strong> &gt; <strong>Paste</strong> &gt; <strong>Paste Special</strong> &gt; <strong>Values</strong>. Click a cell in A and look at the formula bar: it should show a plain number. The Results column no longer changes when you press F9.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Summaries.</strong> On the Results sheet, in <strong>C1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code> and in <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A21)</code>. In <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Typical swing</code> and in <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(A2:A21)</code>. In <strong>C3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Theory</code> and in <strong>D3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(0.4*0.6/25)</code> (this should show 0.0979796&hellip;).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Tally with COUNTIFS.</strong> In <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">From</code>, in <strong>G1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Up to (not including)</code>, and in <strong>H1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Count</code>. Type the lower edges <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.04</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.12</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.20</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.28</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.36</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.44</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.52</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.60</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.68</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.76</code> down <strong>F2:F11</strong>, and the upper edges <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.12</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.20</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.28</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.36</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.44</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.52</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.60</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.68</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.76</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.84</code> down <strong>G2:G11</strong>. Click <strong>H2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS($A$2:$A$21,"&gt;="&amp;F2,$A$2:$A$21,"&lt;"&amp;G2)</code>, press Enter, and drag the fill square down to <strong>H11</strong>. In <strong>H12</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(H2:H11)</code>: it must show <strong>20</strong>. If it does not, an estimate fell outside the bins or a number was mistyped.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Chart the tallies.</strong> Select <strong>H1:H11</strong> (the heading and the ten counts). On the <strong>Insert</strong> tab, in the <strong>Charts</strong> group, choose <strong>Insert Column or Bar Chart</strong> &gt; <strong>Clustered Column</strong>. Right-click the chart, choose <strong>Select Data</strong>, under <strong>Horizontal (Category) Axis Labels</strong> click <strong>Edit</strong>, drag across <strong>F2:F11</strong>, and click <strong>OK</strong> twice. Each column is now labeled by the lower edge of its bin. Give the chart a title and axis titles (select the chart, then <strong>Chart Design</strong> &gt; <strong>Add Chart Element</strong> &gt; <strong>Axis Titles</strong>, or use the <strong>+</strong> button beside the chart).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Check yourself.</strong> Your numbers will not match anyone else&rsquo;s, because the draws are random. But the mean should be near 0.40 (usually between about 0.35 and 0.45), the typical swing should be near 0.098 (usually between about 0.065 and 0.13), and the chart should look like a rough bell around 0.40. Press F9 on the Draws sheet, then freeze again, and watch the numbers change: that is sampling variation in your own workbook.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; SIMULATE, TALLY, AND CHART IN EXCEL; THE SWING FORMULA IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(RANDBETWEEN(1,100)&lt;=40,1,0)</code> simulates one person from a 40% population. Copy it across 25 cells for one sample, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(...)</code> (or <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(...)</code> for the count) gives the sample proportion. Copy the block down for 20 samples. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIFS(range,"&gt;="&amp;low,range,"&lt;"&amp;high)</code> tallies how many estimates fall in a bin, and a Clustered Column chart of the tallies is your histogram. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(range)</code> gives the typical swing of your estimates.<br />
+            <strong>Volatility warning.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RANDBETWEEN</code> recalculates whenever anything in the workbook changes. Before you analyze or submit anything, copy the estimates and use <strong>Paste Special &gt; Values</strong> to freeze them.<br />
+            <strong>Desmos Scientific</strong> is plain arithmetic here. For a true proportion of 0.4 and a sample of 25, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(0.4*0.6/25)</code> and you should get about 0.098. Change 25 to 100 and you should get about 0.049; change it to 400 for about 0.0245. Try <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(0.5*0.5/400)</code> for 0.025.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI TO PREDICT THE SWING; CHECK IT, AND FLAG BIAS-VERSUS-VARIATION MIX-UPS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A population has a true proportion p = 0.4. If I take many simple random samples, how much sample-to-sample variation should I expect in the sample proportion at n = 25 and at n = 100? Give numbers and explain.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide what a careful answer must say: the pile of sample proportions is centered near 0.40, the typical swing is about 0.098 at <em>n</em> = 25 and about 0.049 at <em>n</em> = 100 (half), and a larger sample shrinks the swing but does nothing about a biased method.<br />
+            <strong>Verify.</strong> Open the Sample Variation interactive, set <em>n</em> = 25, press <em>Draw 1000</em>, and read <em>Typical swing (SD)</em>; then press <em>Clear</em>, set <em>n</em> = 100, and press <em>Draw 1000</em> again. Compare with the AI&rsquo;s numbers. Did the AI get the swing right to within about 0.01? Did it say the swing halves when <em>n</em> is four times as big? Did it <strong>confuse sampling variation with bias</strong> (for example, calling the spread an &ldquo;error in the method,&rdquo; or saying a big sample removes every kind of error)? Rewrite its worst sentence so that it is true. <strong>Verdict.</strong> A confident tone is not evidence; the simulation is.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 40 minutes, plus the Excel steps and the interactive above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Then Check</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up seed company says 70% of its seeds sprout. You plant a tray of 25 seeds and count the share that sprout. <strong>(a)</strong> Will your sample proportion be exactly 0.70? <strong>(b)</strong> A friend plants a different tray of 25 from the same bag. Will she get the same proportion as you? Why or why not? <strong>(c)</strong> Using &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>), find the typical swing for 25 seeds and for 100 seeds. In Desmos: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(0.7*0.3/25)</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(0.7*0.3/100)</code>.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In Worked Example 1, the theory said about 46% of samples of 25 land within 5 points of the truth. Out of 20 samples, how many would you <em>expect</em> within 5 points? The simulation had 7. Is that surprising?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In your own words, finish: &ldquo;Sampling variation means &hellip;&rdquo;</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) Very unlikely; a fair sample usually misses a little. (b) Probably not; each tray is a different random sample, so the proportions differ by chance (sampling variation). (c) For 25 seeds: &radic;(0.21 &divide; 25) = &radic;0.0084 &asymp; <strong>0.0917</strong>; for 100 seeds: &radic;(0.21 &divide; 100) = &radic;0.0021 &asymp; <strong>0.0458</strong>. Four times the seeds, about half the swing. 2. 46% of 20 is about 9.2, so about 9 expected. Getting 7 is a little low but not surprising for only 20 samples, since small piles are lumpy. 3. Example: &ldquo;Sampling variation means that different random samples from the same population give different statistics, just by chance, even when the method is fair.&rdquo;
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Chance or Lean?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Decide for each constructed situation whether the miss is mainly <strong>sampling variation</strong> or <strong>bias</strong>, and say whether making the sample four times as big would help. <strong>(a)</strong> Two simple random samples of 50 students from the same made-up school give 38% and 46% who like the new lunch menu. <strong>(b)</strong> A made-up website asks visitors &ldquo;Do you love video games?&rdquo; and 10,000 visitors answer. <strong>(c)</strong> A reporter surveys only the first 30 people to arrive at a made-up concert about whether they like the band. <strong>(d)</strong> A random sample of 200 residents says 54% favor a new park; a random sample of 800 residents from the same town says 51%.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Your classmate says: &ldquo;If I make my biased sample 10 times as large, the bias will shrink to one-tenth.&rdquo; Use the gym illustration above to explain what really happens to the center and the spread.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) Sampling variation; different random samples differ by chance; more students would shrink the swing. (b) Bias (self-selection; people who love video games are more likely to answer); 10,000 answers do not fix the lean, and four times as many would not help. (c) Bias (convenience; early arrivals may be the biggest fans); a larger group of early arrivals keeps the same lean. (d) Sampling variation; both samples are random, they differ by chance, and the larger one (800) typically sits closer to the truth. 2. Making the sample bigger narrows the spread (the swing shrinks, about half for four times the size), but the center stays where the bias put it. In the gym illustration the swing shrank from about 0.099 to 0.024 while the center stayed near 0.60, about 0.20 above the truth. The bias does not shrink with size.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Say It Honestly</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Rewrite each statement so that it is true. <strong>(a)</strong> &ldquo;Our random sample of 100 students found 47% like the new schedule, so exactly 47% of the school likes it.&rdquo; <strong>(b)</strong> &ldquo;This sample is not exactly equal to the population value, so the sampling must have been done wrong.&rdquo; <strong>(c)</strong> &ldquo;Town A has 5,000 people and Town B has 500,000, so Town B needs a sample 100 times as large for the same typical swing.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For a true proportion of 0.50, find the typical swing at <em>n</em> = 100 and at <em>n</em> = 400 using &radic;(<em>p</em>(1 &minus; <em>p</em>) &divide; <em>n</em>). Then say in one sentence what it would take to cut the swing from 0.05 to 0.025.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In two sentences, explain to a younger student why the interactive&rsquo;s pile of estimates is centered near the truth <em>and</em> still spread out.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) &ldquo;Our random sample of 100 students gave 47% in favor. That is an estimate. Another random sample of 100 would likely give a somewhat different number, perhaps a few points away.&rdquo; (b) &ldquo;A fair sampling method can miss by chance. A miss is not evidence the method was wrong; we would look for a lean in the method, not just a difference from the truth.&rdquo; (c) Not true as stated: the typical swing depends mainly on the sample size, not on the population size, when the sample is a small part of the population. Both towns could use samples of similar size; a more exact calculation for <em>p</em> = 0.40 and <em>n</em> = 100 gives about 0.0485 in Town A and about 0.0490 in Town B. 2. &radic;(0.25 &divide; 100) = &radic;0.0025 = <strong>0.05</strong>; &radic;(0.25 &divide; 400) = &radic;0.000625 = <strong>0.025</strong>. To halve the swing, make the sample four times as big (from 100 to 400). 3. Example: &ldquo;Fair sampling does not lean either way, so highs and lows balance and the pile centers on the truth. But each sample is chosen by chance, so each lands a little differently, and the pile has width.&rdquo;
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 31.1 &mdash; Sampling Variation Workbook</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Simulate 20 random samples of 25 and 20 samples of 100 from a made-up 40% population with RANDBETWEEN, freeze and tally your estimates, chart them, compute the mean and typical swing of each pile, and write a short comparison. Upload the workbook to Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 31.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on sampling variation, the pile of sample proportions, how spread shrinks with <em>n</em>, and the difference between variation and bias.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 31.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will look at bias in <em>how</em> samples are chosen and how questions are worded, and at what else can go wrong even with a good sample.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Sampling &amp; Study Design</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 31.1 &middot; Sampling Variation: Many Samples, Many Estimates</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

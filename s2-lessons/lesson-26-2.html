@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 26.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 9</div>
+        <div style="font-size: 12px; color: #666;">The Normal Distribution</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 26.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Wonder</div>
+        <div style="font-size: 12px; color: #666;">Order out of randomness</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 26.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">The Binomial and the Normal: Galton&rsquo;s Board</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Every ball is a gamble. The heap is not.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Why binomial counts pile into a bell; the mean <em>np</em> and SD &radic;(<em>np</em>(1&minus;<em>p</em>)); the normal approximation with the continuity correction; when the approximation can be trusted</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, play with the Galton board, follow the Excel steps, and complete the four activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why binomial counts pile up into a bell shape as the number of trials grows, using a Galton board as the picture.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compute the mean <em>np</em> and the standard deviation &radic;(<em>np</em>(1&minus;<em>p</em>)) of a binomial count.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> estimate a binomial probability with a normal curve, using the continuity correction, and compare the estimate with the exact value.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> judge when the normal approximation is appropriate, using the check that both <em>np</em> and <em>n</em>(1&minus;<em>p</em>) are at least 10.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Picture a tall board studded with rows of pegs. You drop one ball at the top. It strikes a peg, bounces left or right, strikes another peg, bounces again, and finally tumbles into a slot at the bottom. Where will it land? <strong>Nobody can say.</strong> Drop the same ball again and it will probably land somewhere else.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now drop a thousand balls. They do not scatter evenly. They pile up tall in the middle slots and thin out toward the edges, in a smooth, symmetric <strong>bell</strong>, and a second thousand balls builds nearly the same bell again. No ball was told where to go, and no peg knows anything about bells. Each bounce is a plain gamble, and yet the crowd of gambles obeys a shape you can predict in advance. Order out of randomness: this is the wonder of the whole module.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Today you will see <em>why</em>, and the answer is a friend from Semester 1. The slot a ball lands in is a <strong>binomial count</strong>, and a binomial count, given enough trials, traces a normal curve. That link lets you answer binomial questions that would take pages of arithmetic with one quick normal area. You will also learn when the shortcut can be trusted and when it cannot.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every setting and number in this lesson is <strong>constructed</strong> to teach the idea. The Galton board is a simulation: its balls are random, so your piles will differ a little from anyone else's. Judge the pattern, not any one ball.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; THE PATH MODEL: ONE BALL, <em>n</em> CHOICES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the whole idea in one sentence. A ball falling through <em>n</em> rows of pegs makes <em>n</em> small choices, left or right, and the slot it lands in is set by <strong>how many times it went right</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Look at that with Semester 1 eyes. There is a fixed number of trials (<em>n</em> rows). Each trial has two outcomes (left or right). The chance of going right, which we call <em>p</em>, is the same at every peg. And one bounce does not influence the next. Those are the conditions for a binomial setting, so:</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;"><em>X</em> = number of rights = the slot number &nbsp;&nbsp; &rArr; &nbsp;&nbsp; <em>X</em> ~ Binomial(<em>n</em>, <em>p</em>)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You already know the chance of any one slot, <em>P</em>(<em>X</em> = <em>k</em>) = C(<em>n</em>, <em>k</em>) <em>p</em><sup><em>k</em></sup>(1 &minus; <em>p</em>)<sup><em>n</em>&minus;<em>k</em></sup>, and the two numbers that summarize a binomial count:</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">mean = <em>np</em> &nbsp;&nbsp;&nbsp;&nbsp; standard deviation = &radic;( <em>np</em>(1 &minus; <em>p</em>) )</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The mean says <em>where the heap is centered</em>: on 10 rows with a 50% chance of going right, the middle of the pile is slot 10 &times; 0.5 = 5. The SD says <em>how wide the heap is</em>. Notice that the SD has a square root, a common place to slip, and that it contains (1 &minus; <em>p</em>) as well as <em>p</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Why a bell?</strong> Each peg adds one small push, a little to the left or a little to the right, and the slot is the total of all those pushes. Very few paths lead to an edge slot (the ball would have to go right at <em>every</em> peg), while a great many different paths lead to the middle. Many small independent pushes added together give the same smooth, symmetric shape again and again. This is the idea de Moivre uncovered in 1733 (Week 25): as <em>n</em> grows, the jagged bar graph of binomial probabilities fits a normal curve more and more closely.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; WHEN THE HEAP IS NOT A BELL</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The bell needs room. Two things can leave the heap lopsided:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Too few rows.</strong> With only 2 or 3 rows there are only a few slots, and the pile looks like a staircase, not a curve.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A chance far from 50%.</strong> Suppose the chance of going right is only 10% and there are 6 rows. Then <em>P</em>(<em>X</em> = 0) = 0.9<sup>6</sup> &asymp; 0.531: over half the balls never go right at all and pile into slot 0. The heap leans against the left wall, because a count cannot go below zero. The mean is <em>np</em> = 0.6, and a bell centered near 0.6 would have to spill into slots that do not exist.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The cure is more rows. At a 10% chance, with enough rows the heap pulls away from the wall and rounds into a bell. The farther <em>p</em> is from 0.5, the more rows it takes. You will watch this happen in the board below.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Galton Board</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Three tasks.</strong> The board starts with 300 balls already landed on 10 rows. Changing the rows or the chance of going right clears the board. <strong>(1) Rows.</strong> Set the chance to 50% and use 4 rows, then 10, then 20. Each time, get 1000 or more balls on the board (use <em>Drop 100</em>, <em>Keep dropping</em>, or <em>Skip ahead: +1000</em>) and turn on <em>Show a normal curve</em> (red). Which row count fits the curve best, and which fits worst? <strong>(2) Lean.</strong> Set the chance to 10% with 6 rows and watch the pile lean. Read <em>n&middot;p</em> and <em>n&middot;(1&minus;p)</em> in the table below the board and note which one is small. Turn on <em>Show what the binomial predicts</em> (gold ticks) to see the exact pattern. <strong>(3) Predict first.</strong> Before you read the table, write down your own prediction of the mean and SD for your settings, from <em>np</em> and &radic;(<em>np</em>(1&minus;<em>p</em>)). Then compare with the table, which shows the observed mean and SD of the bins next to <em>n&middot;p</em> and &radic;(<em>n&middot;p&middot;(1&minus;p)</em>), and read its hint about 10. The balls are simulated and random, so the observed numbers will be close to your predictions but not identical.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/galton-board.html" width="100%" height="1000" style="border: none; display: block;" title="Galton Board" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/galton-board.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: THE MEAN AND SD OF A BINOMIAL COUNT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A constructed board has <em>n</em> = 40 rows and a 50% chance of going right. A second constructed setting has <em>n</em> = 80 trials and <em>p</em> = 0.25. Find the mean and standard deviation of the count <em>X</em> in each.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> I need two numbers for each: <em>np</em> for the center, and the square root of <em>np</em>(1 &minus; <em>p</em>) for the spread. I will find the number under the root first, then take the root last, so I do not forget it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Setting 1.</strong> Mean = 40 &times; 0.5 = <strong>20</strong>. Under the root: 40 &times; 0.5 &times; 0.5 = 10. SD = &radic;10 &asymp; <strong>3.162</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Setting 2.</strong> Mean = 80 &times; 0.25 = <strong>20</strong>. Under the root: 80 &times; 0.25 &times; 0.75 = 15. SD = &radic;15 &asymp; <strong>3.873</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Compare.</strong> Same center, but setting 2 is wider (3.873 against 3.162), because it has twice as many trials adding up small pushes.</div><div style="margin-bottom: 6px;"></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Desmos check.</strong> Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">40*0.5</code> and you get 20. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(40*0.5*0.5)</code> and you get about 3.1623. For setting 2, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">80*0.25</code> (20) and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(80*0.25*0.75)</code> (about 3.873). If typing <em>sqrt</em> does not give you a root sign on your screen, use the square-root key on the on-screen keypad and type the numbers under it.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9989; WHEN IS A NORMAL CURVE A FAIR STAND-IN?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The normal approximation replaces the jagged binomial bars with a normal curve that has the <strong>same mean and SD</strong>: <em>X</em> is treated as roughly N(<em>np</em>, &radic;(<em>np</em>(1&minus;<em>p</em>))). It is only a model, and like every model it fits in some cases and not in others. The question to ask is whether the heap has room to be a bell, and the check is:</div><div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">both <em>np</em> &ge; 10 &nbsp;&nbsp; and &nbsp;&nbsp; <em>n</em>(1 &minus; <em>p</em>) &ge; 10</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">This is <strong>a common rule of thumb; some sources use 5</strong> in place of 10. Think about what the two numbers mean: <em>np</em> is the typical number of &ldquo;rights,&rdquo; and <em>n</em>(1 &minus; <em>p</em>) is the typical number of &ldquo;lefts.&rdquo; If either is small, the heap is jammed against a wall (slot 0 or slot <em>n</em>) and cannot be symmetric. Both must be comfortably large before a symmetric bell makes sense.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">It is a screening check, not a guarantee. A pass means the approximation is usually reasonable; a fail means you should use the exact binomial formula (or Excel's BINOM.DIST) instead.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; THE CONTINUITY CORRECTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">There is one more idea. A binomial count is a <strong>whole number</strong>: 23, 24, 25, never 24.3. A normal curve is <strong>continuous</strong>: it assigns area to every stretch of the number line. To compare them, think of each binomial bar as centered on its whole number and one unit wide. The bar for 24 covers everything from <strong>23.5 to 24.5</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">So when you want <em>P</em>(<em>X</em> &le; 24), you want the bars for 24, 23, 22, and so on, and the bar for 24 reaches up to 24.5. The matching normal area is the area below <strong>24.5</strong>, not below 24. Using 24 chops the last bar in half and loses area. This half-unit nudge is the <strong>continuity correction</strong>. Here is how it translates every case:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Binomial question</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Normal area</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Example</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &le; <em>k</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">area below <em>k</em> + 0.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &le; 24): below 24.5</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &lt; <em>k</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">area below <em>k</em> &minus; 0.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &lt; 24): below 23.5</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &ge; <em>k</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">area above <em>k</em> &minus; 0.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &ge; 24): above 23.5</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &gt; <em>k</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">area above <em>k</em> + 0.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> &gt; 24): above 24.5</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> = <em>k</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">area between <em>k</em> &minus; 0.5 and <em>k</em> + 0.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>X</em> = 24): between 23.5 and 24.5</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(<em>a</em> &le; <em>X</em> &le; <em>b</em>)</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">area between <em>a</em> &minus; 0.5 and <em>b</em> + 0.5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;"><em>P</em>(18 &le; <em>X</em> &le; 22): between 17.5 and 22.5</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A way to remember it:</strong> ask which whole numbers you want <em>included</em>, then go half a unit past the outermost one, outward from the values you keep.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: ONE BINOMIAL, THREE ANSWERS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A constructed board has 40 rows and a 50% chance of going right, so <em>X</em> ~ Binomial(40, 0.5). Find <em>P</em>(<em>X</em> &le; 24) exactly, then by the normal approximation without and with the continuity correction.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> First I check that the approximation is allowed: <em>np</em> = 20 and <em>n</em>(1 &minus; <em>p</em>) = 20, both at least 10. Good. The center is 20 and the SD is &radic;10 &asymp; 3.162 from Example 1.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Exact.</strong> Adding the binomial probabilities for <em>k</em> = 0 through 24 (a spreadsheet does this in one cell, see the Excel steps) gives <strong>0.9231</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Normal, no correction.</strong> z = (24 &minus; 20) &divide; 3.162 = 1.265. The area below is about <strong>0.8970</strong>. That is 0.026 too low.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Normal, with the correction.</strong> z = (24.5 &minus; 20) &divide; 3.162 = 1.423. The area below is about <strong>0.9226</strong>. That is within 0.0005 of the exact answer.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Sense check.</strong> The mean is 20 and 24 is above it, so the probability of being at or below 24 should be well over one half. All three answers agree with that, and the corrected one is almost on the exact value.</div><div style="margin-bottom: 6px;"></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The same trick works for a single value and for a range. For <em>P</em>(<em>X</em> = 24), the normal area between 23.5 and 24.5 is about 0.0568, and the exact value is 0.0572. For <em>P</em>(18 &le; <em>X</em> &le; 22), the area between 17.5 and 22.5 is about 0.5708 (z = &plusmn;0.79), and the exact value is 0.5704.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128721; WORKED EXAMPLE 3: WHEN THE APPROXIMATION FAILS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A constructed setting has <em>n</em> = 10 and <em>p</em> = 0.1. Check whether the approximation is appropriate, then see what it does.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher's voice:</em> Before using any normal area, I run the check.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The check.</strong> <em>np</em> = 10 &times; 0.1 = <strong>1</strong>, and <em>n</em>(1 &minus; <em>p</em>) = 9. The first number is far below 10 (and below 5 as well), so the check fails. The mean is 1 and the SD is &radic;0.9 &asymp; 0.949.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The exact distribution</strong> for <em>X</em> = 0, 1, 2, 3 is 0.3487, 0.3874, 0.1937, 0.0574, then tiny values. It is tall at 0 and 1 and has a long tail to the right: lopsided, not symmetric.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The approximation is off.</strong> <em>P</em>(<em>X</em> = 0): exact 0.3487; normal area between &minus;0.5 and 0.5 (z = &minus;1.58 to &minus;0.53), about 0.2422, roughly 30% too small. <em>P</em>(<em>X</em> &le; 1): exact 0.7361; normal area below 1.5, about 0.7009.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>It reaches into impossible territory.</strong> The bell centered at 1 with SD 0.949 puts area at negative values. The area below &minus;0.5 (z = &minus;1.58) is about <strong>0.057</strong>, so about 5.7% of the normal curve sits where a count can never be. A count of balls cannot be negative, but the normal curve does not know that.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The lesson is not &ldquo;the approximation is bad.&rdquo; It is that the approximation is only as good as the heap's room to be a bell, and the check <em>np</em> &ge; 10 and <em>n</em>(1 &minus; <em>p</em>) &ge; 10 is how you ask. Here you would use the exact binomial formula.</div>
+    </div>
+    <div style="background: #E8F6FB; border-left: 5px solid #2196D0; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #1B6A94; margin-bottom: 8px;">&#128220; A MOMENT IN THE HISTORY OF MATHEMATICS &middot; GALTON'S BOARD</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.6;">Francis Galton (1822&ndash;1911) was an English polymath, a person whose curiosity ranged over many fields. In the late 1800s he devised a pegboard in which balls fall through rows of pegs and gather in a bell-shaped heap at the bottom. The device is called the <em>quincunx</em> or the <em>Galton board</em>. Galton built it to illustrate an idea: that many small, independent chance effects, each pushing a little one way or the other, add up to a normal shape. The mathematics behind the heap was older. Abraham de Moivre had shown in 1733 (you met him in Week 25) that the binomial pattern approaches the bell curve as the number of trials grows. What the board added was something you could watch. A single ball behaves unpredictably, yet the crowd builds the same smooth shape, time after time. Every ball on the board is making exactly the left-or-right choices you studied in the binomial setting, so the board is a picture of this very lesson: a binomial count, repeated many times, drawing a normal curve. And here is a thought on wonder: nothing in the board &ldquo;knows&rdquo; about bells, only about left and right, and the bell appears anyway. This is a short sketch; historians add many details beyond it.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: BINOM.DIST VERSUS NORM.DIST, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will compare the exact binomial answer with the normal approximation, and then prove that the cumulative function is just the sum of the single-value probabilities. Keep this page open beside Excel.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. (This one is practice; you do not upload it. If you keep it, save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk26_L2_YourName</code>.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n</code>, press <strong>Enter</strong>. Click <strong>B1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">40</code>, Enter. Click <strong>A2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">p</code>, Enter. Click <strong>B2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.5</code>, Enter.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A3</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code>, Enter. Click <strong>B3</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B1*B2</code>, Enter. You should see <strong>20</strong>. Click <strong>A4</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">SD</code>, Enter. Click <strong>B4</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(B1*B2*(1-B2))</code>, Enter. You should see about <strong>3.162</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The exact answer in one cell.</strong> Click <strong>A6</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Exact (BINOM.DIST)</code>, Enter. Click <strong>B6</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(24,B1,B2,TRUE)</code>, then Enter. You should see about <strong>0.9231</strong>. The inputs are the largest count to include (24), the number of trials, the chance of success, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">TRUE</code>, which means &ldquo;add up everything from 0 through 24.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The normal approximation with the correction.</strong> Click <strong>A7</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Normal, with 0.5</code>, Enter. Click <strong>B7</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(24.5,B3,B4,TRUE)</code>, Enter. You should see about <strong>0.9226</strong>. The inputs are the cutoff <strong>24.5</strong>, the mean, the SD, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">TRUE</code> for &ldquo;area below.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Without the correction.</strong> Click <strong>A8</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Normal, no 0.5</code>, Enter. Click <strong>B8</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(24,B3,B4,TRUE)</code>, Enter. You should see about <strong>0.8970</strong>. Compare the three numbers in B6, B7, B8.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prove that the cumulative version is the sum of the terms.</strong> Click <strong>D1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">k</code>, Enter. Click <strong>E1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">P(X = k)</code>, Enter. Click <strong>D2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0</code>, Enter; click <strong>D3</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1</code>, Enter. Select <strong>D2</strong> and <strong>D3</strong> together, then drag the small square in the bottom-right corner of the selection (the fill handle) down to <strong>row 26</strong>. The column now holds 0, 1, 2, and so on up to 24.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>E2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(D2,$B$1,$B$2,FALSE)</code>, then Enter. The last argument is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">FALSE</code>, which means &ldquo;just this one value.&rdquo; The dollar signs lock the number of trials and the chance so they do not move when you copy down. Click <strong>E2</strong> again and drag its fill handle down to <strong>E26</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A9</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sum of terms</code>, Enter. Click <strong>B9</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(E2:E26)</code>, Enter. You should see about <strong>0.9231</strong>, the same as B6. That equality is the point: the cumulative BINOM.DIST with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">TRUE</code> is exactly the sum of the single-value terms with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">FALSE</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Try it your way.</strong> Change B1 to 100 and B2 to 0.5, and change the 24 in B6 to 55 and the 24.5 in B7 to 55.5. (The term table in D and E is for the 40-trial case, so ignore B9 now.) Compare B6 and B7, and say in a sentence what happened to the gap between them.</div><div style="margin-bottom: 6px;"></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Honest note.</strong> Menu names and the look of the window differ a little between desktop Excel and Excel for the web, but typing a formula into a cell works the same in both. A <strong>#NAME?</strong> error usually means a misspelled function name; a <strong>#NUM!</strong> error from BINOM.DIST usually means the count is larger than the number of trials or the chance is outside 0 to 1.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; <em>np</em> AND &radic;(<em>np</em>(1&minus;<em>p</em>)) IN DESMOS, AREAS IN EXCEL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Desmos Scientific</strong> does plain arithmetic, so type the formulas the way you write them. For the mean, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">40*0.5</code> and you get 20. For the SD, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(40*0.5*0.5)</code> and you get about 3.1623. Build the number under the root first and wrap the whole product, so the root covers everything. For a z-score with the continuity correction, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(24.5-20)/sqrt(10)</code> and you get about 1.423 (the subtraction goes in its own parentheses so the division applies to the whole difference). For the rule-of-thumb check, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">40*0.5</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">40*(1-0.5)</code>. If typing <em>sqrt</em> does not make a root sign on your screen, use the square-root key on the on-screen keypad. A common slip is to leave out the root, which gives 10 as the SD of the 40-trial board instead of 3.162.<br /><br />
+            <strong>Excel</strong> does the areas: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(24,40,0.5,TRUE)</code> gives the exact cumulative probability, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=NORM.DIST(24.5,20,SQRT(40*0.5*0.5),TRUE)</code> gives the normal area with the correction, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.DIST(k,n,p,FALSE)</code> (with FALSE) gives the chance of a single count. Summing the single-count terms, as you did above, reproduces the cumulative answer exactly.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;What does a Galton board show, and why do the balls form a bell shape? For a board with 12 rows and a 50% chance of going right, what are the mean and standard deviation of the slot a ball lands in?&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write your own: what is <em>X</em>, what are <em>n</em> and <em>p</em>, and what do <em>np</em> and &radic;(<em>np</em>(1&minus;<em>p</em>)) give? (You should get a mean of 6 and an SD of about 1.73.) Also write down in a sentence why the heap should look like a bell.<br />
+            <strong>Verify.</strong> Check its numbers with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">12*0.5</code> (6) and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sqrt(12*0.5*0.5)</code> (about 1.7321) in Desmos. Then set the Galton board to 12 rows and a 50% chance, drop 1000 or more balls, and compare the observed mean and SD in the table with your numbers. Now judge the AI. Watch for these common errors: saying the balls &ldquo;prefer&rdquo; the middle, as if the board steers them (every peg is an even gamble; the middle wins only because far more paths lead there); saying that dropping <em>more balls</em> makes the pile wider or narrower (the spread is set by <em>n</em> and <em>p</em>; more balls only make the shape smoother and less jumpy); leaving the square root out of the SD, or using <em>np</em> in place of <em>np</em>(1&minus;<em>p</em>); and claiming the normal curve is an exact match for every board, even one with few rows or a chance near 10%. Flag anything wrong, vague, or too confident, and say what you would ask next.<br />
+            <strong>The verified answer, for comparison:</strong> each ball makes 12 independent left-or-right choices, so its slot is Binomial(12, 0.5), with mean 12 &times; 0.5 = 6 and SD &radic;(12 &times; 0.5 &times; 0.5) = &radic;3 &asymp; 1.73. The heap forms a bell because many small independent pushes add up, and more rows make the fit closer.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 40 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Mean, SD, and the Check</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each constructed binomial setting, find the mean and the SD (to two decimal places), and say whether both <em>np</em> and <em>n</em>(1 &minus; <em>p</em>) are at least 10: (a) <em>n</em> = 60, <em>p</em> = 0.5; (b) <em>n</em> = 100, <em>p</em> = 0.2; (c) <em>n</em> = 200, <em>p</em> = 0.03.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Narrate: say aloud why the mean of the heap moves toward the right side when <em>p</em> is larger than 0.5.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) mean 30, SD &radic;15 &asymp; <strong>3.87</strong>; <em>np</em> = 30 and <em>n</em>(1 &minus; <em>p</em>) = 30, both at least 10, so the check <strong>passes</strong>. (b) mean 20, SD &radic;16 = <strong>4.00</strong>; <em>np</em> = 20 and <em>n</em>(1 &minus; <em>p</em>) = 80, <strong>passes</strong>. (c) mean 6, SD &radic;5.82 &asymp; <strong>2.41</strong>; <em>np</em> = 6 is below 10, so the check <strong>fails</strong>. 2. A ball goes right more often than left, so it tends to finish in a higher-numbered slot; the center of the heap, <em>np</em>, grows with <em>p</em>.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Normal Estimates with the Correction</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Let <em>X</em> ~ Binomial(100, 0.5), a constructed 100-row board. Check the rule of thumb, then find the mean and SD.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use a normal curve with the continuity correction to estimate (a) <em>P</em>(<em>X</em> &ge; 60) and (b) <em>P</em>(45 &le; <em>X</em> &le; 55). Use Excel's NORM.DIST or NORM.S.DIST and round to four decimals.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Explain in one sentence why you used 59.5 for part (a) and not 60.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. <em>np</em> = 50 and <em>n</em>(1 &minus; <em>p</em>) = 50, both at least 10; mean 50, SD &radic;25 = 5. 2. (a) <em>P</em>(<em>X</em> &ge; 60) is the area above 59.5: z = (59.5 &minus; 50) &divide; 5 = 1.9, so the area is 1 &minus; 0.9713 = <strong>0.0287</strong> (the exact binomial value is 0.0284). (b) <em>P</em>(45 &le; <em>X</em> &le; 55) is the area between 44.5 and 55.5: z = &minus;1.1 and 1.1, so the area is 0.8643 &minus; 0.1357 = <strong>0.7286</strong> (exact 0.7287). 3. The bar for 60 reaches down to 59.5, and &ldquo;at least 60&rdquo; includes that whole bar, so the area must start at 59.5.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Then Drop</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In the Galton board, predict the mean and SD, from <em>np</em> and &radic;(<em>np</em>(1&minus;<em>p</em>)), for (a) 20 rows with a 50% chance and (b) 6 rows with a 10% chance. Write them before you look at the table.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Set up each board, get 1000 or more balls on it, and read the table. How close were you? Which board passes the check <em>np</em> &ge; 10 and <em>n</em>(1 &minus; <em>p</em>) &ge; 10, and does the normal curve (red) agree with that on the screen?</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) mean 20 &times; 0.5 = 10, SD &radic;5 &asymp; <strong>2.24</strong>. (b) mean 6 &times; 0.1 = 0.6, SD &radic;0.54 &asymp; <strong>0.73</strong>. 2. The observed values come out close to these but not identical, because the balls are random; more balls bring them closer. Board (a) has <em>np</em> = 10 and <em>n</em>(1 &minus; <em>p</em>) = 10, which just meets the check, and the red curve follows the pile closely. Board (b) has <em>np</em> = 0.6 and <em>n</em>(1 &minus; <em>p</em>) = 5.4, so it fails, and the pile leans against the left wall where the red curve does not.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Find the Mistake</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">8 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A student wants <em>P</em>(<em>X</em> &le; 24) for <em>X</em> ~ Binomial(40, 0.5). The student writes: &ldquo;The mean is 20. The SD is 40 &times; 0.5 &times; 0.5 = 10. z = (24 &minus; 20) &divide; 10 = 0.4, so the answer is 0.6554.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find <strong>two</strong> mistakes, then give the corrected estimate.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. <strong>Mistake one:</strong> 10 is the number <em>under</em> the root; the SD is &radic;10 &asymp; 3.162, and the student forgot the square root. <strong>Mistake two:</strong> the student used 24 for the cutoff; for <em>P</em>(<em>X</em> &le; 24) the continuity correction says to use 24.5. 2. Correct: z = (24.5 &minus; 20) &divide; 3.162 = 1.423, area about <strong>0.9226</strong>. (The exact value is 0.9231; the student's 0.6554 is far off.)
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 26.2 &mdash; The Binomial and the Normal</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Mean and SD, normal estimates with the continuity correction, a when-is-it-OK judgment, an Excel comparison answered as text, and an AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 26.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the mean and SD of a binomial, the rule of thumb, the continuity correction, and what the Galton board shows.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 26.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will put the normal model to work on applied problems.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 26.2 &middot; The Binomial and the Normal: Galton&rsquo;s Board</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

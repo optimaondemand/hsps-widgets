@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 22.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 8</div>
+        <div style="font-size: 12px; color: #666;">Descriptive Statistics</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 22.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Courtesy</div>
+        <div style="font-size: 12px; color: #666;">Describing data fairly</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 22.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Measures of Center: Mean and Median</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">One number to stand for a whole list &mdash; and the courtesy of saying which one, and why.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Mean as fair share and balance point; median as the middle; resistance and skew; choosing a center</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work the examples alongside the text, play with the widget, follow the Excel steps, and complete the four activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compute the mean and the median of a small dataset by hand, for both odd and even counts, and explain the mean as a fair share and a balance point.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain what each measure ignores, and predict how an extreme value or a skewed shape moves the mean and the median.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> choose the mean or the median (or the mode, for categories) for a dataset and justify the choice in a sentence.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use AVERAGE and MEDIAN in Excel and check the results against a hand computation.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; WHAT DOES &ldquo;TYPICAL&rdquo; MEAN?</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Someone asks, &ldquo;How long is your commute?&rdquo; You do not recite every morning of the year. You give <em>one number</em>. A single number that stands in for a whole list is a <strong>measure of center</strong>, and it is the first thing a statistician asks of a dataset: <em>where is the middle?</em></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">But &ldquo;middle&rdquo; has more than one meaning. This lesson teaches two of them &mdash; the <strong>mean</strong> and the <strong>median</strong> &mdash; and, more importantly, how to tell which one is the fair choice for the data in front of you. All datasets in this lesson are <strong>constructed</strong> (made up) to teach the ideas.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>A note on courtesy,</strong> this module's virtue. A summary number is a kindness to a busy reader and a possible discourtesy to the data: it hides everything it does not say. Choosing a center well, and saying what it leaves out, is how you stay courteous to both.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; THE MEAN: FAIR SHARE AND BALANCE POINT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Four students stack cubes: 3, 5, 6, and 10 cubes. They decide to be fair, so they pool all the cubes and deal them out evenly.</div>
+<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 28px; margin: 6px 0 14px 0;"><div style="flex: 1; min-width: 220px; max-width: 260px;"><div style="font-size: 15px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Before: 3, 5, 6, 10</strong></div><div style="display: flex; align-items: flex-end; height: 140px; border-bottom: 2px solid #0E1C42; gap: 10px; padding: 0 10px;"><div style="flex: 1; height: 30.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">3</div><div style="flex: 1; height: 50.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">5</div><div style="flex: 1; height: 60.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">6</div><div style="flex: 1; height: 100.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">10</div></div><div style="font-size: 12px; color: #666; text-align: center; margin-top: 4px;">24 cubes in all</div></div><div style="flex: 1; min-width: 220px; max-width: 260px;"><div style="font-size: 15px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>After the fair share</strong></div><div style="display: flex; align-items: flex-end; height: 140px; border-bottom: 2px solid #0E1C42; gap: 10px; padding: 0 10px;"><div style="flex: 1; height: 60.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">6</div><div style="flex: 1; height: 60.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">6</div><div style="flex: 1; height: 60.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">6</div><div style="flex: 1; height: 60.0%; background: #2196D0; border: 1px solid #0E1C42; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: center; font-size: 13px; color: #fff;">6</div></div><div style="font-size: 12px; color: #666; text-align: center; margin-top: 4px;">each stack has 6</div></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Total cubes: 3 + 5 + 6 + 10 = 24. Shared among 4 students: 24 &divide; 4 = <strong>6</strong>. That fair-share number is the <strong>mean</strong>.</div>
+<div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;"><strong>mean</strong> = (sum of all the values) &divide; (how many values) = <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(3+5+6+10)/4</code> = 6</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>The balance picture.</strong> The mean is also the point where the data would balance, like children on a seesaw. Measure how far each value sits from 6: the distances are &minus;3, &minus;1, 0, and +4. The negatives add to &minus;4 and the positives add to +4, so the pulls cancel exactly. <em>The deviations from the mean always add to zero</em>; that is what &ldquo;balance point&rdquo; means. A big value far from the mean is a long lever arm, and it pulls hard.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>What the mean uses.</strong> The mean uses <em>every</em> value, and uses its actual size. That is its strength (nothing is ignored) and its weakness (a single huge value tugs it hard).</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128207; THE MEDIAN: THE MIDDLE VALUE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The <strong>median</strong> is the middle value once the data are put <strong>in order</strong>: half the values are at or below it, half are at or above it. Here are seven commute times in minutes (<em>constructed</em>), exactly as they were recorded: 15, 8, 22, 12, 30, 10, 18.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example, odd count (n = 7).</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 1: order the list.</strong> 8, 10, 12, 15, 18, 22, 30. Skipping this step is the most common mistake: the median is the middle of the <em>ordered</em> list, not of the list as written.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 2: find the middle position.</strong> With 7 values, the middle is the 4th (three on each side).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Step 3: read it.</strong> The 4th value is <strong>15</strong>. So the median commute is 15 minutes.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example, even count (n = 6).</strong> Suppose the 30-minute commute is removed. The ordered list is 8, 10, 12, 15, 18, 22. With 6 values there is no single middle: the 3rd and 4th values share it. Take their mean: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(12+15)/2</code> = <strong>13.5</strong> minutes. (It is fine for a median to be a number that is not in the list.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>The mean of the same seven times:</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(8+10+12+15+18+22+30)/7</code> = 115 &divide; 7, which is about <strong>16.43</strong> minutes. Here is where they sit:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 4px;"><strong>Seven Commute Times in Minutes (constructed data)</strong></div><div style="display: flex; justify-content: center;"><div style="position: relative; width: 440px; max-width: 100%; height: 110px;"><div style="position: absolute; left: 0; right: 0; top: 50px; border-top: 2px solid #0E1C42;"></div><div style="position: absolute; left: 0.0%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 0.0%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">0</div><div style="position: absolute; left: 14.3%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 14.3%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">5</div><div style="position: absolute; left: 28.6%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 28.6%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">10</div><div style="position: absolute; left: 42.9%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 42.9%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">15</div><div style="position: absolute; left: 57.1%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 57.1%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">20</div><div style="position: absolute; left: 71.4%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 71.4%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">25</div><div style="position: absolute; left: 85.7%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 85.7%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">30</div><div style="position: absolute; left: 100.0%; top: 50px; width: 0; height: 6px; border-left: 2px solid #0E1C42;"></div><div style="position: absolute; left: 100.0%; top: 58px; transform: translateX(-50%); font-size: 12px; color: #1a2340;">35</div><div style="position: absolute; left: 42.9%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 22.9%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 62.9%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 34.3%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 85.7%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 28.6%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 51.4%; top: 36px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #2196D0; border: 1px solid #0E1C42;"></div><div style="position: absolute; left: 42.9%; top: 4px; transform: translateX(-100%); padding-right: 6px; font-size: 12px; color: #8a5f12; white-space: nowrap;"><strong>median 15</strong></div><div style="position: absolute; left: 42.9%; top: 20px; height: 34px; border-left: 3px solid #C7922C;"></div><div style="position: absolute; left: 46.9%; top: 76px; margin-left: -8px; width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 14px solid #C0392B;"></div><div style="position: absolute; left: 46.9%; top: 91px; padding-left: 12px; font-size: 12px; color: #8A1F16; white-space: nowrap;"><strong>mean &asymp; 16.43</strong></div></div></div><div style="font-size: 13px; color: #666; text-align: center;">Dots are the values. Gold line: median. Red triangle: mean (the balance point).</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>What the median uses.</strong> The median uses only the <em>order</em> of the values, not how far apart they are. It ignores how large the largest values are.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128170; WHAT EACH ONE IGNORES: RESISTANCE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Take the 30-minute commute and make it a miserable 90 minutes (a long detour that day). Compare:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;"></th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Original (30)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Changed to 90</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Ordered list</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">8, 10, 12, 15, 18, 22, 30</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">8, 10, 12, 15, 18, 22, 90</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">15</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">15</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">&asymp; 16.43 (115 &divide; 7)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">25 (175 &divide; 7)</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The median did not move. The mean jumped from about 16.4 to 25, and now describes <em>none</em> of the seven days well: six of the seven commutes are at most 22 minutes. A statistic that barely changes when one extreme value changes is called <strong>resistant</strong>. <strong>The median is resistant; the mean is not.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Neither is &ldquo;wrong.&rdquo; The mean answers &ldquo;if everything were shared equally, what would each get?&rdquo; &mdash; and the 90-minute day really did cost time. The median answers &ldquo;what does a middle day look like?&rdquo; They answer different questions.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; SHAPE DECIDES THE ARGUMENT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When a distribution is <strong>symmetric</strong> (a balanced pile with the same shape on both sides of the middle), the mean and median land close together, and either is a fair summary. When a distribution is <strong>skewed</strong> &mdash; stretched out with a long tail on one side &mdash; the mean is dragged <em>toward the tail</em>, away from the bulk of the data, while the median stays with the bulk.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">In the widget below you will see this with made-up data. For instance, in its right-skewed dataset (a few large values on a number line from 0 to 100) the mean is 24.75 and the median is 18.5: the long right tail has pulled the mean above the median. In its symmetric dataset the mean is 50.08 and the median is 50: nearly the same.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Mean and Median Explorer</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Open the <em>Center</em> tab</strong> (it should already be selected). Pick the <strong>Right-skewed</strong> dataset. Tick <strong>Predict first</strong> and write your prediction before you act. Then <strong>drag the largest dot far to the right</strong> and watch which statistic follows: does the mean move, the median, or both? Then try the <strong>Symmetric</strong> dataset and the <strong>One far outlier</strong> dataset. (The &ldquo;Do it for me&rdquo; button moves the largest dot 20 units for you.) All data in this widget are made up.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/stats-explorer.html" width="100%" height="1050" style="border: none; display: block;" title="Mean and Median Explorer" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/stats-explorer.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129517; CHOOSING A CENTER, AND SAYING WHY</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">There is no single best measure. Ask three questions, in this order:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>What is the shape?</strong> Roughly symmetric with no extreme values: the mean is fine (and it uses all the data). Skewed or with a far outlier: the median is the safer description of a typical value.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>What is the question?</strong> If you care about totals or fair shares (the cost per person, the total over many days), the mean is the right tool, because the mean times the count gives back the total. If you want the experience of a typical individual, the median is usually better.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Are the data categories?</strong> You cannot add or order &ldquo;dog&rdquo; and &ldquo;cat.&rdquo; For categories, report the <strong>mode</strong>: the value that occurs most often.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>The mode, briefly.</strong> Twelve students name a favorite pet (<em>constructed</em>): dog 5, cat 4, fish 2, bird 1. The mode is <strong>dog</strong>, the most common answer. For numbers the mode is less useful (a dataset can have several, or none worth naming), so we will use mean and median for numerical data.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>A model sentence.</strong> A good answer always names the shape and the reason: &ldquo;I would report the median because the data are skewed to the right and the mean is pulled up by a few large values.&rdquo; Notice it does not just say &ldquo;median is better.&rdquo;</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#128161; A COURTESY TO THE READER</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">Suppose one office has seven salaries close together and one boss's salary far above them. An announcement &ldquo;the average salary is $81,000&rdquo; may be perfectly true and still misleading, because almost nobody earns anything near it. The courteous report gives the median too, or says outright that one very high value pulls the mean up. Both numbers are true; the fairness lies in saying which one answers the reader's question.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: AVERAGE AND MEDIAN, CLICK BY CLICK</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Excel does list statistics for you. You will check it against the hand answers from this lesson: mean about 16.43 and median 15 for the seven commute times. Keep this page open beside Excel.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. (You do not have to upload this one; it is practice. If you want to keep it, save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk22_L1_YourName</code>.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click cell <strong>A1</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Commute minutes</code>, then press <strong>Enter</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Starting in <strong>A2</strong>, type the seven values <em>in this order</em>, pressing Enter after each: 15, 8, 22, 12, 30, 10, 18. They fill A2 through A8. (Do not sort them; you will see that Excel does not need you to.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click cell <strong>C1</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code>, Enter. Click <strong>C2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Median</code>, Enter. Click <strong>C3</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Count</code>, Enter. Click <strong>C4</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sum</code>, Enter.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click cell <strong>D1</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A8)</code> then press <strong>Enter</strong>. The equals sign tells Excel a formula follows; <strong>A2:A8</strong> means &ldquo;the cells from A2 down to A8.&rdquo; You should see a long decimal starting 16.428&hellip;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(A2:A8)</code>, Enter. You should see <strong>15</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D3</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A8)</code>, Enter (it should read 7). Click <strong>D4</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(A2:A8)</code>, Enter (it should read 115).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check the mean by hand.</strong> In your notebook compute 115 &divide; 7. It must match D1. (You can also type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=D4/D3</code> in any empty cell: it gives the same number, because the mean <em>is</em> sum divided by count.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Test resistance.</strong> Click cell <strong>A6</strong> (the 30), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">90</code>, Enter. Watch D1 and D2: the mean becomes <strong>25</strong>; the median stays <strong>15</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Test the even case.</strong> Click <strong>A6</strong> and press the <strong>Delete</strong> key so the cell is empty. Excel skips empty cells, so D3 now reads 6, D2 reads <strong>13.5</strong>, and D1 is about 14.17 (85 &divide; 6).</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Honest note.</strong> Menu names and the look of the window differ a little between desktop Excel and Excel for the web, but typing a formula in a cell works the same in both. If a formula shows a message beginning with <strong>#</strong>, or shows the formula text instead of a number, check that you typed the equals sign and the parentheses, and that the cell range is right.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; MEAN AND MEDIAN IN DESMOS AND EXCEL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Desmos Scientific</strong> does plain arithmetic, so you type the expression yourself. Mean of 3, 9, 4, 10, 6: type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(3+9+4+10+6)/5</code> &rarr; 6.4. Mean of the seven commute times: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(15+8+22+12+30+10+18)/7</code> &rarr; a decimal beginning 16.428. A median with an even count needs the average of the two middle values after you order the list yourself: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(12+15)/2</code> &rarr; 13.5. Always type the outer parentheses around the sum; without them the calculator divides only the last number.<br /><br /><strong>Excel</strong> does the list work: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A8)</code> for the mean and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(A2:A8)</code> for the median, with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A8)</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(A2:A8)</code> as checks. Use Desmos to confirm Excel's answer on a small list; use Excel when the list is long.
+        </div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Paste this constructed list into an AI tool: <em>&ldquo;Here are the annual salaries, in thousands of dollars, of the 8 employees of a made-up company: 42, 45, 47, 48, 50, 52, 55, 310. Which is the better single number to report as the typical salary: the mean or the median? Give both values.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, predict which measure it will recommend and why. Then compute both by hand (or in Excel) yourself. Hint: look at the largest value, and expect the mean to land far above most of the list.<br />
+            <strong>Verify.</strong> Compare. Did the AI choose the median and say the large salary pulls the mean up? Check its numbers: the sum is 649, so the mean is 649 &divide; 8 = 81.125 and the median is (48 + 50) &divide; 2 = 49. AI tools sometimes make an arithmetic slip or call the wrong value the median. If its reasoning was right but a number was wrong, say which, and what that tells you about trusting an AI tool with arithmetic.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Fair Share and Balance by Hand</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Six students report how many books they read this term (<em>constructed</em>): 4, 6, 6, 8, 11, 13. Compute the mean (as a fair share) and the median. Show the sum and the count.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write each value's distance from the mean and add the distances. What total do you get, and why?</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Sum 48, count 6, mean 48 &divide; 6 = 8; ordered list 4, 6, 6, 8, 11, 13, median = (6 + 8) &divide; 2 = 7. Distances from 8: &minus;4, &minus;2, &minus;2, 0, +3, +5, which add to 0, because the mean is the balance point.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Drag the Dots</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In the widget (Center tab), choose <strong>Symmetric</strong>. Predict: if you drag the largest dot (68) to the far right, to 100, what happens to the mean and to the median? Do it and record the new mean and median.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Reset, choose <strong>Right-skewed</strong>, and drag the largest dot (62) to 100. Record the new mean and median, and say which statistic followed the dot.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In Right-skewed, now drag the <em>smallest</em> dot (10) all the way to 100 and record both statistics again. Explain why the median finally moved this time.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Symmetric: the mean rises from 50.08 to 52.75; the median stays 50. Right-skewed, largest dot to 100: the mean rises from 24.75 to about 27.92; the median stays 18.5. Dragging the smallest dot to 100 moves a value across the middle of the list, changing the order: the mean becomes about 32.25 and the median becomes 20.5. The median responds to <em>order</em> (which side of the middle a value is on), not to how far a value goes beyond the others.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel Check</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A rider logs miles on nine weekends (<em>constructed</em>): 6, 8, 7, 9, 5, 8, 10, 7, 30. Following the click-by-click steps above, type the data in column A and use <strong>=AVERAGE</strong> and <strong>=MEDIAN</strong> to find the mean and median.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Check the mean by hand with Desmos: type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(6+8+7+9+5+8+10+7+30)/9</code>.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In one sentence, say which statistic better describes a typical weekend and why. Then change the 30 to 10 and say what happens to each.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Mean 10 (sum 90 &divide; 9); median 8 (ordered 5, 6, 7, 7, 8, 8, 9, 10, 30, the 5th value is 8). The median better describes a typical weekend: eight of the nine weekends are 10 miles or fewer, and the 30-mile ride pulls the mean up. Changing 30 to 10 gives sum 70; the mean falls to about 7.78 and the median stays 8: the mean was the one being pulled.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Find the Mistake</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Sam finds the median of 5, 12, 3, 9, 20 like this: &ldquo;There are five numbers, so the middle one is the 3rd one I see, which is 3.&rdquo; Sam also says &ldquo;The mean is 9.8, so half the numbers must be above 9.8.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find and correct both errors. Count how many of the five values are above 9.8.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Error 1: Sam did not order the list. Ordered: 3, 5, 9, 12, 20, so the median is the 3rd value, <strong>9</strong>. Error 2: the mean is the balance point, not the halfway point. Only two values (12 and 20) are above 9.8; the median is what splits the list into equal halves.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 22.1 &mdash; Centers by Hand and by Excel</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Hand computations on constructed sets, one short Excel part, a &ldquo;which center would you report?&rdquo; application, and an error analysis. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 22.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on mean, median, and choosing between them.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 22.2 &mdash; Percentiles, Quartiles, and Box Plots</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">A center alone says nothing about how spread out the data are; next lesson adds the pieces that locate values within the data.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 22.1 &middot; Measures of Center: Mean and Median</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

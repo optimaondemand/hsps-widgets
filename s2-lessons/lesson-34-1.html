@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 34.1</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 34.1</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Using numbers to help a community decide</div>
+    </div></div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 34.1</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Comparing Two Populations from Two Random Samples</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Two groups give two sample averages, and the gap between them wobbles from sample to sample. Resampling shows how much, and gives an honest range for the true gap.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">The difference of two sample means or proportions (B minus A); sampling variation in a difference; the bootstrap; a plausible range for the true difference; reading that range next to zero; a formula check in Excel; what a comparison of two existing groups can and cannot tell us</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Two-Sample Comparison interactive, follow the Excel steps, and complete the three activities at the bottom. The reading, interactive, and Excel steps take about 35 minutes and the activities about 40 more, so plan on about 75 minutes in all.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that the <strong>difference of two sample means</strong> (or proportions), <strong>B minus A</strong>, is a statistic that changes from one pair of random samples to the next, and say what it estimates.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use the <strong>bootstrap</strong> (resample each group with replacement, many times) to build a plausible range for the true difference between two populations, and check it with the standard-error formula in Excel.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> read a range for a difference next to <strong>zero</strong> without overclaiming: what &ldquo;contains 0&rdquo; and &ldquo;does not contain 0&rdquo; do and do not tell us.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> choose between the two designs (<strong>two random samples</strong> versus <strong>random assignment</strong> in an experiment), and state what a comparison of two existing groups can and cannot show about cause.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Two large groups of students take the same quick reaction-time test: a light flashes, and the student taps a key as fast as possible. A researcher cannot test every student, so she draws a <strong>random sample</strong> from each group: 14 students from Class A and 16 from Class B. Class B&rsquo;s sample is slower on average, by about 28.7 milliseconds. A headline writer would say &ldquo;Class B is slower.&rdquo; A careful reader asks two better questions. Is that gap a real feature of the two <em>groups</em>, or just the luck of which students landed in the samples? And even if the gap is real, can this study tell us <em>why</em>?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Weeks 31 and 33 you learned that one random sample gives one estimate, and that a different random sample would give a slightly different one. That wobble is <strong>sampling variation</strong>. Today you meet the same wobble in a new place: the <em>gap between two samples</em>. You will use a computer-powered idea, the <strong>bootstrap</strong>, to measure the wobble, and you will use it to give the honest answer that a number alone cannot.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, shows up in a plain way. A principal deciding where to put a new program, or a clinic comparing two neighborhoods, deserves the gap <em>and</em> an honest statement of how far off it could be. Reporting the range, and not only the exciting number, is a small act of service.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every group, number, and sample in this lesson is <strong>constructed</strong> (made up) or <strong>simulated</strong> by a computer to teach the idea. None of it is real data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; TWO GROUPS, ONE NUMBER</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Call the two groups <strong>Group A</strong> and <strong>Group B</strong>. We draw a random sample from each population and compute a mean (for a number such as a reaction time) or a proportion (for a Yes/No outcome such as &ldquo;walks to school&rdquo;). The statistic we care about is the <strong>observed difference (B minus A)</strong>:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 6px; padding: 12px 18px; text-align: center; font-size: 20px; color: #0E1C42;"><strong><em>x</em>-bar<sub>B</sub> &minus; <em>x</em>-bar<sub>A</sub></strong> &nbsp; (or &nbsp;<strong><em>p</em>-hat<sub>B</sub> &minus; <em>p</em>-hat<sub>A</sub></strong> for proportions)</div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A positive difference means Group B&rsquo;s sample is higher; a negative one means lower. We always subtract in the same order, B minus A, so the sign never confuses us. This one number is our estimate of the <em>true</em> difference between the two populations, which we cannot see.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Here is the catch. If the researcher drew two fresh random samples tomorrow, she would get a different difference. The statistic <strong>varies from one pair of samples to the next</strong>. So the real question is not &ldquo;what is the difference in my samples?&rdquo; but &ldquo;how far from the truth could it be?&rdquo; To answer that, we need to know how much the difference wobbles, and we cannot draw new samples from the populations. We have only the samples we already have.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128260; THE BOOTSTRAP: USE THE SAMPLE AS A STAND-IN</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the clever move. A random sample is a small picture of its population. So we let each sample <strong>stand in for its population</strong> and re-run the study on the stand-ins. One <strong>resample</strong> works like this:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; Draw a new Group A the same size as the original by picking values <strong>with replacement</strong> from the original Group A values (a value can be picked more than once, and some are left out).<br />&#9654; Do the same for Group B from the original Group B values, with the original Group B size.<br />&#9654; Compute the new difference (B minus A) and record it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Repeat this thousands of times. The recorded differences pile up into a picture of how much the difference wobbles. This method is called the <strong>bootstrap</strong>. The <strong>middle 95%</strong> of the resampled differences is a <strong>plausible range for the true difference</strong> between the two populations: values that the data leave plausible. (It plays the same role as the interval estimates from last week, but we got it by simulation, with no formula.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Reading the range next to zero.</strong> Zero means &ldquo;no difference between the populations.&rdquo; If the plausible range <em>contains 0</em>, the data are <strong>consistent with no difference</strong> (and also with a difference of either sign, up to the ends of the range). If the range <em>does not contain 0</em>, a real difference is plausible, and &ldquo;no difference&rdquo; looks like a poor fit for the data. We will not call anything a &ldquo;test&rdquo; yet. Lesson 34.3 turns this idea into a yardstick for deciding how surprising a result is.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Two limits to keep in mind.</strong> First, the bootstrap only reuses what the samples contain: if the samples were not random, or are biased, resampling cannot repair them (Weeks 30 and 31). Second, results move a little each time you run it, because the resamples are random. That is why we say &ldquo;about.&rdquo;</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: THE REACTION-TIME GAP</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up researcher draws a random sample of <em>n</em><sub>A</sub> = 14 students from Class A and <em>n</em><sub>B</sub> = 16 from Class B and records each reaction time in milliseconds (ms). The summary: Class A has mean 315.29 ms and standard deviation 24.69 ms; Class B has mean 343.94 ms and standard deviation 20.43 ms. Estimate the true difference and give a plausible range for it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Step 1, the observed difference (B minus A).</strong> 343.94 &minus; 315.29 = <strong>28.65 ms</strong>. In these samples, Class B is slower. <strong>Step 2, the plausible range by bootstrap.</strong> Resampling each group with replacement 20,000 times and taking the middle 95% of the new differences gives a range of about <strong>13 to 44 ms</strong>. (You will reproduce this in the interactive below; yours will be a little different, which is normal.) <strong>Step 3, a quick check with a formula.</strong> The wobble of a difference of two means is measured by a standard error that combines both groups: SE = &radic;( <em>s</em><sub>A</sub>&sup2; &divide; <em>n</em><sub>A</sub> + <em>s</em><sub>B</sub>&sup2; &divide; <em>n</em><sub>B</sub> ) = &radic;(609.76 &divide; 14 + 417.53 &divide; 16) = &radic;(43.55 + 26.10) = &radic;69.65 = <strong>8.35 ms</strong>. Reaching out about two standard errors each way (1.96 &times; 8.35 = 16.36) gives 28.65 &plusmn; 16.36, or <strong>12.3 to 45.0 ms</strong>. That is close to the bootstrap range, so the two methods agree.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Say it in a sentence.</strong> &ldquo;In these random samples, Class B averaged about 29 ms slower than Class A. A plausible range for the true difference between the two classes is about 13 to 44 ms, and 0 is not in that range, so a real gap of some size is plausible.&rdquo; <strong>What we cannot say.</strong> We cannot say <em>why</em> Class B is slower. The two classes may differ in age, time of day, sleep, or many other ways at once. Comparing two groups that already exist does not show cause. We return to this below.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Two-Sample Comparison</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Six tasks.</strong> <strong>(1)</strong> In section 1, <em>Choose the data</em>, leave <em>Outcome is Yes/No</em> unchecked and pick the made-up data set <em>Reaction times, two classes</em>. In section 2, <em>Look at the two groups</em>, find the dot plots (blue circles for Group A, orange squares for Group B, with dashed mean lines), the table of <em>n</em>, mean, median, and SD, and the <em>Observed difference in means (B minus A)</em>. It should match Worked Example 1. <strong>(2)</strong> Read the box <em>Which tab fits?</em>. This lesson uses the first tab, <strong>Two random samples</strong>, because the data come from two random samples of two populations. <strong>(3)</strong> In section 3, <em>Bootstrap the difference</em>, press <em>Resample 1</em> a few times and watch each resample draw a new Group A and Group B and record a new difference. Then press <em>Resample 100</em> and <em>Resample 1000</em>. <strong>(4)</strong> Find the shaded <em>Middle 95% of the resampled differences</em> (the <em>Outer 5%</em> is left unshaded), the gold line that marks your observed difference, and the dashed line at zero. Read the sentence that begins <em>A plausible range for the true difference</em>. Press <em>Clear resamples</em> and repeat: your range moves a little each run. <strong>(5)</strong> Pick <em>Barely a difference</em> and then <em>Clear difference</em> and run 1000 resamples for each. Where is zero in each picture? <strong>(6)</strong> Check <em>Outcome is Yes/No</em> and choose <em>Students who walk, two towns</em> to see the same method on proportions (Worked Example 2 is next). To try your own numbers, use <em>Paste my own data</em>, fill the boxes <em>Group A values</em> and <em>Group B values</em>, and press <em>Use my data</em>. Ignore the second tab, <em>Randomized experiment</em>, until Lesson 34.2. Read the box <em>Keep in mind</em> at the bottom: these tools do not repair bias or non-random collection, results move a little each run, and judging how big or important a difference is takes more than the pictures.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/two-sample-compare.html" width="100%" height="1850" style="border: none; display: block;" title="Two-Sample Comparison" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/two-sample-compare.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is tall; on a phone you may need to scroll a little.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: A DIFFERENCE OF PROPORTIONS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> In two made-up towns, a researcher draws a random sample of 60 students from each and asks whether the student walks to school. In Town A, 31 of 60 walk; in Town B, 38 of 60 walk. Estimate the true difference in the share who walk, and give a plausible range.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Step 1, the sample proportions.</strong> <em>p</em>-hat<sub>A</sub> = 31 &divide; 60 = <strong>0.517</strong> and <em>p</em>-hat<sub>B</sub> = 38 &divide; 60 = <strong>0.633</strong>. <strong>Step 2, the observed difference (B minus A).</strong> 0.633 &minus; 0.517 = <strong>0.117</strong>, about 11.7 percentage points. <strong>Step 3, the conditions.</strong> Both samples are random and small compared with their towns. Every count (31 and 29, 38 and 22) is at least 10, so the method is reasonable (some sources use 5). <strong>Step 4, the bootstrap range.</strong> For a Yes/No outcome, each resample draws 60 values from Group A (0.517 of them &ldquo;yes&rdquo;) and 60 from Group B (0.633 &ldquo;yes&rdquo;). The middle 95% of the resampled differences is about <strong>&minus;0.07 to 0.28</strong>. <strong>Step 5, the formula check.</strong> SE = &radic;( <em>p</em>-hat<sub>A</sub>(1 &minus; <em>p</em>-hat<sub>A</sub>) &divide; <em>n</em><sub>A</sub> + <em>p</em>-hat<sub>B</sub>(1 &minus; <em>p</em>-hat<sub>B</sub>) &divide; <em>n</em><sub>B</sub> ) = &radic;(0.00416 + 0.00387) = <strong>0.0896</strong>. Then 0.117 &plusmn; 1.96 &times; 0.0896 = 0.117 &plusmn; 0.176, or <strong>-0.059 to 0.292</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Say it in a sentence.</strong> &ldquo;In these samples, a higher share of Town B students walk (about 63% against 52%). A plausible range for the true difference is about &minus;0.06 to 0.29, and <strong>0 is inside it</strong>, so the data are consistent with no difference between the towns.&rdquo; Notice what that does <em>not</em> say. It does not say the towns are the same, and it does not say Town B walks more. The samples are simply too small to tell, and the plausible range reaches from a small advantage for Town A to a large advantage for Town B.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: FOUR TIMES THE STUDENTS, HALF THE WOBBLE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Suppose the same proportions had come from samples four times as large: 124 of 240 walk in Town A (0.517) and 152 of 240 walk in Town B (0.633). Build the formula range and compare it with Worked Example 2.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><em>Teacher&rsquo;s voice:</em> The difference is the same, <strong>0.117</strong>. The standard error is SE = &radic;(0.2497 &divide; 240 + 0.2322 &divide; 240), which works out to <strong>0.0448</strong>, exactly half of 0.0896. (Four times the sample size divides the SE by &radic;4 = 2, the same pattern you saw with margins of error.) The range is 0.117 &plusmn; 1.96 &times; 0.0448 = <strong>0.029 to 0.204</strong>. Now <strong>0 is not in the range</strong>. The samples did not change what they say about the gap; they just shrank the wobble, so the data can now rule out &ldquo;no difference&rdquo; as a good fit. A bigger sample narrows the plausible range.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; WHICH TAB FITS? RANDOM SAMPLES VERSUS RANDOM ASSIGNMENT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The interactive has two tabs because there are two different ways to get two groups, and they answer different questions.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Two random samples of two populations</strong> (today). We draw samples from two groups that already exist and ask <em>how big is the difference between the populations?</em> We estimate the difference and give a plausible range. Use the first tab, <strong>Two random samples</strong>.<br />&#9654; <strong>One set of subjects split by random assignment into two treatments</strong> (Lesson 34.2). We ask <em>could chance alone explain the gap?</em> Use the second tab, <strong>Randomized experiment</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>What random samples let us do.</strong> If both samples are random, the results about the difference can be carried to the <strong>populations they came from</strong> (with the honest wobble shown by the range). That is a claim about two groups, such as &ldquo;all the students in Class A and Class B.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>What they do not let us do.</strong> Two existing groups differ in many ways at once. If Class B is slower, we do not know whether age, sleep, the time of day, or something else is behind it. This is the old rule again: <strong>correlation is not causation</strong>, and comparing two existing groups shows a difference, not a cause. Only a randomized experiment (Week 32 and the next lesson) lets us say a treatment caused a difference. And if the samples are not random (volunteers, whoever was easy to reach), neither the bootstrap nor a formula can fix that: the range can be tight and still wrong.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>One sentence about the real world.</strong> Real studies often use a formula-based method for the same job, one you may meet later. Resampling gives the same idea in a form you can watch.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: SUMMARIZE TWO GROUPS AND BUILD THE RANGE, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will summarize two groups and build the difference and its range. Everything here is made up. This is a practice build; you do not upload it (Assignment 34.1 has you build a larger one).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk34_L1_YourName</code>. Rename the first sheet <strong>Readings</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Enter the data.</strong> This is a made-up set of daily reading minutes: random samples of 12 younger and 14 older students. In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Group A</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Group B</code>. Type the 12 Group A values in <strong>A2:A13</strong>: 22, 35, 18, 40, 28, 31, 25, 37, 20, 33, 29, 26. Type the 14 Group B values in <strong>B2:B15</strong>: 30, 42, 27, 38, 45, 33, 36, 29, 41, 34, 39, 31, 44, 35. The groups may have different sizes.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Labels.</strong> In <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Statistic</code>, in <strong>E1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Group A</code>, in <strong>F1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Group B</code>. In <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n</code>, in <strong>D3</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mean</code>, in <strong>D4</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">SD</code>. Then in <strong>D6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Difference (B minus A)</code>, in <strong>D7</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Standard error</code>, in <strong>D8</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Lower end (about 95%)</code>, in <strong>D9</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Upper end (about 95%)</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Group summaries.</strong> In <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(A2:A13)</code> and in <strong>F2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(B2:B15)</code>. In <strong>E3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(A2:A13)</code> and in <strong>F3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(B2:B15)</code>. In <strong>E4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(A2:A13)</code> and in <strong>F4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(B2:B15)</code>. Press Enter after each. You should see n = 12 and 14, means 28.67 and 36.00, and SDs 6.85 and 5.71.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The difference and its standard error.</strong> In <strong>E6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F3-E3</code> (Group B&rsquo;s mean minus Group A&rsquo;s). In <strong>E7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(E4^2/E2+F4^2/F2)</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The range.</strong> In <strong>E8</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E6-1.96*E7</code> and in <strong>E9</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E6+1.96*E7</code>. Check: the difference is about 7.33, the standard error about 2.50, and the range about <strong>2.44 to 12.23</strong>. This formula range <em>approximates</em> the bootstrap range.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Cross-check with the interactive.</strong> In the Two-Sample Comparison, use <em>Paste my own data</em>, paste the two columns into <em>Group A values</em> and <em>Group B values</em>, press <em>Use my data</em>, and run 1000 resamples on the <em>Two random samples</em> tab. The plausible range should land within a few tenths of a minute of your Excel range.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Try it.</strong> Change one Group B value in <strong>B2:B15</strong> to 60 (a very high reading). Which cells change? What happens to the range, and why?</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; TWO-GROUP SUMMARIES IN EXCEL; STANDARD ERROR IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(range)</code>, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNT(range)</code> summarize each group. The difference is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B-A</code>, the standard error of the difference is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(sA^2/nA+sB^2/nB)</code>, and the approximate 95% range is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=diff-1.96*SE</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=diff+1.96*SE</code>. Use the same pattern for proportions: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SQRT(pA*(1-pA)/nA+pB*(1-pB)/nB)</code> is the standard error of a difference of two sample proportions.<br />
+            <strong>Desmos Scientific</strong> handles plain arithmetic only. For Worked Example 1, type 24.69 &times; 24.69 &divide; 14 + 20.43 &times; 20.43 &divide; 16 and then use the <strong>square-root button</strong> on the result; you should see about 8.3. Multiply by 1.96 for the margin, then add and subtract it from 28.65.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; GIVE AN AI TWO CLASSES&rsquo; SUMMARY NUMBERS AND AUDIT ITS CONCLUSION</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A researcher took random samples of reaction times. Class A: n = 14, mean 315.3 ms, SD 24.7 ms. Class B: n = 16, mean 343.9 ms, SD 20.4 ms. What can we conclude about the two classes?&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write what a careful answer must include: the difference (about 28.7 ms, B minus A); a plausible range for the true difference (about 12 to 45 ms by formula); the idea that the samples are random, so the claim is about the two populations; a warning that this does <em>not</em> show why the classes differ; and mention of sample sizes and spread.<br />
+            <strong>Verify.</strong> Read the answer sentence by sentence. Typical AI errors: <strong>(1)</strong> a causal claim (&ldquo;Class B&rsquo;s program slows reactions&rdquo;) from two existing classes; <strong>(2)</strong> ignoring the spread and the overlap of the two groups (many Class A students are slower than many Class B students); <strong>(3)</strong> saying &ldquo;statistically significant&rdquo; with no basis shown; <strong>(4)</strong> ignoring the sample sizes. Did it do any of these? Check its numbers yourself in Excel or Desmos, then rewrite its weakest sentence so that it is true. <strong>Verdict.</strong> A confident conclusion is not a justified one; the data and the design set the limits.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 40 minutes, plus the reading, the interactive, and the Excel steps above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Run, Record</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open the Two-Sample Comparison, leave <em>Outcome is Yes/No</em> unchecked, and use the <em>Two random samples</em> tab. You will use three made-up data sets: <em>Barely a difference</em>, <em>Clear difference</em>, and <em>Reaction times, two classes</em>. <strong>Predict</strong> first: for each, will the plausible range contain 0? Write each prediction in a table with blank columns for &ldquo;range&rdquo; and &ldquo;contains 0?&rdquo;.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Run.</strong> For each data set, read the observed difference, press <em>Resample 1000</em>, and record the plausible range from the sentence under the picture. Press <em>Clear resamples</em> and run a second time to see how much your range moves.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Reflect.</strong> (a) Which predictions were right? (b) The <em>Clear difference</em> data have a gap of 15, and the <em>Reaction times</em> data have a gap of about 29, yet the clear-difference range is much narrower. Use the dot plots (how spread out is each group?) to explain why. (c) A student says, &ldquo;My two runs gave slightly different ranges, so the method must be broken.&rdquo; Respond in two sentences.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. The observed differences are about 0.4, 15.0, and 28.7. Likely predictions: Barely a difference contains 0; the other two do not. 2. Typical ranges (they move a little each run): Barely a difference about &minus;1.8 to 2.6 (<strong>contains 0</strong>, width about 4.4); Clear difference about 12.3 to 17.6 (does not contain 0, width about 5.3); Reaction times about 13 to 44 (does not contain 0, width about 31). 3. (a) Answers vary; the pattern is the point. (b) In the clear-difference data both groups are tightly bunched (SD about 3) and do not overlap, so resampling barely moves the averages; in the reaction-time data the students vary much more (SD about 20 to 25), so the difference of averages wobbles more even though the gap is bigger. The wobble depends on the <em>spread</em> and the <em>sample sizes</em>, not on the size of the gap. (c) Resampling uses random draws, so each run is a little different; the ranges should agree closely (within a fraction of a point or a few milliseconds). Small run-to-run movement is expected, not a defect.</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Which Tab? What Can We Say?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each made-up study, say (i) whether it is <strong>two random samples</strong> or a <strong>randomized experiment</strong> (or neither), and (ii) what a plausible range for the difference could be used to claim. Use the words &ldquo;populations,&rdquo; &ldquo;cause,&rdquo; or &ldquo;bias&rdquo; where they apply.<br /><strong>(a)</strong> A random sample of 80 adults from Maple Town and a random sample of 90 adults from Birch Town are asked whether they ride the bus. The researcher compares the shares.<br /><strong>(b)</strong> Thirty volunteer students are randomly assigned to one of two study methods, and the quiz scores are compared.<br /><strong>(c)</strong> A random sample of 50 students who walk to school and a random sample of 60 who ride the bus are compared on their mean sleep hours.<br /><strong>(d)</strong> A club posts a link to a survey and compares the answers of the members from two grades who chose to reply.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Pick one of (a) to (d) and write the one sentence you would be comfortable putting in a report.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. (a) Two random samples, first tab; the range estimates the difference between the two towns&rsquo; adult populations; it is a claim about the towns, not a cause. (b) A randomized experiment (second tab, next lesson): the volunteers are not a random sample, so the claim is about what the methods did in <em>these</em> students; random assignment is what allows a cause claim. (c) Two random samples, first tab; the range estimates the difference between the two populations (walkers and bus riders), but walkers and riders differ in many ways, so it does not show that walking or riding causes any sleep difference. (d) Neither: whoever chose to reply is a self-selected (voluntary response) group, not a random sample, so there is bias that no range can repair; the results describe only the people who replied. 2. Example for (c): &ldquo;In random samples of walkers and bus riders, a plausible range for the true difference in mean sleep is [the range]; this describes the two groups but does not show that how they travel causes the difference.&rdquo;</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Worked, Then Your Turn</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Worked.</strong> Made-up random samples of quiz scores: Group A has <em>n</em> = 40, mean 72.5, SD 9.0; Group B has <em>n</em> = 45, mean 76.1, SD 10.2. Find the observed difference (B minus A), the standard error, and the approximate 95% range (difference &plusmn; 1.96 &times; SE). Is 0 in the range? What does that tell you, and what does it not tell you?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (means).</strong> Made-up random samples of times (minutes) to finish a puzzle: Group A has <em>n</em> = 25, mean 18.4, SD 3.1; Group B has <em>n</em> = 30, mean 21.0, SD 3.8. Find the observed difference, the standard error, and the approximate 95% range. State what the range says about 0.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (proportions).</strong> A random sample of 150 students from one made-up district has 63 who bring lunch from home; a random sample of 200 from another has 104. Find the two sample proportions, the observed difference (B minus A), the standard error, and the approximate 95% range. The left end is very close to 0. In one or two sentences, say why you should not treat the edge of the range as a bright line.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Say it honestly.</strong> A classmate writes: &ldquo;Group B&rsquo;s mean is higher and the range does not include 0, so being in Group B causes higher scores.&rdquo; Find the problem and rewrite the sentence.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. Difference = 76.1 &minus; 72.5 = <strong>3.6</strong>. SE = &radic;(81 &divide; 40 + 104.04 &divide; 45) = &radic;(2.025 + 2.312) = &radic;4.337 = <strong>2.083</strong>. Range = 3.6 &plusmn; 1.96 &times; 2.083 = 3.6 &plusmn; 4.082 = <strong>-0.48 to 7.68</strong>. Since 0 is inside, the data are consistent with no difference (and with a difference up to about 7.7 points); we cannot say the groups differ or that they are equal. 2. Difference = 21.0 &minus; 18.4 = <strong>2.6</strong>. SE = &radic;(9.61 &divide; 25 + 14.44 &divide; 30) = &radic;(0.3844 + 0.4813) = <strong>0.930</strong>. Range = 2.6 &plusmn; 1.96 &times; 0.930 = 2.6 &plusmn; 1.824 = <strong>0.78 to 4.42</strong> minutes. 0 is not in the range, so a real difference is plausible (Group B plausibly slower by about 0.8 to 4.4 minutes). 3. <em>p</em>-hat<sub>A</sub> = 63 &divide; 150 = 0.420; <em>p</em>-hat<sub>B</sub> = 104 &divide; 200 = 0.520; difference = <strong>0.100</strong>. SE = &radic;(0.2436 &divide; 150 + 0.2496 &divide; 200) = &radic;(0.001624 + 0.001248) = <strong>0.0536</strong>. Range = 0.100 &plusmn; 1.96 &times; 0.0536 = 0.100 &plusmn; 0.105 = <strong>-0.005 to 0.205</strong>. The left end is just below 0. A different random sample, or a slightly different range level, would move the edge across 0, so what matters is the whole range: mostly positive, from about 0 up to about 0.2, with a best single guess of 0.10. 4. Problem: the groups are existing groups (or at least not randomly assigned), so a difference does not show that being in a group <em>causes</em> the score. Rewrite: &ldquo;In random samples, Group B scored higher on average, and a plausible range for the true difference does not include 0, so a real difference between the two populations is plausible; this does not tell us why they differ.&rdquo;</div>
+</details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 34.1 &mdash; Two-Group Comparison Workbook</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Summarize two made-up data sets in Excel, build the difference and its approximate 95% range for each, write short answers about what the ranges do and do not say, and upload the workbook to Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 34.1</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on the difference of two sample statistics, the bootstrap, ranges for a difference, and what comparing two groups can and cannot show.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Looking ahead</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">The next lesson compares two treatments in a randomized experiment, where random assignment lets us ask whether chance alone could explain the gap.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 34.1 &middot; Comparing Two Populations from Two Random Samples</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

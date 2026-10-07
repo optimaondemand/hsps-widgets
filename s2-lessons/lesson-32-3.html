@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 32.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 32.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Fair, sound design</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 32.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Design-a-Study Workshop: From a Vague Question to a Plan</div>
+        <div style="font-size: 16px; color: #666;">Lesson &middot; Workshop</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A good question is only the start. A good design is a promise about what you will, and will not, claim.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Use everything from this module to turn a vague question into a plan someone else could carry out and trust.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Learn the eight-question design checklist, study three worked designs that end in three different answers, repair a flawed design, and then build your own. Plan on about two hours. Every school, greenhouse, and town on this page is constructed (made up), and no result here is a real finding.</div>
+    </div>
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> turn a vague question into a study design that states a <strong>population</strong>, a <strong>variable list</strong> (explanatory and response, with units), a <strong>sampling plan</strong>, and, if the aim is cause, a <strong>random assignment plan</strong>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>choose</strong> between a sample survey, an observational study, and an experiment for a question and justify the choice, including when an experiment is not possible or not ethical.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>anticipate</strong> bias, confounding, and nonresponse in a design and say how the design reduces each.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> write a one-paragraph <strong>what we can and cannot conclude</strong> statement that matches what the design earned.</div></div>
+</div>
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). You will save a practice workbook as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk32_Design_YourName.xlsx</code>. You do not upload it for this lesson.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice, for the AI Training task (you will supervise it, not trust it).</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From earlier this week: the three kinds of study, how treatments are assigned at random, and what controls, blinding, replication, and blocks are for. From earlier in the module: why random choice matters, and how bias differs from chance variation.</div></div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: A DESIGN IS A PROMISE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When you design a study you make two promises. The first is to the people (or plants, or animals) in it: you will not ask more of them than the question deserves, and you will not harm them to find an answer. The second is to everyone who later reads your result: you will claim no more than your design earned.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Most bad statistics does not come from bad arithmetic. It comes from a design that could not answer the question, followed by a claim that sounded as if it had. Today you practice the unglamorous work that comes <em>before</em> any data exist: deciding, in writing, how you will be fair and what you will honestly be able to say.</div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9989; THE DESIGN CHECKLIST: EIGHT QUESTIONS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every design you write today answers the same eight questions, in this order. Keep this table beside you for the whole lesson.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; width: 100%;">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; width: 28%;">Question</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8;">A good answer includes</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>1. What is the question, and what is the aim?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">One sentence. Is the aim to <strong>describe</strong> a population, to <strong>compare</strong> groups as they already are, or to find out whether one thing <strong>causes</strong> another?</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>2. Who is the population?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Exactly who or what you want to speak about, named so a stranger could tell who is in and who is out.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>3. What are the variables?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">List each one with its <strong>units</strong> or categories. Mark the <strong>explanatory</strong> variable (what may explain) and the <strong>response</strong> variable (what we measure as the outcome). Name other variables that might matter.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>4. Which design: survey, observational study, or experiment?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Pick one and say why. If an experiment is the natural tool but cannot be done ethically or practically, say so and choose observational.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>5. How will we choose who is in the study?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">The list you will draw from, the method (simple random, stratified, and so on), and the sample size, with the arithmetic.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>6. If the aim is cause, how will we assign treatments?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Random assignment, a comparison (control) group, blinding where possible, enough subjects per group (replication), and blocks if a known difference could swamp the effect. If the study is not an experiment, write instead <em>why we cannot assign</em> and what we will measure to account for other factors.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>7. What could go wrong?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Name the risks (bias, confounding, nonresponse, measurement error) and, for each, one thing the design does about it.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>8. What can we conclude, and what can we not?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">One honest paragraph that matches the design: who it applies to, whether it supports cause, and what it leaves open.</td></tr>
+</table></div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; CHOOSING THE DESIGN: THREE TOOLS, THREE KINDS OF CLAIM</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The aim in question 1 usually points to the design in question 4. Read across each row.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Design</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Best when&hellip;</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What you do</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What you may claim</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Sample survey</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">You want to <em>describe</em> a population: a share, an average, an opinion.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Choose a random sample, ask everyone chosen the same fair questions, follow up with those who do not answer.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An estimate for the population you sampled, with an honest allowance for chance swing. Not why people answer as they do.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Observational study</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">You want to <em>compare groups or look for a link</em> and you cannot, or should not, assign the groups.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Choose a sample, measure the variables as they naturally are, and also measure other factors that might explain the pattern.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An <strong>association</strong> (a link) in the population sampled. <strong>Not</strong> cause, because confounding variables may be at work.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Experiment</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">You want to know whether a treatment <em>causes</em> a change, and you can ethically assign it.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Assign treatments <em>at random</em>, include a comparison group, blind where possible, replicate, block if needed.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Cause and effect, for the kind of subjects in the study. Generalizing farther depends on how the subjects were chosen.</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Two ideas that get tangled.</strong> <em>Random sampling</em> (how the people are chosen) protects your claim about the <strong>population</strong>. <em>Random assignment</em> (who gets which treatment) protects your claim about <strong>cause</strong>. A design can have one, both, or neither, and each earns a different sentence in question 8.</div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; HOW BIG SHOULD THE SAMPLE BE? A WORKSHOP ANSWER</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Notice that the checklist asks for a sample size but gives no formula. Earlier in the module you watched the same population produce a different estimate every time a new sample was drawn. The lesson from that: <strong>more samples, less swing</strong>. A larger random sample gives estimates that stay closer together from one sample to the next, so the answer is steadier.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The other half of the lesson is just as important: <strong>more does not fix bias</strong>. If the way you chose people leaves some of them out, or the question nudges the answer, a bigger sample repeats the same mistake more times. So think of size and fairness as two separate dials. Fairness comes from how you choose and how you ask. Size only buys steadiness.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">In practice, choose a size you can actually carry out, including the follow-up work with people who do not answer, and then <em>say what size you chose and why</em>. In an experiment, aim for enough subjects in each group that one unusual plant, patient, or student cannot decide the result. A small study is not shameful. A small study that claims too much is.</div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127860; WORKED MINI-DESIGN 1 &mdash; THE LUNCH-MENU SURVEY (A SAMPLE SURVEY)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed scenario, not real.</em> The cafeteria manager at the made-up Fairview High wants student input before choosing a new lunch option. Watch how each answer on the checklist follows from the one before it.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; width: 100%;">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; width: 28%;">Checklist question</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8;">Our answer</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>1. Question and aim</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Which of three proposed new lunch options (pasta bar, build-your-own bowl, or wraps) do Fairview students prefer? Aim: <strong>describe</strong>.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>2. Population</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">All 1,260 students enrolled at Fairview High this term.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>3. Variables</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><em>Preferred option</em> (categorical: pasta bar, bowl, wraps) and <em>grade level</em> (categorical: 9 to 12). We are describing, not explaining, so there is no explanatory or response variable. We report the <strong>proportion</strong> choosing each option. Grade level lets us check whether the grades agree.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>4. Design</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Sample survey.</strong> The aim is to estimate a preference, not to test what a change causes. Asking every student (a census) would work but would take far longer than asking a well-chosen few.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>5. Sampling plan</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Stratified by grade, in proportion</strong>, n = 90, drawn at random from each grade&rsquo;s enrollment list. Grade sizes are 378, 336, 294, and 252, so each grade&rsquo;s share is 90 &times; (grade size &divide; 1,260): <strong>27, 24, 21, and 18</strong>, which add to 90. We stratify because tastes may differ by grade, and this way no grade can be missed by bad luck.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>6. Assignment</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">None. We give no treatment. Nothing is assigned, so we will make no cause-and-effect claim.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>7. Risks and what we do</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Bias from the question:</strong> neutral wording, and the three options appear in a different random order on different forms, so the first option does not get a boost. <strong>Nonresponse:</strong> forms are filled out in homeroom, with one follow-up for anyone absent. If only 54 of 90 answer (60%), we compare who answered with the plan (27, 24, 21, 18) and report the gap. <strong>Honesty of answers:</strong> forms are anonymous.</td></tr>
+</table></div>
+<div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 6px; padding: 14px 20px; margin: 4px 0 0 0;"><div style="font-size: 11px; color: #c7922c; margin-bottom: 6px;">WHAT WE CAN AND CANNOT CONCLUDE</div><div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">Because chance chose the students within every grade, we can estimate which option Fairview students prefer, and we should state that the estimate carries a chance swing. We <strong>cannot</strong> say <em>why</em> they prefer it, cannot speak for staff or next year&rsquo;s students, and if many chosen students did not answer, our estimate may lean toward the ones who did. A survey describes; it does not explain.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; margin-top: 14px;"><strong>Why this answer?</strong> The aim was to describe, we could list everyone, and the groups (grades) plausibly differ. That points to a survey with stratification.</div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127813; WORKED MINI-DESIGN 2 &mdash; DOES A NEW FERTILIZER HELP TOMATOES? (A RANDOMIZED EXPERIMENT WITH BLOCKS)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed scenario, not real.</em> The made-up Mill Creek Greenhouse wants to know whether a new fertilizer is worth buying. This is a cause question about something we may freely assign, so the experiment is the right tool.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; width: 100%;">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; width: 28%;">Checklist question</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8;">Our answer</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>1. Question and aim</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Does the new fertilizer, called Grow-Plus, increase tomato yield compared with the usual fertilizer? Aim: <strong>cause</strong>.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>2. Population</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Tomato plants of this one variety grown in this made-up Mill Creek Greenhouse. We will be careful not to speak beyond that.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>3. Variables</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Explanatory:</strong> fertilizer type (categorical: Grow-Plus or usual). <strong>Response:</strong> total mass of ripe tomatoes per plant over a 10-week harvest, in <strong>kilograms</strong>. <strong>Other variables that could matter:</strong> bench position (light and temperature), water, pot size, seedling size at the start.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>4. Design</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Randomized experiment, with blocks.</strong> We care about cause, and we can assign fertilizer to plants with no ethical problem.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>5. Sampling plan</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">The greenhouse has 24 seedlings of the same variety, age, and size, spread over 3 benches of 8. We use <strong>all 24</strong>. They are not a random sample of all tomato plants, which limits what we may generalize to (see the conclusion).</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>6. Assignment</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Block by bench</strong>, because the benches get different light and heat. Within each bench, shuffle the 8 plant ID numbers with a random number beside each and sort. The first 4 get Grow-Plus and the other 4 get the usual fertilizer. That is <strong>12 plants per treatment</strong> (replication). The usual-fertilizer plants are the <strong>comparison group</strong>: same pots, same water, same schedule, so the only planned difference is the fertilizer. Bags are labeled with codes, and the person who harvests and weighs does not know which code is which (<strong>blinding</strong>).</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>7. Risks and what we do</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Confounding from bench position:</strong> blocks put 4 and 4 on every bench, so bench cannot favor one fertilizer. <strong>Hidden differences between plants:</strong> random assignment spreads them across both groups. <strong>Expectation bias at harvest:</strong> blinding. <strong>One odd plant deciding the result:</strong> 12 per group. <strong>Nonresponse:</strong> not an issue for plants, but we record any plant that dies and report it.</td></tr>
+</table></div>
+<div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 6px; padding: 14px 20px; margin: 4px 0 0 0;"><div style="font-size: 11px; color: #c7922c; margin-bottom: 6px;">WHAT WE CAN AND CANNOT CONCLUDE</div><div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">If the Grow-Plus plants out-yield the usual-fertilizer plants by more than the random assignment alone would likely produce, we can conclude that Grow-Plus <strong>caused</strong> the extra yield for plants like these, in this greenhouse, over this 10-week harvest. We <strong>cannot</strong> say it works for other tomato varieties, outdoors, or in another climate, because these 24 plants were not a random sample of all tomato plants, and 24 plants is a small study.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; margin-top: 14px;"><strong>Why this answer?</strong> Random assignment, a fair comparison, blinding, and blocks are exactly the tools that let an experiment support cause. Notice that nothing about the <em>sampling</em> is random here, and the conclusion is narrower for that reason.</div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128564; WORKED MINI-DESIGN 3 &mdash; DO TEENS WHO SLEEP LESS HAVE LOWER GRADES? (AN OBSERVATIONAL STUDY WITH CAREFUL CLAIMS)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed scenario, not real.</em> This one tempts us to jump to cause. Look at how the design, and the ethics, push the answer toward a careful, limited claim.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; width: 100%;">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; width: 28%;">Checklist question</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8;">Our answer</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>1. Question and aim</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">Among Lakeview students, are shorter school-night sleep times linked to lower grades? Aim: <strong>find a link</strong> (an association). Cause is what we would love to know, but we will see that the design cannot give it.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>2. Population</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;">All 1,000 students enrolled at the made-up Lakeview High (grades 9 to 12).</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>3. Variables</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Explanatory:</strong> average school-night sleep, in <strong>hours</strong>, from a 7-night log. <strong>Response:</strong> semester GPA, in <strong>grade points</strong> (0 to 4.0). <strong>Possible confounders to measure:</strong> hours of after-school work, daily screen time, and a simple stress rating.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>4. Design</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Observational study.</strong> We measure students as they already are. An experiment would have to assign some teens to sleep much less than others for weeks, which is <strong>unethical</strong> (it could harm health and safety, and grades) and impractical (we cannot control how long teens sleep at home).</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>5. Sampling plan</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Stratified by grade, in proportion</strong>, n = 120, drawn at random from each grade&rsquo;s list. Grade sizes are 280, 270, 250, and 200, so 120 &times; (grade size &divide; 1,000) gives 33.6, 32.4, 30, and 24, which round to <strong>34, 32, 30, and 24</strong>, adding to exactly 120. Students log their sleep for 7 nights; GPA comes from school records with permission.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>6. Assignment</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Nothing is assigned</strong>, and that is the whole point: students keep their own habits. Because we cannot randomize sleep, we <em>measure</em> work hours, screen time, and stress and compare students who are alike on those, to see whether the link survives.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;"><strong>7. Risks and what we do</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; line-height: 1.55; border: 1px solid #D0D9E8; vertical-align: top;"><strong>Confounding:</strong> a student with a heavy work schedule may both sleep less and have less study time; we measure work and compare like with like, but we cannot measure everything. <strong>Reverse direction:</strong> low grades may cause worry and then lost sleep. <strong>Measurement error:</strong> self-reported sleep is imprecise; a daily log is better than memory. <strong>Nonresponse:</strong> reminders in homeroom, and we report how the responders compare with the plan (34, 32, 30, 24).</td></tr>
+</table></div>
+<div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 6px; padding: 14px 20px; margin: 4px 0 0 0;"><div style="font-size: 11px; color: #c7922c; margin-bottom: 6px;">WHAT WE CAN AND CANNOT CONCLUDE</div><div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">If the sample shows that students who sleep fewer hours tend to have lower GPAs, we can say that, for Lakeview students, shorter sleep is <strong>associated</strong> with lower grades, even after comparing students with similar work hours, screen time, and stress. We <strong>cannot</strong> say that sleeping less <em>causes</em> lower grades, because we did not assign the sleep, other factors we did not measure may explain the link, and the cause may even run the other way. We also cannot speak for other schools.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; margin-top: 14px;"><strong>Why this answer?</strong> The aim was a link, the only way to test cause would be unethical, so the responsible move is an observational study with a claim that stops where the design stops. <em>Correlation is not causation</em>; here the design is honest about that.</div>
+</div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; THREE QUESTIONS, THREE DIFFERENT DESIGNS</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"></td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Lunch menu</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Fertilizer</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Sleep and grades</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Aim</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Describe</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Cause</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Link</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Design</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Sample survey</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Randomized block experiment</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Observational study</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Random choice of people?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes (stratified)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No (all available plants)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes (stratified)</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Random assignment?</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Nothing assigned</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes, within each bench</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Not possible</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Strongest honest claim</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An estimate for all Fairview students</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Cause, for plants like these</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An association for Lakeview students</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The same eight questions produced three different designs. The checklist does not tell you what to decide. It makes sure you decide <em>on purpose</em>.</div>
+</div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127981; WHERE PEOPLE USE THIS &middot; RANDOMIZED AND OBSERVATIONAL STUDIES TOGETHER</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">Medical researchers commonly test a new treatment in a randomized, blinded trial, while questions about harms that cannot ethically be assigned are often studied by observing groups as they already are, and the details of each study&rsquo;s design decide how strong a claim it can support.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: A PLANNING TABLE FOR STRATIFIED ALLOCATION, AND A RANDOM SHUFFLE</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;"><strong>Planning table.</strong> List each group and its size, add the sizes for N with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:B5)</code>, put your sample size n in its own cell, and compute each group&rsquo;s share with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUND($F$1*B2/$B$6,0)</code>. Add the allocations with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(C2:C5)</code> and test the total with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(C6=F1,"OK","adjust")</code>. Always check that the allocations add to n before you trust the table.<br /><br /><strong>Random shuffle.</strong> As you did earlier this week, put the list in one column, put <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RAND()</code> beside each item, freeze the numbers with <strong>Copy</strong> and <strong>Paste Special &rarr; Values</strong>, then <strong>sort</strong> both columns by the random numbers. The top half of the shuffled list is one group and the bottom half is the other. Full click-by-click steps are in Activity 2.<br /><br /><strong>Desmos Scientific</strong> is for plain arithmetic only. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">90*378/1260</code> to get 27, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">120*280/1000</code> to get 33.6.</div>
+    </div>
+
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; HAVE AN AI CRITIQUE YOUR OWN DESIGN, THEN JUDGE THE CRITIQUE (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;"><strong>Predict first.</strong> Do this after you finish Activity 4. Before you open any AI tool, reread your design and write down the <strong>two weakest points</strong> you can find yourself. (This is your prediction.)<br /><strong>Prompt.</strong> Give the AI your full design, with this request: <em>&ldquo;Here is a study design written by a high-school statistics student. Critique it. Name the three biggest weaknesses, say which step of the design each one is in, and say what claims in the final paragraph would be too strong. [paste your design]&rdquo;</em><br /><strong>Verify.</strong> Judge each critique with these four questions.<br /><div style="margin: 10px 0;"><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>1. Is it specific?</strong> Does the critique point to a particular step in <em>your</em> design (&ldquo;your sampling plan draws only from volunteers&rdquo;), or could it be pasted under anyone&rsquo;s design (&ldquo;consider a larger sample&rdquo;)? Generic critiques do not stick.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>2. Is it true?</strong> Check the claim against your own text. Did the AI misread your design type (calling an observational study an experiment), invent a step you never wrote, or praise something you left out?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>3. Is the fix allowed?</strong> Would the fix be ethical and possible? An AI may suggest randomly assigning people to a harmful condition, or doing something you have no way to carry out.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; padding-left: 16px;">&#9654; <strong>4. Does it fix the right kind of error?</strong> Bias and confounding are not cured by a bigger sample. Random assignment protects a cause claim, and random sampling protects a claim about a population. Watch for a critique that mixes these up.</div>
+</div>Then decide which critiques <strong>stick</strong> (keep and use), which need <strong>revision</strong>, and which to <strong>reject</strong>. In your notebook, write: one critique you kept and what you changed in your design because of it; one critique you rejected and which of the four questions it failed; and whether the AI caught either of the two weak points you predicted. Do not paste in the AI&rsquo;s fix without checking it against the checklist.</div>
+    </div>
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 2 hours, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Match the Question to the Design</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each made-up question below, name the best design (sample survey, observational study, or experiment) and give a one-sentence reason. Use question 1 of the checklist: is the aim to describe, to find a link, or to find a cause?</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> What share of the households in the made-up Brook County have a working smoke detector? <strong>(b)</strong> Does a new brand of cough drop shorten how long a sore throat lasts? <strong>(c)</strong> Do people who live near busy roads have more asthma? <strong>(d)</strong> Do students who play a musical instrument have higher math scores?</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For one of (a) to (d), write one sentence on what you could <em>not</em> claim from the design you chose.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>(a)</strong> Sample survey: the aim is to describe a share, so take a random sample of households. <strong>(b)</strong> Experiment: we can ethically assign cough drops; use random assignment and a comparison group (such as an identical-looking plain lozenge) and blind the people who judge recovery. <strong>(c)</strong> Observational: we cannot assign where people live, and people near busy roads may differ in other ways (income, housing age), so only a link can be claimed. <strong>(d)</strong> Observational: students choose to play, and instrument-playing may go with other advantages (time, family resources, interest in school), so we cannot claim music <em>causes</em> higher scores. (An experiment assigning students to lessons is possible in principle, but would be a different, larger study.) <strong>Sample limits:</strong> from (a) you could not say <em>why</em> households do or do not have detectors; from (b) you could not speak beyond the kind of people in the study; from (c) or (d) you could not claim cause.</div>
+</details>
+</div></div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel: Allocation Table and Random Shuffle</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a <strong>Blank workbook</strong>. Press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk32_Design_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Planning table.</strong> Type the headings <strong>A1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Group</code>, <strong>B1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Size</code>, <strong>C1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Allocation</code>. In A2:A5 type Grade 9, Grade 10, Grade 11, Grade 12. In B2:B5 type 378, 336, 294, 252. In <strong>A6</strong> type Total, in <strong>B6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:B5)</code> (expect 1260).</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sample size n</code> and in <strong>F1</strong> type <strong>100</strong>. In <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUND($F$1*B2/$B$6,0)</code> and fill down to C5 (click the Name Box, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">C2:C5</code>, press Enter, then press <strong>Ctrl+D</strong>). In <strong>C6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(C2:C5)</code>. In <strong>D6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(C6=F1,"OK","adjust")</code>. Expect allocations <strong>30, 27, 23, 20</strong>, total <strong>100</strong>, and OK.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Change <strong>F1</strong> to <strong>90</strong>. Expect <strong>27, 24, 21, 18</strong>, total 90, OK (these match Worked Mini-Design 1). Change F1 to <strong>50</strong>. Expect <strong>15, 13, 12, 10</strong>, total 50, OK.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Change <strong>F1</strong> to <strong>75</strong>. Look at the total in C6 and the check in D6. Write two sentences: what happened, and how you would fix it by hand. (Hint: compute each exact share first with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">75*378/1260</code> in Desmos, and look at which shares end in .5.)</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">6</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Random assignment.</strong> As you did earlier this week, set up a shuffle. In <strong>H1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Plant</code> and in <strong>I1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Random</code>. In H2:H9 type P1 through P8 (the 8 plants on one bench). In <strong>I2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RAND()</code> and fill down to I9.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">7</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Select I2:I9, press <strong>Ctrl+C</strong>, then right-click I2 and choose <strong>Paste Special &rarr; Values</strong> (this freezes the random numbers). Select H1:I9, then on the <strong>Data</strong> tab choose <strong>Sort</strong>, sort by column I, <strong>Smallest to Largest</strong>, with My data has headers checked.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">8</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In <strong>J2:J5</strong> type New and in <strong>J6:J9</strong> type Usual. Your top 4 shuffled plants are the new-fertilizer group. Record which plants those are. Then ask: how many plants per group, and which design idea does that serve?</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>Planning table:</strong> B6 = 1260. With n = 100 the exact shares are 30, 26.67, 23.33, 20, which round to 30, 27, 23, 20 (total 100). With n = 90: 27, 24, 21, 18. With n = 50: 15, 13.33, 11.67, 10, which round to 15, 13, 12, 10 (total 50). <strong>The n = 75 test:</strong> the exact shares are 22.5, 20, 17.5, 15, and Excel rounds .5 up, giving 23, 20, 18, 15, a total of <strong>76</strong>, so D6 shows adjust. A fair fix: take one unit back from one group (state your rule, such as the group whose share was rounded up the most, and keep the groups proportional) so the total is 75. <strong>Shuffle:</strong> every student&rsquo;s order will be different because the random numbers are different. You should have 4 plants in each group, which is replication (more than one plant per treatment). If you sorted before freezing, the numbers redraw and the order changes; freeze first.</div>
+</details>
+</div></div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Critique It: Repair a Flawed Design</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">30 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Read Ms. Okafor&rsquo;s design (constructed, not real).<div style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 6px; padding: 12px 16px; margin: 8px 0; font-size: 17px; line-height: 1.6;">Ms. Okafor (a made-up teacher) wants to know whether playing quiet classical music while studying raises quiz scores for high-school students. She asks for volunteers in her 3rd-period class, and 14 students sign up. They study with the music on for one week. Her 6th-period class, 26 students, studies in silence. Both classes take the same vocabulary quiz on Friday. The music group averages 4 points higher (a made-up result). She announces: <em>&ldquo;Classical music raises quiz scores for high-school students.&rdquo;</em></div></div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Error analysis. List at least <strong>four</strong> problems with the design or the conclusion. For each, name the checklist question it breaks (1 to 8) and say which way it could mislead.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write a <strong>repaired design</strong> in the checklist order (questions 1 to 8), using what she has available: the two classes, a Friday quiz, and willing students. Keep it practical. Finish with a one-paragraph what we can and cannot conclude.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check and model repair</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>Problems (accept any four, or others you can defend):</strong> (1) <em>Volunteers chose the treatment</em>, and volunteers may be more motivated (breaks Q6, confounding). (2) <em>The groups differ in other ways</em>: different class period, time of day, classmates, and 14 versus 26 students (Q6, Q7, confounding). (3) <em>No random assignment</em> (Q6). (4) <em>One teacher and one pair of classes</em> cannot speak for all high-school students (Q2, Q5, overreach in Q8). (5) <em>The quiz is scored by someone who knows who had music</em>; a blind scorer is better (Q6, blinding). (6) <em>One week and one quiz</em> is thin, and 14 students is a small group (replication). <strong>Model repair:</strong> <em>Q1:</em> Does studying with classical music raise vocabulary-quiz scores for students in these two classes? Aim: cause. <em>Q2:</em> students in Ms. Okafor&rsquo;s 3rd- and 6th-period classes who agree to take part. <em>Q3:</em> explanatory: music or silence while studying (categorical); response: Friday vocabulary quiz score, in points out of the quiz total. <em>Q4:</em> randomized experiment with blocks. <em>Q5:</em> all willing students from both classes (say how many; they are volunteers, not a random sample). <em>Q6:</em> block by class period; within each, give every student a random number with =RAND() and sort, the top half studying with music and the bottom half in silence (same room, same time, earbuds for both groups, only the music differs); a colleague scores quizzes labeled by code only. <em>Q7:</em> class period (blocks), volunteer motivation (random assignment balances it within the volunteers), scorer expectation (blind scoring), chance (repeat the week, or compare several quizzes). <em>Q8:</em> &ldquo;If the music group scores higher by more than chance assignment would likely produce, music <strong>caused</strong> the difference <strong>for these volunteers</strong>. Because they volunteered and came from two classes, we cannot say it holds for all students.&rdquo;</div>
+</details>
+</div></div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">The Design Studio: Build Your Own Study</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">40 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Choose <strong>one</strong> of the four prompts below. All four are constructed (made up).</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prompt A: Library hours (a survey?).</strong> The made-up Harbor High library is deciding whether to open 30 minutes earlier in the morning or stay open 30 minutes later in the afternoon. The school has 1,000 students. What do students want?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prompt B: Homework reminders (a cause question).</strong> The made-up Northgate Middle School wants to know whether a daily text reminder raises the share of homework turned in on time. The 7th grade has 240 students in 8 homerooms of 30. Parents have given permission for the reminders.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prompt C: Breakfast and focus (you decide).</strong> Do students at the made-up Pinecrest High who eat breakfast report better focus in first period? Decide whether this should be a survey, an observational study, or an experiment, and defend your choice, including any ethical limits.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Prompt D: New running shoe (a cause question).</strong> A made-up cross-country league of 60 runners, some beginners and some experienced, wants to know whether a new cushioned shoe reduces muscle soreness after a hard week of training compared with the shoe they already use.</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In your notebook or a Word document, write your design in the checklist order, answering questions 1 to 8 in full sentences. Show any allocation arithmetic (Desmos or Excel). End with a <strong>one-paragraph what we can and cannot conclude</strong> statement.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Score your own design with the rubric below. Revise any criterion where you gave yourself a 0 or a 1, then rescore. This lesson activity is practice and is not submitted; Assignment 32.3 asks you to do it again on a new prompt.</div></div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Criterion</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">2 points</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">1 point</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">0 points</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Population and sampling plan</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Population named exactly; a specific random method (or a stated reason it is not random) with n and arithmetic that adds up.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Population or method vague, or arithmetic missing.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No population or no method.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Variables and design type</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Explanatory and response named with units or categories; a design chosen and justified from the aim.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Variables named but no units, or design chosen with a weak reason.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Variables missing or design does not match the aim.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Assignment plan or reason it is observational</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Random assignment with comparison group, blinding if possible, replication, blocks if needed; or a clear ethical or practical reason nothing is assigned, plus what is measured instead.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Assignment plan has one missing piece, or the reason is stated but nothing is measured.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No plan and no reason.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Bias, confounding, nonresponse</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">At least two named risks, each with what the design does about it.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">One risk, or risks named without a fix.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No risks named, or &ldquo;use a bigger sample&rdquo; as the only fix.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Honest limits statement</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Says who the claim covers, whether cause is supported, and one thing the study leaves open.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Partly matches the design (for example, claims cause from an observational design).</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Claim is stronger than the design allows, or missing.</td></tr>
+</table></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Now go back to the AI Training task above and have an AI critique your design.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; What strong designs tend to look like</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>Prompt A:</strong> a survey, stratified by grade (for example, 1,000 students split proportionally), with the two options shown in random order and a plan for nonresponse; conclusion limited to this school&rsquo;s students and to preference, not reasons. <strong>Prompt B:</strong> an experiment, probably blocked by homeroom (8 blocks), randomly choosing 4 of 8 homerooms, or better, randomly choosing half of each homeroom&rsquo;s students; the comparison group gets no reminder; note that blinding the students is not possible, but the person recording on-time homework can be kept unaware; conclusion about 7th graders at this school with permission. <strong>Prompt C:</strong> either is defensible. A strong observational answer measures other factors (sleep, hunger, time of day) and claims only a link. A strong experimental answer explains that withholding breakfast from teens is an ethical concern and might propose a safe variation, such as providing a free breakfast option to randomly chosen homerooms. Both must limit the claim. <strong>Prompt D:</strong> an experiment, blocked by experience level (beginners and experienced), random assignment within each block, a comparison group using the usual shoe, and awareness that runners will know which shoe they wear (blinding is limited), so use a standard soreness scale and a person who scores without knowing the shoe.</div>
+</details>
+</div></div>
+</div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 32.3 &mdash; Design a Study</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Three auto-graded warm-up questions, then a one-page study design for one of four new prompts, scored with a rubric. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 32.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on random assignment, careful conclusions, allocation, blocks, and nonresponse.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Sampling &amp; Study Design</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 32.3 &middot; Design-a-Study Workshop: From a Vague Question to a Plan</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

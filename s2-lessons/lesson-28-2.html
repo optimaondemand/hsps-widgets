@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 28.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 28.2</div>
+
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims about relationships</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 28.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Correlation: Strength, Direction, and <em>r</em></div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Read <em>r</em> like a careful scientist: its sign gives the direction, its size gives the strength of a straight-line pattern, and its square tells how much of the variation the line accounts for.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Sign and size of <em>r</em>; computing <em>r</em> by hand and with CORREL; how <em>r</em> ties to the slope; <em>r</em>-squared as the share of variation accounted for by the line; what <em>r</em> cannot tell you</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example before you open its check, play the correlation game in all three modes, follow the Excel steps, and complete the four activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> interpret the sign (direction) and size (strength) of the correlation coefficient <em>r</em> in context, knowing that <em>r</em> always lies between &minus;1 and +1.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> compute <em>r</em> from a small dataset by hand and with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL</code> in Excel, and check that <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INTERCEPT</code> agree with the trendline and with the rule <em>b</em> = <em>r</em> &middot; (<em>s<sub>y</sub></em> / <em>s<sub>x</sub></em>).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> interpret <em>r</em>-squared as the share of the variation in <em>y</em> that the straight line accounts for, in careful words that do not say &ldquo;caused by.&rdquo;</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that <em>r</em> measures straight-line association only, has no units, is changed by an outlier, and is the same whichever variable is called <em>x</em> (while the fitted line is not).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil. You will do a little arithmetic by hand.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; RESPONSIBILITY: A NUMBER IS A CLAIM</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Last time you described scatter plots in words and fitted a line. Today we look hard at the number that goes with that picture: the <strong>correlation coefficient</strong>, <em>r</em>. A number feels official. &ldquo;The correlation is 0.83&rdquo; sounds like a verdict. But <em>r</em> is a summary of one narrow thing, and the person who reports it is answerable for what it does and does not say.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">So this lesson has two jobs that go together. First, learn to <strong>read</strong> <em>r</em> exactly: its sign, its size, its square, and how it connects to the slope you already know. Second, learn its <strong>limits</strong>: it sees only straight-line patterns, one stray point can change it a great deal, and it can never, by itself, show that one thing makes the other happen. Every dataset below is <strong>constructed</strong> (made up) to teach the ideas.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128290; WHAT <em>r</em> TELLS YOU: DIRECTION AND SIZE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You met <em>r</em> informally in Lesson 27.1. Now we make it precise. For two numerical variables measured on the same cases:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <em>r</em> is always a number from <strong>&minus;1 to +1</strong>. It can never be 1.4 or &minus;2.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; The <strong>sign</strong> is the direction. Positive <em>r</em>: larger <em>x</em> tends to go with larger <em>y</em>. Negative <em>r</em>: larger <em>x</em> tends to go with smaller <em>y</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; The <strong>size</strong> (the distance from 0, ignoring the sign) is the strength of the <strong>straight-line</strong> pattern. <em>r</em> = +1 or &minus;1 means every point sits exactly on one straight line. <em>r</em> near 0 means no straight-line tilt.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <em>r</em> = &minus;0.9 is just as strong as <em>r</em> = +0.9. They differ only in direction. So &minus;0.9 is <em>stronger</em> than +0.5, even though it is a smaller number.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here is the same <strong>rough guide, not a rule</strong>, that you used in Lesson 27.1. Different fields draw the lines in different places, and the same <em>r</em> looks different with 8 points than with 800.</div><div style="overflow-x: auto; margin: 0 0 14px 0;"><table style="width: 100%; border-collapse: collapse; min-width: 360px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Size of r (ignore the sign)</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">A rough description</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">about 0.8 to 1</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">strong straight-line pattern</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">about 0.5 to 0.8</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">moderate</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">about 0.2 to 0.5</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">weak</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">below about 0.2</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">little or no straight-line pattern</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A common mistake:</strong> <em>r</em> = 0.8 does <em>not</em> mean &ldquo;80% of the points are on the line&rdquo; or &ldquo;80% correlated.&rdquo; It is a measure on a &minus;1 to +1 scale, not a percentage. (The percentage idea belongs to <em>r</em>-squared, later in this lesson.)</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129518; WHERE <em>r</em> COMES FROM: Z-SCORES MULTIPLIED</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Recall from Week 25 that a <strong>z-score</strong> says how many standard deviations a value sits from its mean: <em>z</em> = (value &minus; mean) / (standard deviation). For each case, find the z-score of its <em>x</em> and the z-score of its <em>y</em>, and multiply them. Then add up all those products and divide by <em>n</em> &minus; 1:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="text-align: center; font-size: 20px; color: #0E1C42;"><em>r</em> = [ &Sigma; ( <em>z<sub>x</sub></em> &middot; <em>z<sub>y</sub></em> ) ] / ( <em>n</em> &minus; 1 )</div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Why does this work? Think about one point. If it is above average in <em>x</em> <strong>and</strong> above average in <em>y</em>, both z-scores are positive and the product is positive. If it is below average in both, both are negative and the product is again positive. If it is above in one and below in the other, the product is negative. A rising pattern puts most points in the first two situations, so most products are positive and <em>r</em> comes out positive. A falling pattern gives mostly negative products and a negative <em>r</em>. A shapeless cloud gives a mix that cancels toward 0.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The same number can be found from three &ldquo;sums of squares&rdquo; computed from the deviations from the means:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="text-align: center; font-size: 20px; color: #0E1C42;"><em>r</em> = <em>S<sub>xy</sub></em> / &radic;( <em>S<sub>xx</sub></em> &middot; <em>S<sub>yy</sub></em> )</div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">where <em>S<sub>xx</sub></em> = &Sigma;(<em>x</em> &minus; <em>x&#772;</em>)&sup2;, <em>S<sub>yy</sub></em> = &Sigma;(<em>y</em> &minus; <em>y&#772;</em>)&sup2;, and <em>S<sub>xy</sub></em> = &Sigma;(<em>x</em> &minus; <em>x&#772;</em>)(<em>y</em> &minus; <em>y&#772;</em>). This form is easier to do by hand because it needs no standard deviations. In practice Excel does all of this for you, but doing it once by hand shows you what the button is doing.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: COMPUTING <em>r</em> BY HAND</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Constructed data.</strong> Eight made-up players. Explanatory variable <em>x</em>: minutes of free-throw practice per day. Response variable <em>y</em>: free throws made out of 20 in a test. The mean of <em>x</em> is 240 / 8 = <strong>30</strong> minutes and the mean of <em>y</em> is 96 / 8 = <strong>12</strong> shots.</div><div style="margin: 0 0 14px 0;"><div style="font-size: 14px; color: #0E1C42; text-align: center; margin-bottom: 4px;"><strong>Practice and free throws (made up)</strong></div><svg viewBox="0 0 480 310" width="100%" style="max-width: 520px; display: block; margin: 0 auto;" role="img" aria-label="Scatter plot of eight made-up players: practice minutes from 10 to 50 on the horizontal axis, free throws made from 6 to 17 on the vertical axis, rising from left to right" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="480" height="310" fill="#FFFFFF"/><line x1="62" y1="258.0" x2="464" y2="258.0" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="262.0" font-size="12" fill="#444" text-anchor="end">0</text><line x1="62" y1="198.5" x2="464" y2="198.5" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="202.5" font-size="12" fill="#444" text-anchor="end">5</text><line x1="62" y1="139.0" x2="464" y2="139.0" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="143.0" font-size="12" fill="#444" text-anchor="end">10</text><line x1="62" y1="79.5" x2="464" y2="79.5" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="83.5" font-size="12" fill="#444" text-anchor="end">15</text><line x1="62" y1="20.0" x2="464" y2="20.0" stroke="#E4E9F2" stroke-width="1"/><text x="54" y="24.0" font-size="12" fill="#444" text-anchor="end">20</text><line x1="62.0" y1="20" x2="62.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="62.0" y="275" font-size="12" fill="#444" text-anchor="middle">0</text><line x1="129.0" y1="20" x2="129.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="129.0" y="275" font-size="12" fill="#444" text-anchor="middle">10</text><line x1="196.0" y1="20" x2="196.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="196.0" y="275" font-size="12" fill="#444" text-anchor="middle">20</text><line x1="263.0" y1="20" x2="263.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="263.0" y="275" font-size="12" fill="#444" text-anchor="middle">30</text><line x1="330.0" y1="20" x2="330.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="330.0" y="275" font-size="12" fill="#444" text-anchor="middle">40</text><line x1="397.0" y1="20" x2="397.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="397.0" y="275" font-size="12" fill="#444" text-anchor="middle">50</text><line x1="464.0" y1="20" x2="464.0" y2="258" stroke="#E4E9F2" stroke-width="1"/><text x="464.0" y="275" font-size="12" fill="#444" text-anchor="middle">60</text><text x="263" y="298" font-size="13" fill="#0E1C42" text-anchor="middle">Practice (minutes per day)</text><text x="15" y="139" font-size="13" fill="#0E1C42" text-anchor="middle" transform="rotate(-90 15 139)">Free throws made (of 20)</text><circle cx="129.0" cy="186.6" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="196.0" cy="150.9" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="196.0" cy="115.2" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="263.0" cy="139.0" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="263.0" cy="91.4" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="330.0" cy="103.3" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="330.0" cy="55.7" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/><circle cx="397.0" cy="79.5" r="5.5" fill="#2196D0" stroke="#0E1C42" stroke-width="1"/></svg><div style="font-size: 13px; color: #666; text-align: center; margin-top: 4px;">Constructed (made-up) data.</div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Step 1: the deviations table.</strong> For each player, subtract the means, then square and multiply.</div><div style="overflow-x: auto; margin: 0 0 14px 0;"><table style="width: 100%; border-collapse: collapse; min-width: 640px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">#</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">x</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">y</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">x &minus; 30</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">y &minus; 12</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">(x &minus; 30)&sup2;</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">(y &minus; 12)&sup2;</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">(x &minus; 30)(y &minus; 12)</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">1</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">10</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">6</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;20</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;6</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">400</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">36</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">120</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">2</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">20</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">9</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;10</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;3</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">100</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">9</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">30</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">3</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">20</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">12</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;10</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">100</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">4</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">30</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">10</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">&minus;2</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">4</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">5</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">30</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">14</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">2</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">4</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">0</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">6</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">40</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">13</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">10</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">1</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">100</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">1</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">10</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">7</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">40</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">17</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">10</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">5</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">100</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">25</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">50</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">8</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">50</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">15</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">20</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">3</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">400</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">9</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">60</td></tr><tr style="background: #EEF1F8;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>Totals</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>240</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>96</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>0</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>0</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>1200</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>88</strong></td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;"><strong>270</strong></td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The deviations in each column add to 0, which is a good check on your subtraction. The three sums are <em>S<sub>xx</sub></em> = 1200, <em>S<sub>yy</sub></em> = 88, and <em>S<sub>xy</sub></em> = 270.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Step 2: compute <em>r</em>.</strong> <em>r</em> = 270 / &radic;(1200 &times; 88) = 270 / &radic;105600 = 270 / 324.96 = <strong>+0.8309</strong>, about <strong>+0.83</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Step 3: check with z-scores.</strong> The standard deviations are <em>s<sub>x</sub></em> = &radic;(1200 / 7) = 13.09 minutes and <em>s<sub>y</sub></em> = &radic;(88 / 7) = 3.55 shots (divide by <em>n</em> &minus; 1 = 7). Multiplying each player&rsquo;s two z-scores and adding gives &Sigma; <em>z<sub>x</sub></em><em>z<sub>y</sub></em> = 5.816. Dividing by 7: 5.816 / 7 = 0.8309. The two methods agree.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Step 4: say it in context.</strong> <em>r</em> = +0.83 is positive, so among these eight made-up players, more practice minutes tended to go with more free throws made. By the rough guide it is a strong straight-line pattern. It describes these eight players; it does not say practice caused the extra shots.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128279; HOW <em>r</em> TIES TO THE SLOPE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You already know the least-squares line <em>y&#770;</em> = <em>a</em> + <em>bx</em> from Week 27. The slope and <em>r</em> are tied together by one rule:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><div style="text-align: center; font-size: 20px; color: #0E1C42;"><em>b</em> = <em>r</em> &middot; ( <em>s<sub>y</sub></em> / <em>s<sub>x</sub></em> )</div></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The slope is measured in units of <em>y</em> per unit of <em>x</em>, while <em>r</em> has no units at all. The ratio <em>s<sub>y</sub></em> / <em>s<sub>x</sub></em> is what converts the unit-free <em>r</em> into a slope with units. It also shows that <em>r</em> and <em>b</em> always have the same sign, and that <em>b</em> = 0 exactly when <em>r</em> = 0.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Check on Example 1.</strong> <em>b</em> = 0.8309 &times; (3.5456 / 13.0931) = 0.8309 &times; 0.27080 = <strong>0.2250</strong>. The direct computation agrees: <em>b</em> = <em>S<sub>xy</sub></em> / <em>S<sub>xx</sub></em> = 270 / 1200 = 0.225. So each extra minute of practice goes with about 0.225 more free throws made, or about 2.25 more for every extra 10 minutes. (Check the arithmetic: 3.5456 / 13.0931 = 0.27080 and 0.8309 &times; 0.27080 = 0.22500.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The line always passes through the point (<em>x&#772;</em>, <em>y&#772;</em>) = (30, 12), so the intercept is <em>a</em> = 12 &minus; 0.225 &times; 30 = <strong>5.25</strong>. The fitted line is <em>y&#770;</em> = 5.25 + 0.225<em>x</em>, and Excel&rsquo;s <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INTERCEPT</code> will return exactly these values, as will the trendline equation on a chart.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; <em>r</em>-SQUARED: THE SHARE OF VARIATION THE LINE ACCOUNTS FOR</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Square the correlation and you get <strong><em>r</em>-squared</strong> (<em>r</em>&sup2;, which Excel calls RSQ and the trendline label shows as R&sup2;). It is always between 0 and 1, so it is often written as a percent.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Meaning.</strong> The <em>y</em> values vary: the made-up players did not all make 12 shots. <em>r</em>&sup2; is the <strong>share of that variation in <em>y</em> that the straight line accounts for</strong>. In Example 1, <em>r</em>&sup2; = 0.8309&sup2; = 0.6903, so about <strong>69%</strong> of the variation in free throws made is accounted for by the straight-line relationship with practice minutes. The other 31% or so is variation the line leaves unexplained: differences in skill, rest, luck, and anything else.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A numerical check that this is a real share.</strong> The total variation in <em>y</em> is <em>S<sub>yy</sub></em> = 88 (sum of squared deviations from 12). The line&rsquo;s leftover misses, the SSE from Week 27, are 88 &minus; <em>b</em>&middot;<em>S<sub>xy</sub></em> = 88 &minus; 0.225 &times; 270 = 88 &minus; 60.75 = <strong>27.25</strong>. So the line accounts for 60.75 out of 88, and 60.75 / 88 = 0.6903 = <em>r</em>&sup2;. The leftover share is 27.25 / 88 = 0.3097.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Careful wording.</strong> Say &ldquo;about 69% of the variation in free throws made is <em>accounted for by</em> (or <em>associated with</em>) the line using practice minutes.&rdquo; Do <strong>not</strong> say &ldquo;practice <em>causes</em> 69% of the shots&rdquo; or &ldquo;69% of the players improved because of practice.&rdquo; <em>r</em>&sup2; describes how well a line summarizes the data, not why the data look that way. Also note that <em>r</em>&sup2; loses the sign: for direction, go back to <em>r</em>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: <em>r</em> IS SYMMETRIC, THE LINE IS NOT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Constructed data.</strong> Five made-up cases with two measurements, <strong>P</strong> and <strong>Q</strong>. We will compute with P as <em>x</em> and Q as <em>y</em>, then swap them.</div><div style="overflow-x: auto; margin: 0 0 14px 0;"><table style="width: 100%; border-collapse: collapse; min-width: 420px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Case</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">1</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">2</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">3</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 12px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">5</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">P</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">1</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">2</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">3</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">4</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">5</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">Q</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">2</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">3</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">7</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">6</td><td style="padding: 8px 12px; border: 1px solid #D0D9E8; font-size: 15px; color: #1a2340;">9</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The means are P&#772; = 3 and Q&#772; = 5.4. The deviations of P are &minus;2, &minus;1, 0, 1, 2, so <em>S<sub>PP</sub></em> = 10. The deviations of Q are &minus;3.4, &minus;2.4, 1.6, 0.6, 3.6, so <em>S<sub>QQ</sub></em> = 11.56 + 5.76 + 2.56 + 0.36 + 12.96 = 33.2. The products are 6.8, 2.4, 0, 0.6, 7.2, so <em>S<sub>PQ</sub></em> = 17.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>P as <em>x</em>, Q as <em>y</em>:</strong> <em>r</em> = 17 / &radic;(10 &times; 33.2) = 17 / &radic;332 = 17 / 18.221 = <strong>0.9330</strong>. Slope of the line predicting Q from P: <em>b</em> = 17 / 10 = <strong>1.7</strong>, and <em>a</em> = 5.4 &minus; 1.7 &times; 3 = 0.3.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Q as <em>x</em>, P as <em>y</em>:</strong> the same three sums appear, with the roles of the two squared sums switched. <em>r</em> = 17 / &radic;(33.2 &times; 10) = <strong>0.9330</strong>, the same number. But the slope of the line predicting P from Q is <em>b</em> = 17 / 33.2 = <strong>0.512</strong>, and its intercept is 3 &minus; 0.512 &times; 5.4 = 0.235.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>What to notice.</strong> <em>r</em> does not care which variable is called <em>x</em>: it is <strong>symmetric</strong>. The line does care: 1.7 and 0.512 are different slopes, because predicting Q from P and predicting P from Q are different jobs. (The two slopes multiply to 1.7 &times; 0.512 = 0.870, which is <em>r</em>&sup2; again.) So <em>r</em> alone can never tell you which variable is the explanatory one, and it says nothing about which causes which.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128683; WHAT <em>r</em> CAN AND CANNOT DO</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Four facts to keep. Each is one you can test with the game below.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Straight lines only.</strong> A strong curved pattern can have <em>r</em> near 0, because there is no straight-line tilt. Always look at the scatter plot, not just the number.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>No units.</strong> Because the z-scores in the formula have no units, changing units does not change <em>r</em>. Re-measure the practice time of Example 1 in <em>hours</em> (divide each <em>x</em> by 60) and <em>r</em> is still 0.8309. The slope does change: it becomes 0.225 &times; 60 = <strong>13.5</strong> free throws per hour, the same relationship in new units.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>One point can move it a lot.</strong> In Example 1, change the last player&rsquo;s 15 to a 5 (a bad day). Then <em>r</em> falls from 0.83 to about <strong>0.19</strong>, and the pattern now looks weak. You will see this in Excel below. Always find out whether an unusual point is a mistake or a real case before you report <em>r</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; padding-left: 16px;">&#9654; <strong>Symmetric, but the line is not.</strong> Swapping <em>x</em> and <em>y</em> leaves <em>r</em> alone and changes the slope (Example 2).</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C0392B; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; A HIGH <em>r</em> IS NOT A CAUSE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A high <em>r</em> does not show that <em>x</em> causes <em>y</em>.</strong> Example 1&rsquo;s <em>r</em> = +0.83 tells us practice minutes and free throws made rise together in these eight made-up players. It does not tell us whether practice made the difference, whether more skilled players simply practice more, or whether something else drives both. When and how a strong correlation can (and cannot) support a claim about cause is the whole of Lesson 28.3. Until then, the discipline is simple: report what the number shows, and stop there.</div>    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Guess the Correlation (all three modes)</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Guess r.</strong> Drag the slider <em>Your guess for r</em> and press <em>Check</em> to see the actual <em>r</em> computed from the plotted points; tick <em>Show the best-fit line</em> afterwards, then <em>Next plot</em>. There are 16 fixed rounds. <strong>Hit the target.</strong> Build a scatter by clicking in the plot (use <em>Add a point</em>, <em>Remove last</em>, <em>Clear</em>, or <em>Auto-fill 20 random points</em>) until your <em>r</em> is within 0.05 of the target, then press <em>New target</em>. <strong>When r misleads.</strong> Step through <em>A. A curve</em>, <em>B. An outlier</em> (press <em>Remove the outlier</em>), <em>C. Two clusters</em>, and <em>D. A straight line</em>. All of the data in the game are made up.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/correlation-game.html" width="100%" height="950" style="border: none; display: block;" title="Guess the Correlation" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/correlation-game.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128161; WHAT THE FOUR SETS SHOW (READ AFTER YOU HAVE WRITTEN YOUR OWN NOTES)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Each set in <em>When r misleads</em> teaches one limit of <em>r</em>:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A. A curve.</strong> <em>r</em> is about &minus;0.003, yet the points follow a clear curve. <em>r</em> sees only straight-line tilt.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>B. An outlier.</strong> <em>r</em> = +0.377 with the far-off point and +0.975 without it. One case moved <em>r</em> from strong to weak.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>C. Two clusters.</strong> Combined, <em>r</em> = +0.956. Taken one cluster at a time, <em>r</em> is &minus;0.088 in one and +0.036 in the other. The strong combined <em>r</em> comes from the two groups sitting in different places, not from a pattern inside either group. Whenever your data are really two groups mixed together, ask whether <em>r</em> is describing the groups or the pattern inside them.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px; padding-left: 16px;">&#9654; <strong>D. A straight line.</strong> <em>r</em> = +0.972. Here <em>r</em> does its job well: a strong straight-line pattern. But even this does not show that <em>x</em> causes <em>y</em>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: CORREL, SLOPE, INTERCEPT, AND RSQ, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will let Excel do everything you just did by hand, using the Example 1 data. Keep this page open beside Excel. This workbook is practice; you do not upload it. If you keep it, save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk28_L2_YourName</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A1</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Practice (min)</code>, press Tab, then type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Free throws made</code> in B1 and press Enter.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A2</strong>. Type the eight practice values down column A, pressing Enter after each: 10, 20, 20, 30, 30, 40, 40, 50.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>B2</strong>. Type the eight shot counts down column B in the same order: 6, 9, 12, 10, 14, 13, 17, 15. Check that row 9 holds 50 and 15.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D1</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Measure</code>, press Tab, and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code> in E1. Now type these labels down column D, one per row from D2 to D11: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r (CORREL)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Slope b (SLOPE)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Intercept a (INTERCEPT)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r-squared (RSQ)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sx</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">sy</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r * sy / sx</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">r squared by hand</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">CORREL, roles swapped</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">SLOPE, roles swapped</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>E2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(A2:A9,B2:B9)</code> and press Enter. You should see about <strong>0.8309</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE(B2:B9,A2:A9)</code>. Notice the order: the <strong>y</strong> range comes <strong>first</strong>, then the x range. You should see <strong>0.225</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INTERCEPT(B2:B9,A2:A9)</code> (again y first). You should see <strong>5.25</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E5</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RSQ(B2:B9,A2:A9)</code>. You should see about <strong>0.6903</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E6</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(A2:A9)</code> (about 13.09) and in <strong>E7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(B2:B9)</code> (about 3.55).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E8</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E2*E7/E6</code>. It should equal the slope in E3, <strong>0.225</strong>: that is the rule <em>b</em> = <em>r</em> &middot; (<em>s<sub>y</sub></em> / <em>s<sub>x</sub></em>) confirmed by Excel.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E9</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E2^2</code>. It should match E5.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>E10</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(B2:B9,A2:A9)</code> (the ranges swapped). Same <strong>0.8309</strong>: CORREL is symmetric. In <strong>E11</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE(A2:A9,B2:B9)</code>. You should see about <strong>3.0682</strong>, not 0.225: SLOPE is <em>not</em> symmetric, and 0.225 &times; 3.0682 = 0.6903.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Now the chart. Select <strong>A1:B9</strong>, click <strong>Insert</strong>, click <strong>Scatter (X, Y)</strong>, and choose the dots-only option. Click the chart, click the <strong>+</strong> (Chart Elements) button, and tick <strong>Axis Titles</strong>, <strong>Chart Title</strong>, and <strong>Trendline</strong>. Type titles with units, and call the chart <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Practice and free throws (made-up data)</code>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Right-click the trendline and choose <strong>Format Trendline</strong>. With <strong>Linear</strong> selected, tick <strong>Display Equation on chart</strong> and <strong>Display R-squared value on chart</strong>. You should see an equation close to <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y = 0.225x + 5.25</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">R&sup2; = 0.6903</code>. The exact digits can differ slightly in rounding. The equation&rsquo;s numbers are the same as E3 and E4, and the R&sup2; is the same as E5.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Test an outlier.</strong> Change <strong>B9</strong> from 15 to 5. Watch E2 fall to about <strong>0.188</strong>, the chart&rsquo;s trendline flatten, and R&sup2; shrink. Then type 15 back into B9.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">If a value looks wrong, the usual causes are a typo in the data, the two ranges in the wrong order inside SLOPE or INTERCEPT, or a range that does not match the data. Menu names differ a little between desktop Excel and Excel for the web, but Insert, the scatter option, and the typed formulas are the same in both.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL DOES <em>r</em>; DESMOS DOES THE ARITHMETIC</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> With the <em>x</em> values in A2:A9 and the <em>y</em> values in B2:B9: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=CORREL(A2:A9,B2:B9)</code> gives <em>r</em>; <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SLOPE(B2:B9,A2:A9)</code> gives the slope <em>b</em>; <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INTERCEPT(B2:B9,A2:A9)</code> gives the intercept <em>a</em>; <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RSQ(B2:B9,A2:A9)</code> gives <em>r</em>-squared. <strong>Argument order matters:</strong> for SLOPE and INTERCEPT the <strong>y range goes first</strong>. <strong>CORREL and RSQ are symmetric</strong> (swap the two ranges and the answer is the same), but <strong>SLOPE and INTERCEPT are not</strong>: swapping the ranges fits a different line, the one that predicts <em>x</em> from <em>y</em>. The trendline equation on a chart should agree with SLOPE and INTERCEPT.<br /><br />
+            <strong>Desmos Scientific</strong> handles plain arithmetic only here. To get <em>r</em>-squared from a value of <em>r</em>, multiply it by itself: type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.8309^2</code> and read about <strong>0.69</strong> (the exact <em>r</em> gives 0.6903; rounding <em>r</em> first changes the fourth decimal). To check the slope rule, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.8309*3.5456/13.0931</code> and read about <strong>0.225</strong>. Desmos is not set up to compute <em>r</em> from a list of data here; use Excel for that.
+        </div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127760; WHERE THIS MATTERS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            Reports in many fields, from education studies to sports analytics, summarize a relationship with a correlation and often with <em>r</em>-squared. A reader who knows today&rsquo;s lesson can ask the right questions: Which direction? How strong a <em>straight-line</em> pattern? What share of the variation is accounted for? Was there an outlier or a mixture of groups? And is the writer claiming more than a correlation can show?
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;In a made-up survey of 50 students, the correlation between hours of video games played per week and quiz score was r = &minus;0.4. Interpret r = &minus;0.4: describe the direction and strength, and say what r-squared means here.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write your own interpretation. The sign is negative, so more play tended to go with lower scores. The size 0.4 is on the weak side of moderate (the rough guide says weak: 0.2 to 0.5). And <em>r</em>&sup2; = 0.4&sup2; = 0.16, so about 16% of the variation in scores is accounted for by the straight-line relationship with hours played; most of the variation is not.<br />
+            <strong>Verify.</strong> Check the AI&rsquo;s language against yours, line by line. Did it get the <strong>direction</strong> right (negative: more play, lower scores)? Did it call the strength <strong>weak or weak-to-moderate</strong> rather than &ldquo;strong&rdquo;? If it gave <em>r</em>&sup2;, is it 0.16, a share of the variation, not &ldquo;40%&rdquo;? Did it say &ldquo;40% of students&rdquo; or &ldquo;40% correlated&rdquo; (wrong)? Did it say that gaming <em>lowers</em> scores (a cause claim the data cannot support)? Did it mention that <em>r</em> describes the straight-line pattern across the group, not every individual?<br />
+            <strong>Flag the errors.</strong> Write three sentences: what the AI got right, the first thing it got wrong or overstated (quote it), and the corrected sentence. The most common slips in this topic are treating <em>r</em> as a percent, mixing up direction and strength, and sliding from &ldquo;is associated with&rdquo; to &ldquo;causes.&rdquo;
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 75 minutes with the reading)</div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Read <em>r</em> in Context</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Each line gives a made-up correlation. Write one sentence for each stating the <strong>direction</strong> and <strong>strength</strong> in context, using &ldquo;tends to.&rdquo; (a) Age of a used car (years) and its asking price: <em>r</em> = &minus;0.92. (b) Shoe size and quiz score for a class: <em>r</em> = +0.08. (c) Hours of sleep and a reaction-time test score: <em>r</em> = +0.55.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Which has the strongest straight-line pattern, and which the weakest? Be careful with the signs.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For (a), compute <em>r</em>&sup2; and say what it means in words.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        (a) Negative, strong: older cars tend to have lower asking prices, and the points cluster tightly around a falling line. (b) About zero: shoe size shows essentially no straight-line tilt with quiz score. (c) Positive, moderate: more sleep tends to go with higher scores, with a lot of scatter. Strongest: (a), since 0.92 is the largest size, even though it is negative. Weakest: (b). For (a), <em>r</em>&sup2; = 0.92&sup2; = 0.8464, so about 85% of the variation in asking price is accounted for by the straight-line relationship with age; the rest is due to other things such as condition and mileage. It does not say that age alone sets the price.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Compute It by Hand, Then Swap</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Constructed data, four cases: <em>x</em> = 2, 4, 6, 8 and <em>y</em> = 8, 6, 3, 3. Find the means, make a deviations table, and compute <em>S<sub>xx</sub></em>, <em>S<sub>yy</sub></em>, and <em>S<sub>xy</sub></em>.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute <em>r</em> = <em>S<sub>xy</sub></em> / &radic;(<em>S<sub>xx</sub></em> &middot; <em>S<sub>yy</sub></em>), the slope <em>b</em> = <em>S<sub>xy</sub></em> / <em>S<sub>xx</sub></em>, the intercept <em>a</em>, and <em>r</em>&sup2;. Describe the relationship in a sentence.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Now swap the roles (<em>y</em> as the explanatory variable). What is <em>r</em>? What is the new slope <em>S<sub>xy</sub></em> / <em>S<sub>yy</sub></em>? Multiply the two slopes and compare with <em>r</em>&sup2;.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Means: <em>x&#772;</em> = 5, <em>y&#772;</em> = 5. Deviations of <em>x</em>: &minus;3, &minus;1, 1, 3, so <em>S<sub>xx</sub></em> = 20. Deviations of <em>y</em>: 3, 1, &minus;2, &minus;2, so <em>S<sub>yy</sub></em> = 18. Products: &minus;9, &minus;1, &minus;2, &minus;6, so <em>S<sub>xy</sub></em> = &minus;18. Then <em>r</em> = &minus;18 / &radic;360 = &minus;18 / 18.974 = <strong>&minus;0.9487</strong>; <em>b</em> = &minus;18 / 20 = <strong>&minus;0.9</strong>; <em>a</em> = 5 &minus; (&minus;0.9)(5) = <strong>9.5</strong>; <em>r</em>&sup2; = <strong>0.90</strong>. In these four made-up cases, larger <em>x</em> tended to go with smaller <em>y</em>, a strong negative straight-line pattern, about 0.9 fewer units of <em>y</em> per extra unit of <em>x</em>. Swapped: <em>r</em> is still <strong>&minus;0.9487</strong>; the new slope is &minus;18 / 18 = <strong>&minus;1.0</strong>. And (&minus;0.9)(&minus;1.0) = 0.9 = <em>r</em>&sup2;. The correlation did not change; the line did.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Play the Game, Then Test Its Limits</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open the widget in <em>Guess r</em> mode. Play <strong>at least 8 rounds</strong> (<em>Check</em>, then <em>Next plot</em>) and record your <em>Mean absolute error</em> and <em>Best streak within 0.10</em>. Did you do better on strong plots or weak ones?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Switch to <em>Hit the target</em>. Reach the first target within 0.05 using as few points as you can. Then try a target of 0: what kind of cloud gets there? Then, with the target at +0.9, add one far-off point and watch what it does to <em>r</em>.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Switch to <em>When r misleads</em>. For each of A, B (press <em>Remove the outlier</em>), C, and D, write what <em>r</em> says, what the picture shows, and what a careless reader might wrongly conclude.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Scores vary by player, so there is no single right number; most people are best on strong plots and make larger misses near the middle (weak plots). For targets near 0 the cloud must have no tilt (points spread in all directions, or a curve that rises and falls). A single far-off point can pull <em>r</em> a long way. Misleads: A &mdash; <em>r</em> is about 0, but a clear curve is there; a careless reader says &ldquo;no relationship.&rdquo; B &mdash; <em>r</em> = +0.377 with the outlier and +0.975 without; a careless reader reports a weak relationship, or ignores the stray case. C &mdash; combined <em>r</em> = +0.956, but inside each cluster it is &minus;0.088 and +0.036; a careless reader says &ldquo;a strong relationship,&rdquo; when really there are two groups in different places. D &mdash; <em>r</em> = +0.972 is a genuine strong straight line, but even so it does not show that <em>x</em> causes <em>y</em>.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel and a Careful Report</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Follow the Excel steps above to build the Example 1 workbook with CORREL, SLOPE, INTERCEPT, RSQ, the check cell <em>r</em>&middot;<em>s<sub>y</sub></em>/<em>s<sub>x</sub></em>, the swapped CORREL and SLOPE, and the chart with the trendline equation and R&sup2;.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In your notebook, write the report in three sentences: (i) direction and strength of <em>r</em> in context; (ii) what <em>r</em>&sup2; means in careful words; (iii) one thing <em>r</em> cannot tell us here.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Finish the AI Training task above and write your three-sentence grade.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Expected values: E2 = 0.8309, E3 = 0.225, E4 = 5.25, E5 = 0.6903, E6 about 13.09, E7 about 3.55, E8 = 0.225 (matches E3), E9 = 0.6903, E10 = 0.8309, E11 about 3.0682. Sample report: &ldquo;Among these eight made-up players, more practice minutes tended to go with more free throws made: a positive, strong straight-line pattern (<em>r</em> = +0.83). About 69% of the variation in free throws made is accounted for by the straight line using practice minutes. <em>r</em> cannot tell us that practice caused the extra shots, or whether a stray or hidden factor is at work.&rdquo;
+                    </div>
+                </details>
+            </div>
+        </div>
+
+
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 28.2 &mdash; Correlation Workbook</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Upload an Excel workbook with CORREL, SLOPE, INTERCEPT, and RSQ on a made-up dataset, plus a short interpretation and a few numeric answers in the Canvas text box.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 28.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on reading <em>r</em>, <em>r</em>-squared, the slope rule, SLOPE in Excel, and symmetry.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 28.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will ask what a strong correlation does and does not show about cause.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 28.2 &middot; Correlation: Strength, Direction, and <em>r</em></div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

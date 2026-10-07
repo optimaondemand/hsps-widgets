@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 23.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 8</div>
+        <div style="font-size: 12px; color: #666;">Descriptive Statistics</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 23.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Courtesy</div>
+        <div style="font-size: 12px; color: #666;">Describing data fairly</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 23.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Shape: Symmetry, Skewness, and Clusters</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A summary is a courtesy only if it describes the data it stands for &mdash; and the shape tells you whether it does.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Shape words, how skew moves the mean, and choosing summaries that tell the truth</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, follow the Excel lab, run the Shape, Mean, and Median widget, and complete the four activities. Plan on about 65 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> name the shape of a distribution (symmetric, skewed right or left, one or two clusters, gaps) from a histogram or box plot.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain how skew pulls the mean toward the tail relative to the median, as a tendency with exceptions.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use shape to choose between mean-and-SD and median-and-IQR, and say what a summary hides.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> write a describe-a-distribution sentence covering shape, center, spread, and unusual features, in context.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook, pencil, and graph paper.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) and your OneDrive <em>Optima &rarr; Math</em> folder.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Shape, Mean, and Median widget embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128247; A PICTURE BEFORE A NUMBER</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Two data sets can share the same mean and the same median and still look nothing alike. The only way to see that is to look at the <strong>shape</strong>. Shape is the outline of a histogram: where the bars pile up, which way they trail off, whether there is one hump or two. Shape tells you which summary numbers are fair to the data, and it tells you what a summary leaves out.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Every data set in this lesson is <strong>constructed</strong>: made up to teach the idea, never presented as a real measurement. Each histogram below was drawn from the counts printed on its bars.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128200; FIVE SHAPES TO RECOGNIZE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>1. Symmetric.</strong> The left side is roughly a mirror image of the right. The bars are tallest in the middle and fall away evenly on both sides. Here are the heights (cm) of 21 made-up seedlings:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Seedling heights, 21 plants (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 190" width="520" height="190" role="img" aria-label="Histogram of seedling heights: counts 1, 5, 8, 5, 2 over classes of width 4 starting at 10; roughly symmetric" style="max-width: 100%; height: auto;"><line x1="36" y1="138" x2="504" y2="138" stroke="#0E1C42" stroke-width="2"/><rect x="36.0" y="125.6" width="93.6" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="82.8" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="129.6" y="75.8" width="93.6" height="62.2" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="176.4" y="71.8" font-size="12" text-anchor="middle" fill="#1a2340">5</text><rect x="223.2" y="38.4" width="93.6" height="99.6" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="270.0" y="34.4" font-size="12" text-anchor="middle" fill="#1a2340">8</text><rect x="316.8" y="75.8" width="93.6" height="62.2" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="363.6" y="71.8" font-size="12" text-anchor="middle" fill="#1a2340">5</text><rect x="410.4" y="113.1" width="93.6" height="24.9" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="457.2" y="109.1" font-size="12" text-anchor="middle" fill="#1a2340">2</text><line x1="36.0" y1="138" x2="36.0" y2="143" stroke="#0E1C42"/><text x="36.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="129.6" y1="138" x2="129.6" y2="143" stroke="#0E1C42"/><text x="129.6" y="156" font-size="11" text-anchor="middle" fill="#1a2340">14</text><line x1="223.2" y1="138" x2="223.2" y2="143" stroke="#0E1C42"/><text x="223.2" y="156" font-size="11" text-anchor="middle" fill="#1a2340">18</text><line x1="316.8" y1="138" x2="316.8" y2="143" stroke="#0E1C42"/><text x="316.8" y="156" font-size="11" text-anchor="middle" fill="#1a2340">22</text><line x1="410.4" y1="138" x2="410.4" y2="143" stroke="#0E1C42"/><text x="410.4" y="156" font-size="11" text-anchor="middle" fill="#1a2340">26</text><line x1="504.0" y1="138" x2="504.0" y2="143" stroke="#0E1C42"/><text x="504.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">30</text><text x="260" y="182" font-size="12" text-anchor="middle" fill="#555">height (cm)</text></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>2. Skewed right.</strong> Most values pile up on the low side, and a long, thin <strong>tail</strong> stretches out to the right. Here are the waiting times (minutes) of 20 made-up clinic visitors:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Clinic waits, 20 visitors (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 190" width="520" height="190" role="img" aria-label="Histogram of clinic waits: counts 5, 8, 3, 1, 1, 1, 1 over classes of width 5 from 0 to 35; skewed right" style="max-width: 100%; height: auto;"><line x1="36" y1="138" x2="504" y2="138" stroke="#0E1C42" stroke-width="2"/><rect x="36.0" y="75.8" width="66.9" height="62.2" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="69.4" y="71.8" font-size="12" text-anchor="middle" fill="#1a2340">5</text><rect x="102.9" y="38.4" width="66.9" height="99.6" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="136.3" y="34.4" font-size="12" text-anchor="middle" fill="#1a2340">8</text><rect x="169.7" y="100.7" width="66.9" height="37.3" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="203.1" y="96.7" font-size="12" text-anchor="middle" fill="#1a2340">3</text><rect x="236.6" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="270.0" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="303.4" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="336.9" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="370.3" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="403.7" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="437.1" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="470.6" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><line x1="36.0" y1="138" x2="36.0" y2="143" stroke="#0E1C42"/><text x="36.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="102.9" y1="138" x2="102.9" y2="143" stroke="#0E1C42"/><text x="102.9" y="156" font-size="11" text-anchor="middle" fill="#1a2340">5</text><line x1="169.7" y1="138" x2="169.7" y2="143" stroke="#0E1C42"/><text x="169.7" y="156" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="236.6" y1="138" x2="236.6" y2="143" stroke="#0E1C42"/><text x="236.6" y="156" font-size="11" text-anchor="middle" fill="#1a2340">15</text><line x1="303.4" y1="138" x2="303.4" y2="143" stroke="#0E1C42"/><text x="303.4" y="156" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="370.3" y1="138" x2="370.3" y2="143" stroke="#0E1C42"/><text x="370.3" y="156" font-size="11" text-anchor="middle" fill="#1a2340">25</text><line x1="437.1" y1="138" x2="437.1" y2="143" stroke="#0E1C42"/><text x="437.1" y="156" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="504.0" y1="138" x2="504.0" y2="143" stroke="#0E1C42"/><text x="504.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">35</text><text x="260" y="182" font-size="12" text-anchor="middle" fill="#555">wait (minutes)</text></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>3. Skewed left.</strong> The mirror image: most values pile up on the high side, and the tail stretches to the left. These are 20 made-up scores out of 50 on a very easy quiz:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Easy quiz scores out of 50, 20 students (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 190" width="520" height="190" role="img" aria-label="Histogram of quiz scores: counts 1, 1, 1, 1, 2, 6, 8 over classes of width 5 from 15 to 50; skewed left" style="max-width: 100%; height: auto;"><line x1="36" y1="138" x2="504" y2="138" stroke="#0E1C42" stroke-width="2"/><rect x="36.0" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="69.4" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="102.9" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="136.3" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="169.7" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="203.1" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="236.6" y="125.6" width="66.9" height="12.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="270.0" y="121.6" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="303.4" y="113.1" width="66.9" height="24.9" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="336.9" y="109.1" font-size="12" text-anchor="middle" fill="#1a2340">2</text><rect x="370.3" y="63.3" width="66.9" height="74.7" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="403.7" y="59.3" font-size="12" text-anchor="middle" fill="#1a2340">6</text><rect x="437.1" y="38.4" width="66.9" height="99.6" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="470.6" y="34.4" font-size="12" text-anchor="middle" fill="#1a2340">8</text><line x1="36.0" y1="138" x2="36.0" y2="143" stroke="#0E1C42"/><text x="36.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">15</text><line x1="102.9" y1="138" x2="102.9" y2="143" stroke="#0E1C42"/><text x="102.9" y="156" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="169.7" y1="138" x2="169.7" y2="143" stroke="#0E1C42"/><text x="169.7" y="156" font-size="11" text-anchor="middle" fill="#1a2340">25</text><line x1="236.6" y1="138" x2="236.6" y2="143" stroke="#0E1C42"/><text x="236.6" y="156" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="303.4" y1="138" x2="303.4" y2="143" stroke="#0E1C42"/><text x="303.4" y="156" font-size="11" text-anchor="middle" fill="#1a2340">35</text><line x1="370.3" y1="138" x2="370.3" y2="143" stroke="#0E1C42"/><text x="370.3" y="156" font-size="11" text-anchor="middle" fill="#1a2340">40</text><line x1="437.1" y1="138" x2="437.1" y2="143" stroke="#0E1C42"/><text x="437.1" y="156" font-size="11" text-anchor="middle" fill="#1a2340">45</text><line x1="504.0" y1="138" x2="504.0" y2="143" stroke="#0E1C42"/><text x="504.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">50</text><text x="260" y="182" font-size="12" text-anchor="middle" fill="#555">score (out of 50)</text></svg></div></div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#9888;&#65039; THE TAIL NAMES THE SKEW</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">We name a skew by the direction of the <strong>tail</strong>, not by where the tallest bars are. A skewed-right histogram has its tall bars on the left. Say it the other way around and you will describe the picture backward. Think of the tail as a finger pointing: &ldquo;skewed right&rdquo; means the finger points right.</div>
+    </div>
+
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>4. Two clusters (bimodal).</strong> Two separate humps, often with a <strong>gap</strong> between them where no data live. Each hump is a <strong>peak</strong>. A histogram with one peak is <strong>unimodal</strong>; one with two is <strong>bimodal</strong>. These are 20 made-up ride lengths (minutes) on a city bus line, mixing short hops with long crosstown trips:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Bus ride lengths, 20 rides (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 190" width="520" height="190" role="img" aria-label="Histogram of ride lengths: counts 1, 9, 0, 0, 2, 6, 2 over classes of width 5 from 0 to 35; two clusters with an empty gap from 10 to 20" style="max-width: 100%; height: auto;"><line x1="36" y1="138" x2="504" y2="138" stroke="#0E1C42" stroke-width="2"/><rect x="36.0" y="126.8" width="66.9" height="11.2" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="69.4" y="122.8" font-size="12" text-anchor="middle" fill="#1a2340">1</text><rect x="102.9" y="37.2" width="66.9" height="100.8" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="136.3" y="33.2" font-size="12" text-anchor="middle" fill="#1a2340">9</text><rect x="303.4" y="115.6" width="66.9" height="22.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="336.9" y="111.6" font-size="12" text-anchor="middle" fill="#1a2340">2</text><rect x="370.3" y="70.8" width="66.9" height="67.2" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="403.7" y="66.8" font-size="12" text-anchor="middle" fill="#1a2340">6</text><rect x="437.1" y="115.6" width="66.9" height="22.4" fill="#BFE4F4" stroke="#0E1C42" stroke-width="1.5"/><text x="470.6" y="111.6" font-size="12" text-anchor="middle" fill="#1a2340">2</text><line x1="36.0" y1="138" x2="36.0" y2="143" stroke="#0E1C42"/><text x="36.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="102.9" y1="138" x2="102.9" y2="143" stroke="#0E1C42"/><text x="102.9" y="156" font-size="11" text-anchor="middle" fill="#1a2340">5</text><line x1="169.7" y1="138" x2="169.7" y2="143" stroke="#0E1C42"/><text x="169.7" y="156" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="236.6" y1="138" x2="236.6" y2="143" stroke="#0E1C42"/><text x="236.6" y="156" font-size="11" text-anchor="middle" fill="#1a2340">15</text><line x1="303.4" y1="138" x2="303.4" y2="143" stroke="#0E1C42"/><text x="303.4" y="156" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="370.3" y1="138" x2="370.3" y2="143" stroke="#0E1C42"/><text x="370.3" y="156" font-size="11" text-anchor="middle" fill="#1a2340">25</text><line x1="437.1" y1="138" x2="437.1" y2="143" stroke="#0E1C42"/><text x="437.1" y="156" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="504.0" y1="138" x2="504.0" y2="143" stroke="#0E1C42"/><text x="504.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">35</text><text x="260" y="182" font-size="12" text-anchor="middle" fill="#555">ride length (minutes)</text></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>5. Roughly uniform.</strong> The bars are about the same height, with no clear peak and no tail. A made-up spinner with six equal zones, spun 60 times, might give counts like these:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Spinner results, 60 spins (constructed counts)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 190" width="520" height="190" role="img" aria-label="Histogram of 60 spins: counts 9, 11, 10, 10, 12, 8 across six equal zones; roughly uniform" style="max-width: 100%; height: auto;"><line x1="36" y1="138" x2="504" y2="138" stroke="#0E1C42" stroke-width="2"/><rect x="36.0" y="66.0" width="78.0" height="72.0" fill="#FDF3E3" stroke="#0E1C42" stroke-width="1.5"/><text x="75.0" y="62.0" font-size="12" text-anchor="middle" fill="#1a2340">9</text><rect x="114.0" y="50.0" width="78.0" height="88.0" fill="#FDF3E3" stroke="#0E1C42" stroke-width="1.5"/><text x="153.0" y="46.0" font-size="12" text-anchor="middle" fill="#1a2340">11</text><rect x="192.0" y="58.0" width="78.0" height="80.0" fill="#FDF3E3" stroke="#0E1C42" stroke-width="1.5"/><text x="231.0" y="54.0" font-size="12" text-anchor="middle" fill="#1a2340">10</text><rect x="270.0" y="58.0" width="78.0" height="80.0" fill="#FDF3E3" stroke="#0E1C42" stroke-width="1.5"/><text x="309.0" y="54.0" font-size="12" text-anchor="middle" fill="#1a2340">10</text><rect x="348.0" y="42.0" width="78.0" height="96.0" fill="#FDF3E3" stroke="#0E1C42" stroke-width="1.5"/><text x="387.0" y="38.0" font-size="12" text-anchor="middle" fill="#1a2340">12</text><rect x="426.0" y="74.0" width="78.0" height="64.0" fill="#FDF3E3" stroke="#0E1C42" stroke-width="1.5"/><text x="465.0" y="70.0" font-size="12" text-anchor="middle" fill="#1a2340">8</text><line x1="36.0" y1="138" x2="36.0" y2="143" stroke="#0E1C42"/><text x="36.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">1</text><line x1="114.0" y1="138" x2="114.0" y2="143" stroke="#0E1C42"/><text x="114.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">2</text><line x1="192.0" y1="138" x2="192.0" y2="143" stroke="#0E1C42"/><text x="192.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">3</text><line x1="270.0" y1="138" x2="270.0" y2="143" stroke="#0E1C42"/><text x="270.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">4</text><line x1="348.0" y1="138" x2="348.0" y2="143" stroke="#0E1C42"/><text x="348.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">5</text><line x1="426.0" y1="138" x2="426.0" y2="143" stroke="#0E1C42"/><text x="426.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">6</text><line x1="504.0" y1="138" x2="504.0" y2="143" stroke="#0E1C42"/><text x="504.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">7</text><text x="260" y="182" font-size="12" text-anchor="middle" fill="#555">zone</text></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Real data are messy and fall between these five. The words are a vocabulary for <em>describing</em>, not boxes the data must fit into. Two more words you will use: a <strong>cluster</strong> is a group of values close together, and a <strong>gap</strong> is a stretch of the axis with no values.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128230; WHAT A BOX PLOT SHOWS ABOUT SHAPE (AND WHAT IT HIDES)</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A box plot shows five numbers, so it shows only part of a shape. For the clinic waits, the median is 6.5 minutes, \(Q_1 = 4.5\) and \(Q_3 = 13\) (median-of-each-half method), so \(\text{IQR} = 8.5\) and the fences are \(4.5 - 12.75 = -8.25\) and \(13 + 12.75 = 25.75\). The waits 26 and 34 are above the upper fence; the largest non-outlier is 21.</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Clinic waits (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 118" width="520" height="118" role="img" aria-label="Box plot of clinic waits: box 4.5 to 13, median 6.5, whiskers at 2 and 21, outlier dots at 26 and 34" style="max-width: 100%; height: auto;"><line x1="24" y1="92" x2="496" y2="92" stroke="#0E1C42" stroke-width="2"/><line x1="24.0" y1="92" x2="24.0" y2="97" stroke="#0E1C42"/><text x="24.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="155.1" y1="92" x2="155.1" y2="97" stroke="#0E1C42"/><text x="155.1" y="110" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="286.2" y1="92" x2="286.2" y2="97" stroke="#0E1C42"/><text x="286.2" y="110" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="417.3" y1="92" x2="417.3" y2="97" stroke="#0E1C42"/><text x="417.3" y="110" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="50.2" y1="61.0" x2="83.0" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="194.4" y1="61.0" x2="299.3" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="50.2" y1="53.0" x2="50.2" y2="69.0" stroke="#0E1C42" stroke-width="2"/><line x1="299.3" y1="53.0" x2="299.3" y2="69.0" stroke="#0E1C42" stroke-width="2"/><rect x="83.0" y="46" width="111.4" height="30" fill="#BFE4F4" stroke="#0E1C42" stroke-width="2"/><line x1="109.2" y1="46" x2="109.2" y2="76" stroke="#0E1C42" stroke-width="3"/><circle cx="364.9" cy="61.0" r="5" fill="#C0392B" stroke="#0E1C42"/><circle cx="469.8" cy="61.0" r="5" fill="#C0392B" stroke="#0E1C42"/></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Clues to a skew in a box plot:</strong> the median line sits off-center in the box (here nearer \(Q_1\)), and one whisker is much longer than the other, often with outlier dots beyond it. The long side is the tail side.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A box plot cannot show two clusters.</strong> For the bus rides the five-number summary is 4, 6.5, 16, 26.5, 31, and the box stretches from 6.5 to 26.5, across the very stretch where no ride falls (nothing between 10 and 22).</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Bus ride lengths (constructed data)</strong></div>
+<div style="text-align: center;"><svg viewBox="0 0 520 118" width="520" height="118" role="img" aria-label="Box plot of ride lengths: box 6.5 to 26.5, median 16, whiskers at 4 and 31, no outliers; it looks like one wide spread and hides the two clusters" style="max-width: 100%; height: auto;"><line x1="24" y1="92" x2="496" y2="92" stroke="#0E1C42" stroke-width="2"/><line x1="24.0" y1="92" x2="24.0" y2="97" stroke="#0E1C42"/><text x="24.0" y="110" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="155.1" y1="92" x2="155.1" y2="97" stroke="#0E1C42"/><text x="155.1" y="110" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="286.2" y1="92" x2="286.2" y2="97" stroke="#0E1C42"/><text x="286.2" y="110" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="417.3" y1="92" x2="417.3" y2="97" stroke="#0E1C42"/><text x="417.3" y="110" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="76.4" y1="61.0" x2="109.2" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="371.4" y1="61.0" x2="430.4" y2="61.0" stroke="#0E1C42" stroke-width="2"/><line x1="76.4" y1="53.0" x2="76.4" y2="69.0" stroke="#0E1C42" stroke-width="2"/><line x1="430.4" y1="53.0" x2="430.4" y2="69.0" stroke="#0E1C42" stroke-width="2"/><rect x="109.2" y="46" width="262.2" height="30" fill="#BFE4F4" stroke="#0E1C42" stroke-width="2"/><line x1="233.8" y1="46" x2="233.8" y2="76" stroke="#0E1C42" stroke-width="3"/></svg></div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">This box plot reads as &ldquo;one wide spread with the median in the middle.&rdquo; Only the histogram shows that the data fall into two clumps. When shape matters, draw the histogram first.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; HOW SKEW PULLS THE MEAN</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Recall that the mean is the balance point of the data and the median is the middle value. Moving one value far away changes the balance point a lot but changes the <em>middle position</em> not at all. So a long tail pulls the mean toward itself while the median stays with the bulk. Here are four of the distributions above, computed from the data behind each picture:</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Distribution (constructed)</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Mean</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Median</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Which is larger?</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Seedlings (symmetric)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">19.86</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">about equal (gap \(-0.14\))</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Clinic waits (skewed right)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">10.05</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">mean larger by 3.55</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Easy quiz (skewed left)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">39.95</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">43.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">mean smaller by 3.55</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Bus rides (two clusters)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">16.7</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">16</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">about equal, but see below</td></tr>
+</tbody></table></div>
+<div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">Skewed right: <strong>mean &gt; median</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Skewed left: <strong>mean &lt; median</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Symmetric: <strong>mean &asymp; median</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example, narrated.</strong> The clinic waits are 2, 3, 3, 4, 4, 5, 5, 5, 6, 6, 7, 8, 9, 10, 12, 14, 17, 21, 26, 34. The median is the average of the 10th and 11th values, \(\dfrac{6 + 7}{2} = 6.5\). The 26 and 34 are far above the bulk, and the mean counts them at full size: the total is 201, so \(\text{mean} = \dfrac{201}{20} = 10.05\). The tail pulled the mean 3.55 minutes above the median. The easy quiz is the exact mirror image (each score is 50 minus a clinic wait), so the gap flips: the mean is 3.55 below the median.</div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#128683; A TENDENCY, NOT A LAW</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">This pattern is a <em>tendency</em>. It is a strong clue, and it fails often enough that you should not treat it as proof. Look at this made-up set: <strong>0, 11, 11, 12, 12, 12, 18, 18, 19, 19, 20</strong>. One lone 0 sits far out on the left, yet the median is 12 and the mean is about 13.82, <em>above</em> the median, because most of the other values lump together above it. Small and lumpy data can break the rule. Check the histogram, not just the two numbers.</div>
+    </div>
+
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Look back at the bus rides: mean 16.7 and median 16 nearly agree, which a careless reader would take as &ldquo;symmetric.&rdquo; But look at the picture. <strong>Not one ride lasted between 10 and 22 minutes.</strong> The mean and the median both land in the gap, at a value that describes no actual ride. A summary can be correct and still describe nobody.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#129517; USING SHAPE TO CHOOSE A SUMMARY</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Earlier lessons built two families of summaries. Shape tells you which family tells the truth.</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Shape of the data</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Report this center</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Report this spread</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Why</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Roughly symmetric, no far outliers</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">standard deviation (or IQR)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">The mean and the median agree; the mean uses every value.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Skewed, or with outliers</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">IQR</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">These are resistant: a tail cannot drag them.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Two clusters</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">no single center; describe both clusters</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">the range of each cluster</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">A single center falls in the gap.</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>What a summary hides.</strong> For the clinic waits, the median (6.5 minutes) tells a patient what to expect, while the mean (10.05) overstates it because of two long waits. But the median alone hides those two long waits too, so a fair report mentions them. For the bus rides, a mean and SD would suggest rides cluster around 16.7 minutes; they do not. Whatever number you choose, ask: <strong>what would a reader miss if this were the only thing I told them?</strong> That question is courtesy to the data and to the reader.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">This is why &ldquo;the mean is the best center&rdquo; is wrong. The mean is best <em>for data it describes honestly</em>. Using shape to pick the summary is not a trick; it is how you stay faithful to the data.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; THE DESCRIBE-A-DISTRIBUTION SENTENCE FRAME</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">When asked to describe a distribution, cover four things, always in the context of the data (what was measured, in what units):</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Shape:</strong> symmetric, skewed right or left, clusters or gaps, uniform-ish.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Center:</strong> the median (skewed) or the mean (symmetric), with units.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Spread:</strong> the IQR or SD, or the range of the middle of the data.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Unusual features:</strong> outliers, gaps, clusters, anything a reader should not miss.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">&ldquo;The distribution of [variable, in context] is [shape], with a [center] of [value and units] and [spread]. [Unusual feature].&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Example.</strong> &ldquo;The distribution of clinic waits (constructed data, 20 visitors) is skewed right, with a median wait of 6.5 minutes. The middle half of waits spans 8.5 minutes (IQR). Two waits, 26 and 34 minutes, are outliers by the 1.5 &times; IQR rule, far beyond the rest.&rdquo; Notice it uses the median and IQR because the shape is skewed, and it names the outliers rather than hiding them.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL LAB: READ THE SHAPE FROM NUMBERS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A histogram shows shape directly, but you can also read it from a few numbers. In this lab you put the mean and median side by side and look at the gap. Keep this page beside Excel. Excel work happens outside Canvas.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>1. Start the workbook.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <em>Blank workbook</em>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk23_L2_YourName</code> in your OneDrive <em>Optima &rarr; Math</em> folder.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Plan</code>, press <strong>Tab</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">GB</code>, and press <strong>Enter</strong>. (A made-up phone company recorded the monthly data use, in gigabytes, of 12 plans.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A2</strong> and type 1 through 12 down column A. Click <strong>B2</strong> and type the twelve values, pressing <strong>Enter</strong> after each: 14, 5, 6, 38, 7, 5, 9, 22, 6, 11, 4, 8. Do not sort them.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>2. The statistics block.</strong> Click <strong>E1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Statistic</code>, press <strong>Tab</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code>. Fill in the labels in column E and the formulas in column F, pressing <strong>Enter</strong> after each. Every formula starts with an equals sign.</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Cell</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Label in column E</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Formula in column F</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">You should see</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E2, F2</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(B2:B13)</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">11.25</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E3, F3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(B2:B13)</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">7.5</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E4, F4</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Std dev (sample)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(B2:B13)</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">9.80838&hellip; (shown as 9.81 after <strong>Decrease Decimal</strong> on the Home tab)</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E5, F5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Mean minus median</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F2-F3</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">3.75</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E6, F6</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q1</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(B2:B13,1)</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5.75</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E7, F7</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Q3</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(B2:B13,3)</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">11.75</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">E8, F8</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">IQR</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;"><code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F7-F6</code></td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">6</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>3. Read the gap.</strong> The mean is 3.75 GB above the median, which is a third of the mean, and positive. That points to a right skew: a few big values pulling the mean up. Confirm it with a look at the data. Copy B2:B13 to column H, select it, and on the <strong>Data</strong> tab choose <strong>Sort Smallest to Largest</strong>. The last two values, 22 and 38, are far from the rest.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>4. Decide what to report.</strong> The data are skewed right, so report the <strong>median</strong> and the <strong>IQR</strong>: &ldquo;a typical plan used 7.5 GB, and the middle half of plans spans 6 GB.&rdquo; Mention the heavy users too: with QUARTILE.INC the upper fence is \(11.75 + 1.5 \times 6 = 20.75\), so 22 and 38 are both flagged. The mean (11.25) is higher than 9 of the 12 plans, so it describes the typical plan poorly.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; MEAN, MEDIAN, AND THE GAP</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel</strong> reads shape numerically with three functions side by side: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(B2:B13)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(B2:B13)</code>, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=STDEV.S(B2:B13)</code>. Subtract them, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=F2-F3</code>, to get the mean-median gap. A clearly positive gap suggests a right skew, a clearly negative gap suggests a left skew, and a gap near 0 is consistent with symmetric (but see the bus rides: a gap near 0 does not rule out two clusters, so look at the histogram).<br /><br /><strong>Desmos Scientific</strong> does plain arithmetic only. To check the mean by hand, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">135/12</code> &rarr; 11.25 (the 12 values add to 135); the median is the average of the 6th and 7th ordered values, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(7+8)/2</code> &rarr; 7.5; the gap is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">11.25-7.5</code> &rarr; 3.75. Desmos Scientific does not take a list of data, so add the values yourself first.
+        </div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Shape, Mean, and Median</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>(1)</strong> Click the <strong>All</strong> tab. Choose each preset in turn: <strong>Symmetric</strong>, <strong>Right-skewed (a few large values)</strong>, <strong>One far outlier</strong>, <strong>Two clusters</strong>. For each, write down the shape and compare the mean with the median. <strong>(2)</strong> Go back to <strong>Symmetric</strong>. Drag the smallest dot (32) far to the left, then do the same with the next two smallest dots (38 and 41), so the three end up near 5, 10, and 15. You have built a left-skewed set. Watch the mean fall below the median. <strong>(3)</strong> Tick <strong>Predict first</strong> before you drag and say which way the mean will move. The &ldquo;What just changed?&rdquo; strip tells you what held still. All data in the widget are made up.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/stats-explorer.html" width="100%" height="1050" style="border: none; display: block;" title="Shape, Mean, and Median" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/stats-explorer.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Paste these 12 made-up run times (seconds) into an AI tool: <strong>30, 33, 35, 36, 38, 40, 41, 43, 44, 46, 48, 80</strong>. Ask: <em>&ldquo;If I remove the 80, what happens to the mean, the median, and the standard deviation? Give the numbers.&rdquo;</em><br />
+            <strong>Predict.</strong> Predict before you read the answer. The 80 is a high value in a set of 12, so removing it should pull the mean <em>down</em> by a noticeable amount, nudge the median down only slightly, and shrink the standard deviation a lot. A reply that says the median and the mean change by about the same amount is a red flag.<br />
+            <strong>Verify.</strong> Check in the widget. Open the <strong>All</strong> tab, choose <strong>One far outlier</strong>, and write down the mean (42.83), median (40.5), and standard deviation (sample, 12.88). Click the dot at 80 and then the <strong>Remove selected</strong> button. The 11 values left are 30, 33, 35, 36, 38, 40, 41, 43, 44, 46, 48. You should now see mean \(\dfrac{434}{11} \approx 39.45\), median 40, and sample SD about 5.63 (population SD about 5.37). So the mean fell by about 3.38, the median by only 0.5, and the SD fell by more than half, from 12.88 to 5.63. Did the AI get all three numbers right, and say which SD it used (sample divides by \(n - 1\))? A tool that is confidently off on any of them has given you a number to check, not a fact.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 45 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Name the Shape</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Each list gives the counts in seven equal-width bars, left to right (made-up data). Name each shape (symmetric, skewed right, skewed left, or two clusters) and say whether the mean would be larger than, smaller than, or about equal to the median, or whether the mean-median rule is unreliable.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Set 1:</strong> 16, 12, 7, 3, 1, 1, 0 &nbsp;&nbsp; <strong>Set 2:</strong> 2, 5, 10, 14, 10, 5, 2 &nbsp;&nbsp; <strong>Set 3:</strong> 7, 9, 1, 0, 2, 10, 8 &nbsp;&nbsp; <strong>Set 4:</strong> 0, 1, 2, 4, 8, 12, 13</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Set 1: skewed right (tall bars on the left, tail to the right), mean larger than the median. Set 2: symmetric, mean about equal to the median. Set 3: two clusters with a gap in the middle bars; the mean and median would land in or near the gap, so neither describes a typical value. Set 4: skewed left (tail to the left), mean smaller than the median.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Then Compute</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up group of nine students timed a puzzle, in minutes: <strong>8, 9, 9, 10, 10, 11, 12, 14, 40</strong>. Before computing anything, look at the list and predict whether the mean will be larger or smaller than the median.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compute the mean and the median (you may use Desmos for the arithmetic), then say which summaries you would report and why.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        The 40 is far above the rest, so the data are skewed right and the mean should be larger. The sum is 123, so the mean is \(\dfrac{123}{9} \approx 13.67\). The median is the 5th value, 10. The mean is about 3.67 above the median. Report the median (10 minutes) and add that one student took 40, since the mean is pulled up by that one slow time.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Shape, Center, Spread, Unusual</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the sentence frame to describe the made-up bus rides (the histogram above): mean 16.7, median 16, no rides between 10 and 22 minutes, nine rides in the 5-to-10 class.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write three or four sentences. Say why the mean or median alone would mislead and what you would report instead.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        A good answer names two clusters (ten short rides of about 4 to 9 minutes and ten long rides of about 23 to 31 minutes), notes the empty gap from about 10 to 22 minutes, and says a center near 16 describes no real ride. Report the two clusters and their ranges instead of one center.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Make It Skew</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Do the widget task above. After building your left-skewed set, record the three dragged values, the new mean, and the median.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Then drag the dots so the data are skewed <em>right</em> again, and write one sentence on why the median hardly moved while the mean moved a lot.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Dragging 32, 38, 41 to exactly 5, 10, 15 gives a mean of 43.33 and a median of 50, so the mean is below the median, as a left skew predicts (your values will be close but not identical). The median stays 50 because the 6th and 7th ordered values (49 and 51) did not move; the mean moves because it depends on the size of every value.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 23.2 &mdash; Describe the Shape</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Practice set: name shapes, reason about mean versus median, describe a distribution from a frequency table, choose summaries, an Excel part answered in text, and one error to find. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 23.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on shape names, mean versus median, choosing summaries, and describing a distribution.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Next lesson</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">We put shape, center, and spread together to compare distributions.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 23.2 &middot; Shape: Symmetry, Skewness, and Clusters</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 22.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q3 &middot; Module 8</div>
+        <div style="font-size: 12px; color: #666;">Descriptive Statistics</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 22.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Courtesy</div>
+        <div style="font-size: 12px; color: #666;">Describing data fairly</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 22.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Measures of Location: Percentiles, Quartiles, and Box Plots Revisited</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">Where does one value sit among the rest &mdash; and what do two honest methods do when they disagree?</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Percentile rank, quartiles by median-of-halves, the five-number summary, and box plots</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work the examples alongside the text, run the widget, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain what a percentile rank means (and does not mean) and compute it from a small ordered list.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> find Q1, the median, and Q3 by the median-of-each-half method for an odd and an even number of values, and write the five-number summary.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> draw a box plot from a five-number summary by hand and read it: each quarter holds about a quarter of the data, and a wider box means a more spread-out middle half.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use MIN, MAX, MEDIAN, and QUARTILE.INC in Excel, and explain why QUARTILE.INC can differ from a hand answer as a matter of convention.</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook, pencil, and graph paper.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The Histogram and Box Plot widget embedded below (it runs right on this page).</div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128205; WHERE DOES A VALUE SIT?</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The mean and median tell you where the middle of a dataset is. Often we want to know something different: <em>where does one particular value sit among all the others?</em> A student scored 78 &mdash; is that high, middling, or low for this class? A single number cannot answer that by itself. What answers it is the value's <strong>location</strong> in the ordered data, and the tools for location are <strong>percentiles</strong> and <strong>quartiles</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Today you learn to find them by hand, draw a <strong>box plot</strong> from them, read one, and then check your hand work against Excel &mdash; where you will meet a surprise: a spreadsheet can give a slightly different answer, and the difference is not a mistake.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128290; PERCENTILES AND PERCENTILE RANK</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>percentile</strong> is a value with about <em>p</em> percent of the data at or below it. The <strong>25th percentile</strong> has about a quarter of the data at or below it; the <strong>50th percentile</strong> is the median; the <strong>90th percentile</strong> has about nine tenths of the data at or below it. The word &ldquo;about&rdquo; is honest: with only a handful of values you cannot always cut at exactly <em>p</em> percent, and different books and programs cut slightly differently.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A value's <strong>percentile rank</strong> goes the other way: you start with a value and ask what percent of the data is at or below it.</div>
+<div style="background: #EEF1F8; border-radius: 8px; padding: 16px 22px; margin-bottom: 14px; font-size: 18px; color: #0e1c42; line-height: 1.8; text-align: center;">percentile rank of a value &nbsp;=&nbsp; (number of data values at or below it) &divide; (total number of values) &times; 100</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here are 20 quiz scores out of 100 from a made-up class, already in order (position 1 is the lowest):</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Position</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">1</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">2</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">3</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">4</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">5</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">6</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">7</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">8</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">9</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">10</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">11</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">12</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">13</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">14</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">15</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">16</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">17</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">18</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">19</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">20</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Score</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">48</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">52</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">55</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">58</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">61</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">63</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">65</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">67</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">70</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">72</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">74</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">75</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">77</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">78</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">80</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">83</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">85</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">88</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">92</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">96</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed example for teaching &mdash; not real students.</em></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example 1 &mdash; from a value to its rank.</strong> What is the percentile rank of the score 78? Count the scores at or below 78. Scanning the ordered list, 78 is the 14th score, so 14 of the 20 scores are 78 or lower. Then \(\dfrac{14}{20} \times 100 = 70\). The score 78 has a percentile rank of <strong>70</strong>: about 70 percent of the class scored 78 or lower.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example 2 &mdash; from a rank to a value.</strong> Which score is at about the 75th percentile? Of 20 scores, 75 percent is \(0.75 \times 20 = 15\) scores, so we want the 15th score: <strong>80</strong>. Check: 15 of 20 are at or below 80, and \(\dfrac{15}{20} \times 100 = 75\).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>What a percentile rank is not.</strong> It is <em>not</em> a percent score. On a quiz out of 100, the score 78 is 78 percent correct, but its percentile rank is 70; these are different numbers answering different questions. Here is a case where they pull far apart: a score of 41 out of 50 is 82 percent <em>correct</em>, and if 18 of 20 classmates scored 41 or lower, its percentile rank is 90. The first number compares the student to the quiz; the second compares the student to the <em>group</em>. Move the same student into a different group and the percentile rank changes while the score does not.</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#129309; A COURTESY TO THE DATA AND THE READER</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">A percentile rank describes where a value sits <em>in this group</em>. It says nothing about the worth of the person who produced it, and it can shift when the group changes. State the group (&ldquo;among these 20 scores&rdquo;) every time you quote one. Leaving the group out is a quiet way to make a number sound more final than it is.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9986;&#65039; QUARTILES: CUTTING THE ORDERED DATA INTO FOUR PARTS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The three most useful percentiles get their own names. The <strong>median</strong> (the middle value, defined earlier this week) is the 50th percentile. The <strong>first quartile</strong>, <strong>Q1</strong>, is about the 25th percentile, and the <strong>third quartile</strong>, <strong>Q3</strong>, is about the 75th. Together the median and the two quartiles cut the ordered data into four parts holding about a quarter of the values each.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>The by-hand method: the median of each half.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Order</strong> the data from smallest to largest. (Skipping this step is the most common way to get a wrong answer.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Find the median</strong> of the whole list.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Split</strong> the ordered list into a lower half and an upper half. If the number of values is <strong>even</strong>, split it down the middle. If it is <strong>odd</strong>, the median is a single value in the middle: <strong>leave it out of both halves</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Q1</strong> is the median of the lower half. <strong>Q3</strong> is the median of the upper half.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example 3 &mdash; odd n.</strong> Nine students (made up) report the minutes they read yesterday: 15, 9, 30, 5, 12, 19, 8, 22, 14. <em>Order:</em> 5, 8, 9, 12, 14, 15, 19, 22, 30. There are 9 values, so the median is the 5th: <strong>14</strong>. Because 9 is odd, 14 is left out of both halves. The lower half is the four values before it, 5, 8, 9, 12, and its median is the average of the middle two: \(\dfrac{8 + 9}{2} = 8.5\), so <strong>Q1 = 8.5</strong>. The upper half is the four values after it, 15, 19, 22, 30, with median \(\dfrac{19 + 22}{2} = 20.5\), so <strong>Q3 = 20.5</strong>.</div>
+<div style="overflow-x: auto; margin-bottom: 6px;"><div style="display: grid; grid-template-columns: repeat(9, minmax(40px, 1fr)); gap: 4px; min-width: 396px; max-width: 640px; margin: 0 auto;"><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">5</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">8</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">9</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">12</div><div style="background: #FDF3E3; border: 2px solid #C7922C; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; font-weight: bold;">14</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">15</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">19</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">22</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">30</div><div style="grid-column: 1 / span 4; text-align: center; font-size: 13px; color: #1a2340; border-top: 3px solid #9CC9E0; padding-top: 3px;">lower half<br />median = <strong>Q1 = 8.5</strong></div><div style="grid-column: span 1; text-align: center; font-size: 13px; color: #1a2340; border-top: 3px solid #C7922C; padding-top: 3px;">median<br /><strong>14</strong><br />(left out)</div><div style="grid-column: span 4; text-align: center; font-size: 13px; color: #1a2340; border-top: 3px solid #B8B0DD; padding-top: 3px;">upper half<br />median = <strong>Q3 = 20.5</strong></div></div></div><div style="font-size: 13px; color: #666; text-align: center; margin-bottom: 14px;">Odd n: the median (14) belongs to neither half. Constructed data, 9 values.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Worked example 4 &mdash; even n.</strong> Ten puzzle times in minutes (made up): 3, 4, 6, 7, 9, 11, 12, 15, 18, 25 (already in order). With 10 values the median is the average of the 5th and 6th: \(\dfrac{9 + 11}{2} = 10\). Now nothing is left out: the lower half is the first five values, 3, 4, 6, 7, 9, with median <strong>6</strong>; the upper half is the last five, 11, 12, 15, 18, 25, with median <strong>15</strong>. So Q1 = 6 and Q3 = 15.</div>
+<div style="overflow-x: auto; margin-bottom: 6px;"><div style="display: grid; grid-template-columns: repeat(10, minmax(40px, 1fr)); gap: 4px; min-width: 440px; max-width: 640px; margin: 0 auto;"><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">3</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">4</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">6</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">7</div><div style="background: #E3F3FA; border: 2px solid #9CC9E0; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">9</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">11</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">12</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">15</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">18</div><div style="background: #E9E6F6; border: 2px solid #B8B0DD; border-radius: 5px; text-align: center; padding: 6px 2px; font-size: 16px; color: #0e1c42; ">25</div><div style="grid-column: 1 / span 5; text-align: center; font-size: 13px; color: #1a2340; border-top: 3px solid #9CC9E0; padding-top: 3px;">lower half<br />median = <strong>Q1 = 6</strong></div><div style="grid-column: span 5; text-align: center; font-size: 13px; color: #1a2340; border-top: 3px solid #B8B0DD; padding-top: 3px;">upper half<br />median = <strong>Q3 = 15</strong></div></div></div><div style="font-size: 13px; color: #666; text-align: center; margin-bottom: 14px;">Even n: the list splits cleanly in the middle. Constructed data, 10 values.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>The five-number summary</strong> lists the five values that outline a dataset: the <strong>minimum</strong>, <strong>Q1</strong>, the <strong>median</strong>, <strong>Q3</strong>, and the <strong>maximum</strong>. For the nine reading times it is <strong>5, 8.5, 14, 20.5, 30</strong>; for the ten puzzle times it is <strong>3, 6, 10, 15, 25</strong>. (Next lesson uses Q3 &minus; Q1, the <em>interquartile range</em>, to measure spread.)</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; BUILDING A BOX PLOT BY HAND</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>box plot</strong> draws the five-number summary on a number line. Do it in this order:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Draw a number line that covers the minimum to the maximum, with equal spacing and a few labeled tick marks.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Above (or beside) the line, draw a <strong>box</strong> from Q1 to Q3.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Draw a <strong>line inside the box</strong> at the median.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Draw <strong>whiskers</strong>: a line from the box out to the minimum on the left and out to the maximum on the right. (For now the whiskers always reach the minimum and the maximum. Lesson 22.3 shows what to do with values that sit very far from the rest.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Title it, say what is measured, and say it is constructed data.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Daily Reading Minutes of 9 Students (constructed data)</strong></div>
+<div style="text-align: center; overflow-x: auto;"><svg viewBox="0 0 560 102" width="560" height="102" role="img" aria-label="Daily Reading Minutes of 9 Students (constructed data). Reading: min 5, Q1 8.5, median 14, Q3 20.5, max 30" style="max-width: 100%; height: auto;"><line x1="70.0" y1="8" x2="70.0" y2="74" stroke="#E3E8F2"/><line x1="142.8" y1="8" x2="142.8" y2="74" stroke="#E3E8F2"/><line x1="215.6" y1="8" x2="215.6" y2="74" stroke="#E3E8F2"/><line x1="288.4" y1="8" x2="288.4" y2="74" stroke="#E3E8F2"/><line x1="361.2" y1="8" x2="361.2" y2="74" stroke="#E3E8F2"/><line x1="434.1" y1="8" x2="434.1" y2="74" stroke="#E3E8F2"/><line x1="506.9" y1="8" x2="506.9" y2="74" stroke="#E3E8F2"/><text x="60" y="36.0" font-size="13" fill="#0E1C42" text-anchor="end">Reading</text><line x1="142.8" y1="32" x2="193.8" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="368.5" y1="32" x2="506.9" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="142.8" y1="24" x2="142.8" y2="40" stroke="#0E1C42" stroke-width="2"/><line x1="506.9" y1="24" x2="506.9" y2="40" stroke="#0E1C42" stroke-width="2"/><rect x="193.8" y="18" width="174.8" height="28" fill="#CFE8F6" stroke="#0E1C42" stroke-width="2"/><line x1="273.9" y1="18" x2="273.9" y2="46" stroke="#C7922C" stroke-width="4"/><text x="142.8" y="62" font-size="11" fill="#1a2340" text-anchor="middle">5</text><text x="193.8" y="62" font-size="11" fill="#1a2340" text-anchor="middle">8.5</text><text x="273.9" y="62" font-size="11" fill="#1a2340" text-anchor="middle">14</text><text x="368.5" y="62" font-size="11" fill="#1a2340" text-anchor="middle">20.5</text><text x="506.9" y="62" font-size="11" fill="#1a2340" text-anchor="middle">30</text><line x1="70" y1="76" x2="536" y2="76" stroke="#0E1C42" stroke-width="2"/><line x1="70.0" y1="76" x2="70.0" y2="81" stroke="#0E1C42"/><text x="70.0" y="94" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="142.8" y1="76" x2="142.8" y2="81" stroke="#0E1C42"/><text x="142.8" y="94" font-size="11" text-anchor="middle" fill="#1a2340">5</text><line x1="215.6" y1="76" x2="215.6" y2="81" stroke="#0E1C42"/><text x="215.6" y="94" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="288.4" y1="76" x2="288.4" y2="81" stroke="#0E1C42"/><text x="288.4" y="94" font-size="11" text-anchor="middle" fill="#1a2340">15</text><line x1="361.2" y1="76" x2="361.2" y2="81" stroke="#0E1C42"/><text x="361.2" y="94" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="434.1" y1="76" x2="434.1" y2="81" stroke="#0E1C42"/><text x="434.1" y="94" font-size="11" text-anchor="middle" fill="#1a2340">25</text><line x1="506.9" y1="76" x2="506.9" y2="81" stroke="#0E1C42"/><text x="506.9" y="94" font-size="11" text-anchor="middle" fill="#1a2340">30</text></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Box from Q1 to Q3; gold line is the median; whiskers reach the minimum and maximum. Horizontal axis: minutes.</div></div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Puzzle Times of 10 Students (constructed data)</strong></div>
+<div style="text-align: center; overflow-x: auto;"><svg viewBox="0 0 560 102" width="560" height="102" role="img" aria-label="Puzzle Times of 10 Students (constructed data). Puzzle: min 3, Q1 6, median 10, Q3 15, max 25" style="max-width: 100%; height: auto;"><line x1="70.0" y1="8" x2="70.0" y2="74" stroke="#E3E8F2"/><line x1="153.2" y1="8" x2="153.2" y2="74" stroke="#E3E8F2"/><line x1="236.4" y1="8" x2="236.4" y2="74" stroke="#E3E8F2"/><line x1="319.6" y1="8" x2="319.6" y2="74" stroke="#E3E8F2"/><line x1="402.9" y1="8" x2="402.9" y2="74" stroke="#E3E8F2"/><line x1="486.1" y1="8" x2="486.1" y2="74" stroke="#E3E8F2"/><text x="60" y="36.0" font-size="13" fill="#0E1C42" text-anchor="end">Puzzle</text><line x1="119.9" y1="32" x2="169.9" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="319.6" y1="32" x2="486.1" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="119.9" y1="24" x2="119.9" y2="40" stroke="#0E1C42" stroke-width="2"/><line x1="486.1" y1="24" x2="486.1" y2="40" stroke="#0E1C42" stroke-width="2"/><rect x="169.9" y="18" width="149.8" height="28" fill="#CFE8F6" stroke="#0E1C42" stroke-width="2"/><line x1="236.4" y1="18" x2="236.4" y2="46" stroke="#C7922C" stroke-width="4"/><text x="119.9" y="62" font-size="11" fill="#1a2340" text-anchor="middle">3</text><text x="169.9" y="62" font-size="11" fill="#1a2340" text-anchor="middle">6</text><text x="236.4" y="62" font-size="11" fill="#1a2340" text-anchor="middle">10</text><text x="319.6" y="62" font-size="11" fill="#1a2340" text-anchor="middle">15</text><text x="486.1" y="62" font-size="11" fill="#1a2340" text-anchor="middle">25</text><line x1="70" y1="76" x2="536" y2="76" stroke="#0E1C42" stroke-width="2"/><line x1="70.0" y1="76" x2="70.0" y2="81" stroke="#0E1C42"/><text x="70.0" y="94" font-size="11" text-anchor="middle" fill="#1a2340">0</text><line x1="153.2" y1="76" x2="153.2" y2="81" stroke="#0E1C42"/><text x="153.2" y="94" font-size="11" text-anchor="middle" fill="#1a2340">5</text><line x1="236.4" y1="76" x2="236.4" y2="81" stroke="#0E1C42"/><text x="236.4" y="94" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="319.6" y1="76" x2="319.6" y2="81" stroke="#0E1C42"/><text x="319.6" y="94" font-size="11" text-anchor="middle" fill="#1a2340">15</text><line x1="402.9" y1="76" x2="402.9" y2="81" stroke="#0E1C42"/><text x="402.9" y="94" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="486.1" y1="76" x2="486.1" y2="81" stroke="#0E1C42"/><text x="486.1" y="94" font-size="11" text-anchor="middle" fill="#1a2340">25</text></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Same recipe for an even number of values. Horizontal axis: minutes.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">Notice the box is not centered on the median. In the puzzle times the median (10) sits closer to Q1 (6) than to Q3 (15), so the values between the median and Q3 are spread over more room than those between Q1 and the median. The picture carries information that the five numbers hold only implicitly.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128065;&#65039; READING A BOX PLOT</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Each of the four parts of a box plot &mdash; the left whisker, the left half of the box, the right half of the box, and the right whisker &mdash; holds about <strong>a quarter of the data</strong>. Take twelve (made-up) commute minutes: 14, 16, 18, 21, 23, 24, 27, 30, 31, 35, 38, 42. By halves, Q1 = 19.5, the median = 25.5, and Q3 = 33. Count them: three values fall below Q1 (14, 16, 18), three between Q1 and the median (21, 23, 24), three between the median and Q3 (27, 30, 31), and three above Q3 (35, 38, 42).</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Twelve Commute Times (constructed data): three values in each quarter</strong></div>
+<div style="text-align: center; overflow-x: auto;"><svg viewBox="0 0 560 102" width="560" height="102" role="img" aria-label="Twelve Commute Times (constructed data): three values in each quarter. Commute: min 14, Q1 19.5, median 25.5, Q3 33, max 42" style="max-width: 100%; height: auto;"><line x1="70.0" y1="8" x2="70.0" y2="74" stroke="#E3E8F2"/><line x1="199.4" y1="8" x2="199.4" y2="74" stroke="#E3E8F2"/><line x1="328.9" y1="8" x2="328.9" y2="74" stroke="#E3E8F2"/><line x1="458.3" y1="8" x2="458.3" y2="74" stroke="#E3E8F2"/><text x="60" y="36.0" font-size="13" fill="#0E1C42" text-anchor="end">Commute</text><line x1="121.8" y1="32" x2="193.0" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="367.7" y1="32" x2="484.2" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="121.8" y1="24" x2="121.8" y2="40" stroke="#0E1C42" stroke-width="2"/><line x1="484.2" y1="24" x2="484.2" y2="40" stroke="#0E1C42" stroke-width="2"/><rect x="193.0" y="18" width="174.7" height="28" fill="#CFE8F6" stroke="#0E1C42" stroke-width="2"/><line x1="270.6" y1="18" x2="270.6" y2="46" stroke="#C7922C" stroke-width="4"/><text x="121.8" y="62" font-size="11" fill="#1a2340" text-anchor="middle">14</text><text x="193.0" y="62" font-size="11" fill="#1a2340" text-anchor="middle">19.5</text><text x="270.6" y="62" font-size="11" fill="#1a2340" text-anchor="middle">25.5</text><text x="367.7" y="62" font-size="11" fill="#1a2340" text-anchor="middle">33</text><text x="484.2" y="62" font-size="11" fill="#1a2340" text-anchor="middle">42</text><line x1="70" y1="76" x2="536" y2="76" stroke="#0E1C42" stroke-width="2"/><line x1="70.0" y1="76" x2="70.0" y2="81" stroke="#0E1C42"/><text x="70.0" y="94" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="199.4" y1="76" x2="199.4" y2="81" stroke="#0E1C42"/><text x="199.4" y="94" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="328.9" y1="76" x2="328.9" y2="81" stroke="#0E1C42"/><text x="328.9" y="94" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="458.3" y1="76" x2="458.3" y2="81" stroke="#0E1C42"/><text x="458.3" y="94" font-size="11" text-anchor="middle" fill="#1a2340">40</text></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Each quarter of the picture holds 3 of the 12 values, even though the quarters have different widths. Horizontal axis: minutes.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A wide quarter does not hold more data. It holds the same amount, spread over more room.</strong> That is how a box plot shows spread: a <strong>wide box</strong> means the middle half of the data is spread out; a <strong>narrow box</strong> means it is packed together. Two made-up sets of twelve values share a median of 50:</div>
+<div style="margin: 0 0 14px 0;"><div style="font-size: 16px; color: #0e1c42; text-align: center; margin-bottom: 6px;"><strong>Same Median, Different Boxes (constructed data)</strong></div>
+<div style="text-align: center; overflow-x: auto;"><svg viewBox="0 0 560 164" width="560" height="164" role="img" aria-label="Same Median, Different Boxes (constructed data). Set P: min 36, Q1 45, median 50, Q3 55, max 64; Set Q: min 20, Q1 32.5, median 50, Q3 67.5, max 80" style="max-width: 100%; height: auto;"><line x1="70.0" y1="8" x2="70.0" y2="136" stroke="#E3E8F2"/><line x1="128.2" y1="8" x2="128.2" y2="136" stroke="#E3E8F2"/><line x1="186.5" y1="8" x2="186.5" y2="136" stroke="#E3E8F2"/><line x1="244.8" y1="8" x2="244.8" y2="136" stroke="#E3E8F2"/><line x1="303.0" y1="8" x2="303.0" y2="136" stroke="#E3E8F2"/><line x1="361.2" y1="8" x2="361.2" y2="136" stroke="#E3E8F2"/><line x1="419.5" y1="8" x2="419.5" y2="136" stroke="#E3E8F2"/><line x1="477.8" y1="8" x2="477.8" y2="136" stroke="#E3E8F2"/><line x1="536.0" y1="8" x2="536.0" y2="136" stroke="#E3E8F2"/><text x="60" y="36.0" font-size="13" fill="#0E1C42" text-anchor="end">Set P</text><line x1="221.5" y1="32" x2="273.9" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="332.1" y1="32" x2="384.6" y2="32" stroke="#0E1C42" stroke-width="2"/><line x1="221.5" y1="24" x2="221.5" y2="40" stroke="#0E1C42" stroke-width="2"/><line x1="384.6" y1="24" x2="384.6" y2="40" stroke="#0E1C42" stroke-width="2"/><rect x="273.9" y="18" width="58.2" height="28" fill="#CFE8F6" stroke="#0E1C42" stroke-width="2"/><line x1="303.0" y1="18" x2="303.0" y2="46" stroke="#C7922C" stroke-width="4"/><text x="221.5" y="62" font-size="11" fill="#1a2340" text-anchor="middle">36</text><text x="273.9" y="62" font-size="11" fill="#1a2340" text-anchor="middle">45</text><text x="303.0" y="62" font-size="11" fill="#1a2340" text-anchor="middle">50</text><text x="332.1" y="62" font-size="11" fill="#1a2340" text-anchor="middle">55</text><text x="384.6" y="62" font-size="11" fill="#1a2340" text-anchor="middle">64</text><text x="60" y="98.0" font-size="13" fill="#0E1C42" text-anchor="end">Set Q</text><line x1="128.2" y1="94" x2="201.1" y2="94" stroke="#0E1C42" stroke-width="2"/><line x1="404.9" y1="94" x2="477.8" y2="94" stroke="#0E1C42" stroke-width="2"/><line x1="128.2" y1="86" x2="128.2" y2="102" stroke="#0E1C42" stroke-width="2"/><line x1="477.8" y1="86" x2="477.8" y2="102" stroke="#0E1C42" stroke-width="2"/><rect x="201.1" y="80" width="203.9" height="28" fill="#CFE8F6" stroke="#0E1C42" stroke-width="2"/><line x1="303.0" y1="80" x2="303.0" y2="108" stroke="#C7922C" stroke-width="4"/><text x="128.2" y="124" font-size="11" fill="#1a2340" text-anchor="middle">20</text><text x="201.1" y="124" font-size="11" fill="#1a2340" text-anchor="middle">32.5</text><text x="303.0" y="124" font-size="11" fill="#1a2340" text-anchor="middle">50</text><text x="404.9" y="124" font-size="11" fill="#1a2340" text-anchor="middle">67.5</text><text x="477.8" y="124" font-size="11" fill="#1a2340" text-anchor="middle">80</text><line x1="70" y1="138" x2="536" y2="138" stroke="#0E1C42" stroke-width="2"/><line x1="70.0" y1="138" x2="70.0" y2="143" stroke="#0E1C42"/><text x="70.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">10</text><line x1="128.2" y1="138" x2="128.2" y2="143" stroke="#0E1C42"/><text x="128.2" y="156" font-size="11" text-anchor="middle" fill="#1a2340">20</text><line x1="186.5" y1="138" x2="186.5" y2="143" stroke="#0E1C42"/><text x="186.5" y="156" font-size="11" text-anchor="middle" fill="#1a2340">30</text><line x1="244.8" y1="138" x2="244.8" y2="143" stroke="#0E1C42"/><text x="244.8" y="156" font-size="11" text-anchor="middle" fill="#1a2340">40</text><line x1="303.0" y1="138" x2="303.0" y2="143" stroke="#0E1C42"/><text x="303.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">50</text><line x1="361.2" y1="138" x2="361.2" y2="143" stroke="#0E1C42"/><text x="361.2" y="156" font-size="11" text-anchor="middle" fill="#1a2340">60</text><line x1="419.5" y1="138" x2="419.5" y2="143" stroke="#0E1C42"/><text x="419.5" y="156" font-size="11" text-anchor="middle" fill="#1a2340">70</text><line x1="477.8" y1="138" x2="477.8" y2="143" stroke="#0E1C42"/><text x="477.8" y="156" font-size="11" text-anchor="middle" fill="#1a2340">80</text><line x1="536.0" y1="138" x2="536.0" y2="143" stroke="#0E1C42"/><text x="536.0" y="156" font-size="11" text-anchor="middle" fill="#1a2340">90</text></svg></div><div style="font-size: 13px; color: #666; text-align: center;">Set P's middle half is packed into 10 units (45 to 55); Set Q's spreads across 35 units (32.5 to 67.5). Horizontal axis: value.</div></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;">What a box plot cannot show is the <em>shape</em> inside the box. Last week's widget had two datasets with the same five-number summary and very different histograms; you will see them again below. A box plot is a summary, and a summary always leaves something out. Saying so is part of describing data fairly.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; WHEN EXCEL DISAGREES: A CONVENTION, NOT A MISTAKE</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Excel's formula for quartiles is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(range, quart)</code>, where <em>quart</em> is 1 for Q1, 2 for the median, and 3 for Q3. (The &ldquo;INC&rdquo; stands for <em>inclusive</em>.) For some datasets it gives the same Q1 and Q3 as your hand method; for many it gives a slightly different answer.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The reason: there is more than one reasonable way to cut ordered data at the 25th and 75th percentiles. Excel's method places Q1 at position \(1 + 0.25(n - 1)\) in the ordered list and Q3 at position \(1 + 0.75(n - 1)\), and when that position falls between two values it goes <em>part of the way</em> from one to the next. Your hand method instead takes the median of each half. Neither is wrong.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Same nine reading times, both methods.</strong> With \(n = 9\), Q1 sits at position \(1 + 0.25 \times 8 = 3\), which is the 3rd value, 9. Q3 sits at position \(1 + 0.75 \times 8 = 7\), the 7th value, 19. So Excel reports Q1 = 9 and Q3 = 19, while the by-hand method gave 8.5 and 20.5.</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="border-collapse: collapse; margin: 0 auto; min-width: 320px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Method</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Min</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Q1</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Median</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Q3</th><th style="padding: 8px 14px; font-size: 15px; color: #fff; text-align: left; border: 1px solid #334;">Max</th></tr></thead>
+<tbody>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Median of each half (by hand)</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">8.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">14</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">20.5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">30</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">Excel QUARTILE.INC</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">5</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">9</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">14</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">19</td><td style="padding: 7px 14px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8;">30</td></tr>
+</tbody></table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Same ten puzzle times.</strong> With \(n = 10\) the positions are \(1 + 0.25 \times 9 = 3.25\) and \(1 + 0.75 \times 9 = 7.75\). Position 3.25 is a quarter of the way from the 3rd value to the 4th: \(6 + 0.25 \times (7 - 6) = 6.25\). Position 7.75 is three quarters of the way from the 7th to the 8th: \(12 + 0.75 \times (15 - 12) = 14.25\). Excel reports Q1 = 6.25 and Q3 = 14.25; the hand method gave 6 and 15.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>A fact worth knowing.</strong> When the number of values is odd, Excel's answer is the same as you would get by <em>keeping</em> the median in both halves. Some textbooks teach that version. We leave the median out, so our hand answers for odd <em>n</em> can differ from Excel's, as they did above. For large datasets the differences shrink, and sometimes the two agree exactly, as in the 33-value pair in the widget below, where repeated values sit near the quartiles.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Which do we use?</strong> In this course, <strong>by hand</strong> means the median-of-each-half method, and <strong>Excel</strong> means <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">QUARTILE.INC</code>. A question or assignment says which one it wants; when it does not say, use by hand. When you report quartiles outside this course, say <em>which convention you used</em>, the way you would name the units.</div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#129309; A COURTESY TO THE READER</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">Two honest people can compute different quartiles from the same data. The courteous thing is to name the method and the number of values (<em>n</em>) next to the result, so a reader who gets a different answer knows to check the convention before doubting you.</div>
+    </div>
+
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Histogram and Box Plot: Two Quartile Rules</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">(1) Under <strong>Same box plot, different shapes</strong>, click <strong>Set A: one hump</strong>, then <strong>Set B: two clusters</strong>. With <strong>Median of each half</strong> selected, read n, min, Q1, median, Q3, and max for each. (2) Click <strong>Spreadsheet QUARTILE.INC</strong> and look again. Does either summary change? Is there a note below the graphs? (3) In the <strong>Your own</strong> box type <code>5, 8, 9, 12, 14, 15, 19, 22, 30</code> (the nine reading times) and click <strong>Use my numbers</strong>. Switch between the two quartile buttons and write down Q1 and Q3 under each; you should find 8.5 and 20.5, then 9 and 19. When the two methods disagree, a note appears saying so. (4) Leave the box about the 1.5 &times; IQR fences unchecked; we use it next lesson.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/histogram-boxplot.html" width="100%" height="900" style="border: none; display: block;" title="Histogram and Box Plot: Two Quartile Rules" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/histogram-boxplot.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; DESMOS FOR THE ARITHMETIC, EXCEL FOR THE LISTS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Desmos Scientific</strong> (plain expressions only). The average of the middle pair in a half: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(8+9)/2</code> &rarr; 8.5. Going part of the way between two values (the QUARTILE.INC idea): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">5+0.25*(7-5)</code> &rarr; 5.5. A percentile rank: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">14/20*100</code> &rarr; 70. Desmos Scientific does not do list statistics, so the sorting and counting are yours; Excel handles the lists.<br /><br /><strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(range)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(range,1)</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(range,3)</code>. Excel does not need the data sorted. The full click-by-click steps are in the next section.
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: THE FIVE-NUMBER SUMMARY IN FIVE FORMULAS</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Keep this page open beside Excel. You will enter the nine reading times, ask Excel for the five-number summary, and compare it with your hand answers. <strong>Excel work happens outside Canvas.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Part A &mdash; enter the data.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <em>Blank workbook</em>. Click cell <strong>A1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Minutes</code>, and press <strong>Enter</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>A2</strong> and type the nine values, pressing <strong>Enter</strong> after each, in this order: 15, 9, 30, 5, 12, 19, 8, 22, 14. They end in <strong>A10</strong>. (They are not in order; that is fine.)</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Part B &mdash; the five formulas.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C1</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Statistic</code>, press <strong>Tab</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Excel</code>, press <strong>Tab</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">By hand</code>, press <strong>Tab</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Difference</code>, press <strong>Enter</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C2</strong> and type the labels down column C, pressing <strong>Enter</strong> after each: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Minimum</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Q1</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Median</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Q3</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Maximum</code> (C2 to C6).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN(A2:A10)</code>, and press <strong>Enter</strong>. You should see 5.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D3</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(A2:A10,1)</code>, and press <strong>Enter</strong>. You should see 9.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D4</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN(A2:A10)</code>, and press <strong>Enter</strong>. You should see 14.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D5</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(A2:A10,3)</code>, and press <strong>Enter</strong>. You should see 19.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>D6</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX(A2:A10)</code>, and press <strong>Enter</strong>. You should see 30.</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Part C &mdash; compare with your hand work.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>E2</strong> and type your hand five-number summary down column E, one value per cell, in the same order: 5, 8.5, 14, 20.5, 30.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>F2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=D2-E2</code>, and press <strong>Enter</strong>. Click F2 again, then drag the small square at its lower right corner (the fill handle) down to <strong>F6</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Read column F (Excel minus hand). A <strong>0</strong> means the two methods agree. You should see 0, 0.5, 0, &minus;1.5, 0: Excel and the hand method agree on the minimum, median, and maximum and differ on Q1 and Q3.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>C8</strong> and type one sentence naming both methods and why they differ (for example: &ldquo;Q1 and Q3 differ because Excel interpolates by position and my hand method takes the median of each half; neither is a mistake.&rdquo;).</div>
+<div style="margin-bottom: 6px;"></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Part D &mdash; a percentile rank.</strong> Click <strong>C10</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Rank of 14</code>. Click <strong>D10</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A2:A10,"&lt;=14")/COUNT(A2:A10)*100</code>, then press <strong>Enter</strong>. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">COUNTIF</code> counts the cells at or below 14 (there are 5) and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">COUNT</code> counts all the numbers (9), so you get \(\dfrac{5}{9} \times 100 \approx 55.6\). Two quick checks: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(A2:A10,0)</code> gives the minimum and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(A2:A10,4)</code> the maximum, so both agree with your MIN and MAX.</div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Give an AI tool this list and ask: <em>&ldquo;What are Q1, the median, and Q3?&rdquo;</em> &mdash; 7, 20, 4, 13, 2, 16, 10, 5, 15, 8. Do <strong>not</strong> tell it which method to use.<br />
+            <strong>Predict.</strong> Before you read its answer, find the quartiles by hand (order first!) and also by the Excel rule. You should get Q1 = 5, median = 9, Q3 = 15 by hand, and Q1 = 5.5, median = 9, Q3 = 14.5 from <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">QUARTILE.INC</code>. Predict which pair the AI will give.<br />
+            <strong>Verify.</strong> Which pair did it give, or did it give something else? If it matches one pair, say which convention it used, and ask it to name the method; does its stated method match its numbers? If it matches neither, find the first step where it went wrong (a common slip is not sorting first). The lesson is that a correct-looking answer can still rest on a convention the AI never told you, and a mismatch means <em>check the method</em> before you say &ldquo;wrong.&rdquo;
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY'S ACTIVITIES (about 47 minutes total)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Percentile Rank on an Ordered List</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the 20 quiz scores from the lesson: 48, 52, 55, 58, 61, 63, 65, 67, 70, 72, 74, 75, 77, 78, 80, 83, 85, 88, 92, 96. Find the percentile rank of 85 and of 61. Show the count and the division.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Which score is at about the 40th percentile? Show how you found its position.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Rani scored 61 and says, &ldquo;So I am at the 61st percentile.&rdquo; Is she right? Explain in one sentence what her percentile rank is and what it tells her.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Rank of 85: it is the 17th score, so \(\dfrac{17}{20} \times 100 = 85\). Rank of 61: the 5th score, \(\dfrac{5}{20} \times 100 = 25\). About the 40th percentile: \(0.40 \times 20 = 8\), so the 8th score, 67. Rani is not right: 61 is her <em>score</em>, but only 5 of 20 scores are at or below it, so her percentile rank is 25: about a quarter of this class scored 61 or lower.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Two Summaries and a Box Plot</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Set X (11 values, made up): 27, 14, 33, 19, 22, 38, 17, 25, 30, 21, 35. Order it, find the median, name the value left out of both halves, and find Q1 and Q3 by hand. Write the five-number summary.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Set Y (8 values, made up): 6, 11, 8, 15, 9, 20, 12, 18. Order it and find its five-number summary by hand.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Draw a box plot of Set X on graph paper with a labeled, evenly spaced scale from 10 to 40. In one sentence, say what fraction of the data lies between Q1 and Q3 and which of the four quarters is the most spread out.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Set X ordered: 14, 17, 19, 21, 22, 25, 27, 30, 33, 35, 38. The median is the 6th value, 25 (left out of both halves). Lower half 14, 17, 19, 21, 22 has median 19; upper half 27, 30, 33, 35, 38 has median 33. Five-number summary: 14, 19, 25, 33, 38. Set Y ordered: 6, 8, 9, 11, 12, 15, 18, 20. Median \(\dfrac{11 + 12}{2} = 11.5\); lower half 6, 8, 9, 11 has median \(\dfrac{8 + 9}{2} = 8.5\); upper half 12, 15, 18, 20 has median \(\dfrac{15 + 18}{2} = 16.5\). Summary: 6, 8.5, 11.5, 16.5, 20. For Set X the box runs 19 to 33 with the median line at 25 and whiskers to 14 and 38. About half of the data lies between Q1 and Q3. The four quarters are 14 to 19 (5 wide), 19 to 25 (6), 25 to 33 (8), and 33 to 38 (5), so the quarter from the median to Q3 is the most spread out.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Check Set X in Excel</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In a new workbook enter Set X in column A (header in A1, values in A2:A12). In cells beside it, enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN()</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(,1)</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MEDIAN()</code>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=QUARTILE.INC(,3)</code>, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX()</code> with the range filled in.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Compare each result with your hand answer from Activity 2. Which agree? Which differ and by how much? Why?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Also type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A2:A12,"&lt;=30")/COUNT(A2:A12)*100</code> and say what it computes.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        Excel gives 14, 20, 25, 31.5, 38. Minimum, median, and maximum agree with the hand answers. Q1 is 20 in Excel and 19 by hand (a difference of 1); Q3 is 31.5 in Excel and 33 by hand (a difference of &minus;1.5). Reason: Excel uses position \(1 + p(n-1)\) with interpolation (positions 3.5 and 8.5 for \(n = 11\)), while the hand method takes the median of each half. The COUNTIF formula gives the percentile rank of 30 in Set X: 8 of 11 values are at or below 30, so about 72.7.
+                    </div>
+                </details>
+            </div>
+        </div>
+
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 22.2 &mdash; Locate and Summarize</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five-number summaries by hand (odd and even n), a box plot on graph paper, an Excel comparison using QUARTILE.INC, and percentile-rank and error-analysis items. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 22.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on percentile rank, quartiles by hand, reading box plots, and the quartile convention.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 22.3 &mdash; Range, IQR, and Outliers</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next lesson uses Q3 &minus; Q1 to measure spread and gives a rule for deciding when a value is far enough from the rest to be flagged.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 3 &middot; Student Lesson Page</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 22.2 &middot; Measures of Location: Percentiles, Quartiles, and Box Plots Revisited</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 30.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 30.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Who gets counted</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 30.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Random Sampling and Representativeness</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A random sample is trustworthy because of how it is chosen, not because it looks like the population.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Known chances of selection; why chance protects against the researcher's own bias; the simple random sample; drawing one with a random number list or Excel; duplicates; what &ldquo;representative&rdquo; honestly means; why a bigger sample does not cure a biased method</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Sampling Simulator interactive, follow the Excel steps, and complete the three activities at the bottom. Plan on about 75 minutes.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain that a random sample gives every member of the population a <em>known</em> chance of being selected, and why that protects a study against the researcher&rsquo;s own bias (the choices a person makes, even without meaning to).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe a <strong>simple random sample</strong> (every group of size <em>n</em> is equally likely) and carry one out with a random number list or the Excel function <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN</code>, handling duplicate draws by redrawing (or by the optional <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RAND</code> and sort method).</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> say honestly what &ldquo;representative&rdquo; means: a random <em>method</em> is unbiased, but any single sample can still miss the population by chance.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> recognize that making a biased sample larger does not remove the bias.</div>
+        </div>
+
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A cook wants to know whether a big pot of soup needs salt. She does not drink the whole pot. She stirs it well, and then she tastes one spoonful. The stirring is the important part. If the salt had all sunk to the bottom and she skimmed a spoonful from the top, her taste would tell her about the top, and not about the soup.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Sampling a population is the same problem with people instead of soup. We almost never ask everyone, so we taste a spoonful, a <strong>sample</strong>. The whole question is how the spoonful gets chosen. Last lesson you separated a <strong>parameter</strong> (a fact about the whole population) from a <strong>statistic</strong> (a fact about a sample). Today we ask what makes a statistic a fair guide to its parameter.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Responsibility</strong>, this module&rsquo;s virtue, shows up here in a plain way: whoever chooses the sample decides whose voice is counted. Choosing carefully, and being honest about what a sample can and cannot tell us, is part of owning our claims.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every town, club, list, and number in this lesson is <strong>constructed</strong> (made up) to teach the idea, with one exception: the short history note below, which is hedged and which you should check for yourself.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; EVERY GROUP, EVERY PERSON: WHAT &ldquo;RANDOM&rdquo; MEANS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A sample is <strong>random</strong> when chance, not a person&rsquo;s choice, decides who is in it, and when we can say in advance how likely each member is to be chosen. Two ideas sit inside that sentence. The first is a <strong>known chance of selection</strong> for each member. The second is stronger, and it is the one statisticians use as a standard.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A <strong>simple random sample</strong> (SRS) of size <em>n</em> is a sample chosen so that <strong>every possible group of <em>n</em> members is equally likely</strong> to be the one chosen. Drawing names from a well-mixed hat, without putting any back, makes an SRS. A side effect is that every <em>individual</em> also has the same chance of being included. But the reverse is not true, as the next example shows.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Why chance protects against bias.</strong> When a person picks &ldquo;typical-looking&rdquo; members, or the ones nearby, or the ones who seem friendly, the person&rsquo;s own habits and hopes steer the sample. A researcher who expects young people to like a plan may, without any dishonesty, reach for young people. A random device has no hopes. It cannot favor the people the researcher expected to agree. That is why random selection is the main defense of a study against the researcher&rsquo;s own bias.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: WHICH METHODS ARE A SIMPLE RANDOM SAMPLE?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Four people, A, B, C, D, stand in a row (a constructed example). We want a sample of <em>n</em> = 2. Compare three methods. <strong>Method 1:</strong> write each possible pair on a card and draw one card. <strong>Method 2:</strong> flip a coin; heads gives the pair A, B and tails gives the pair C, D. <strong>Method 3:</strong> pick one of the seats A, B, or C at random and take that person and the person to their right. Which are simple random samples?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> First I list every possible group of 2. From four people there are 4 &times; 3 &divide; 2 = 6 of them: AB, AC, AD, BC, BD, CD. In Method 1 each card is drawn with chance 1/6, so every possible group is equally likely. That is an SRS. Each person appears in 3 of the 6 pairs, so each person is included with chance 3/6 = 1/2.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Method 2 also gives every person a 1/2 chance: A is in the sample exactly when the coin shows heads. But only two of the six groups can ever happen. AC, AD, BC, BD can never be chosen. Equal chances for people is <em>not</em> enough. This method is <strong>not</strong> an SRS.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Method 3 the only possible groups are AB, BC, and CD, each with chance 1/3. Person A is in only AB, so A&rsquo;s chance is 1/3, while B is in AB and BC, so B&rsquo;s chance is 2/3 (and D&rsquo;s is 1/3). The chances are known, but not equal, and many groups are impossible. This is not an SRS either.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Only Method 1 is a simple random sample. Method 2 is fair to each person but forbids most groups; Method 3 is not even fair to each person. (Methods like these have names, and you will meet them next lesson.)</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: DRAWING AN SRS FROM A RANDOM NUMBER LIST</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up club has 40 members numbered 01 to 40. Use this made-up list of random digits to draw an SRS of <em>n</em> = 5 members. Read the digits in pairs, left to right: <strong>2 9 1 4 1 7 7 7 6 3 1 7 0 6 6 9 0 7</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> The pairs are 29, 14, 17, 77, 63, 17, 06, 69, 07. I take a pair only if it is a real member number, 01 to 40, and I take each member only once, because a person cannot be in a sample twice.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">29 is a member, so I keep it. 14 is kept. 17 is kept. 77 is larger than 40, so I skip it. 63 is larger than 40, so I skip it. 17 was already chosen, so I skip it (a repeat). 06 is a member, so I keep it. I now have four. 69 is skipped, and 07 is kept, which makes five.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> Members <strong>29, 14, 17, 06, 07</strong>. Skipping out-of-range numbers does not hurt fairness, because every real number is still equally likely to come up at each step. <strong>Skipping repeats</strong> is what makes it a draw without replacement, which is how an SRS works.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: HOW CLOSE IS A RANDOM SAMPLE, REALLY?</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up club of 60 members has exactly 30 who own a library card and 30 who do not, so the true share who own one is 50%. An SRS of <em>n</em> = 8 members is drawn. (i) What is the chance that the sample share is <em>exactly</em> 50%, that is, 4 of 8? (ii) What is the chance of 3, 4, or 5 owners?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> I count samples. The number of ways to choose 8 of the 60 members is C(60, 8). The number of ways to choose exactly 4 owners and 4 non-owners is C(30, 4) &times; C(30, 4). Because an SRS makes every group equally likely, the chance is the ratio of the counts.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">(i) P(4 of 8) = C(30,4) &times; C(30,4) &divide; C(60,8) is about <strong>0.294</strong>. So only about 29% of samples hit 50% exactly; about 71% do not, and that happens even though the method is perfectly fair.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">(ii) P(3 or 4 or 5) is about 0.226 + 0.294 + 0.226 = about <strong>0.746</strong> (the exact sum of the three counts, to three decimals). The other roughly 25% of samples have 0, 1, 2, 6, 7, or 8 owners, which is a share of 25% or less, or 75% or more.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Answer.</strong> A random sample of 8 usually lands near 50% but usually not <em>on</em> 50%, and sometimes lands well away. That is not a defect in the method. It is what chance does. <strong>So &ldquo;representative&rdquo; cannot mean &ldquo;mirrors the population.&rdquo;</strong></div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; WHAT &ldquo;REPRESENTATIVE&rdquo; HONESTLY MEANS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">People say a random sample is &ldquo;representative.&rdquo; The word is slippery, so use it carefully. There are two different claims:</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>A claim about the method (true for random sampling).</strong> The method is <strong>unbiased</strong>: it does not systematically lean toward high values or low values, or toward one kind of person. If you could repeat the draw many times, the sample statistics would scatter around the true parameter and not pile up on one side of it.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>A claim about one sample (not guaranteed).</strong> The sample in front of you may or may not match the population in its mix of ages, or its share of &ldquo;yes&rdquo; answers. A single random sample can, by chance, miss. Worked Example 3 showed that most samples of 8 do not hit the exact percent.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Two phrases to retire, because they sound careful but are wrong: <strong>&ldquo;the sample will look just like the population&rdquo;</strong> and <strong>&ldquo;a random sample is representative on average.&rdquo;</strong> The first promises too much about one sample. The second mixes up the two claims: it is the <em>estimates</em> that are right on average over many samples, not a sample that is somehow an average of the population. An honest sentence sounds like this: <em>&ldquo;We chose the sample at random, so our method does not lean in any direction. Our estimate is probably close, but it is still an estimate, and a different random sample would give a somewhat different number.&rdquo;</em></div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Random Versus Convenient</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Four tasks.</strong> The town and every number in it are made up. Keep the tracked quantity on <em>Average minutes of homework</em>. <strong>(1)</strong> Under <em>Method</em> choose <em>Simple random</em> and set the sample size to <em>n</em> = 20. Press <em>Draw a sample</em> a few times and watch the estimate move around. Then press <em>Repeat 100 times</em>. The pile of dots should center near the same spot with the errors falling on both sides. <strong>(2)</strong> Choose <em>Convenience (nearest the entrance)</em> at <em>n</em> = 20 and press <em>Repeat 100 times</em>. The dots will bunch up tightly, but away from where the simple random dots were. <strong>(3)</strong> Press <em>Reveal the true values</em>. The true average is about 68.36 minutes. Over many draws, simple random is off by about 0.00 minutes on average, and convenience is about 14.69 minutes too low (a bias of about &minus;14.69). Convenience is tight and wrong; simple random is wider and fair. <strong>(4)</strong> Press <em>Try n = 60 with Convenience</em>. Tripling the sample size leaves convenience still about 11.97 minutes too low. A bigger biased sample is still a biased sample. Write one sentence saying what you would tell a researcher who says &ldquo;I will just ask more people at the entrance.&rdquo;</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/sampling-simulator.html" width="100%" height="1100" style="border: none; display: block;" title="Sampling Simulator" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/sampling-simulator.html" target="_blank" rel="noopener">open it in a new tab</a>. The page is long, so scroll inside the frame.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; SIZE DOES NOT FIX BIAS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You just saw it in the simulator, and it is worth saying slowly. A larger sample cures <strong>chance error</strong>: the scatter of random samples around the truth shrinks as <em>n</em> grows. It does <strong>nothing</strong> for <strong>bias</strong>: a method that leans one way keeps leaning the same way no matter how many people it reaches. Think of a scale that reads two pounds heavy. Weighing more objects on it does not fix the scale.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">So when you meet a claim like &ldquo;our survey is reliable because 10,000 people answered,&rdquo; the right first question is not &ldquo;how many?&rdquo; but <strong>&ldquo;how were they chosen, and who never had a chance to be chosen?&rdquo;</strong> Large numbers can hide a bad method; they cannot rescue it.</div>
+    </div>
+    <div style="background: #E8F6FB; border-left: 5px solid #2196D0; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #1B6A94; margin-bottom: 8px;">&#128214; HISTORY &middot; A POLL THAT WAS BIG AND WRONG</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.6;">In 1936 a popular U.S. magazine, the <em>Literary Digest</em>, mailed out a very large number of mock ballots before the presidential election and received back millions of responses. Its poll predicted that the challenger, Alf Landon, would defeat President Franklin Roosevelt. Roosevelt won in a landslide. Accounts of what went wrong usually point to two problems. First, the mailing lists are generally described as drawing heavily on sources such as telephone directories and automobile registrations. In the Depression years those lists leaned toward wealthier households, so many voters had little or no chance of being asked at all. Second, only some of the people who received a ballot mailed it back, and people who choose to reply are often different from people who do not (this is called <strong>nonresponse</strong>). Accounts also report that smaller polls that took more careful samples came closer to the actual result. The lesson is not about one number. Millions of responses could not repair a method that tilted who got counted: more of a biased sample is still a biased sample. <strong>Check this account yourself.</strong> This summary is hedged on purpose, and it comes from memory of how the story is usually told. Look it up in more than one reliable source before you repeat it, exactly the habit the AI task below asks of you.</div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127758; WHERE YOU MIGHT SEE THIS: &ldquo;MILLIONS OF VOTES&rdquo; ONLINE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Open online polls, call-in votes, and &ldquo;reply to this survey&rdquo; links often announce big totals. Everyone who answered chose to answer. That is <strong>self-selection</strong>, and it is the same flaw as nonresponse: the people who respond may differ from the people who do not. A random sample of a few hundred, with careful follow-up, usually says more about a population than a self-selected crowd of a hundred thousand. When you read a poll, ask who was invited and how many of them actually replied.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: DRAW A RANDOM SAMPLE, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will practice a random draw in a spreadsheet. Everything here is made up. Think of a made-up list of 200 numbered members and a value for each.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk30_L2_YourName</code> (practice; you do not upload it).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">ID</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code>. In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1</code> and in <strong>A3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">2</code>. Select <strong>A2:A3</strong>, then drag the small square at the bottom right corner of the selection down to <strong>A201</strong>. The IDs should run 1 to 200.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Click <strong>B2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MOD(37*A2,101)+20</code>, press <strong>Enter</strong>, then drag the fill square of <strong>B2</strong> down to <strong>B201</strong>. This builds a made-up value for each ID without typing 200 numbers. Check: <strong>B6</strong> (ID 5) should show <strong>104</strong>, and <strong>B2</strong> should show <strong>57</strong>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Pick</code>, in <strong>E1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Repeats</code>, and in <strong>F1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Value</code>. Click <strong>D2</strong>, type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,200)</code>, press <strong>Enter</strong>, and drag the fill square down to <strong>D9</strong>. That is eight random IDs. Press <strong>F9</strong> (on some laptops <strong>Fn + F9</strong>) to see a fresh draw.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check for duplicates.</strong> Click <strong>E2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF($D$2:$D$9,D2)</code>, press Enter, and fill down to <strong>E9</strong>. Each cell counts how many times that ID appears in the eight picks. If every cell shows <strong>1</strong>, there are no duplicates. If any cell shows 2 or more, you drew someone twice: press <strong>F9</strong> to redraw, and repeat until every cell is 1. (About 13% of draws of 8 from 200 have a repeat, so you may see it.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Freeze the picks.</strong> Select <strong>D2:D9</strong> and press <strong>Ctrl + C</strong>. Right-click the same selection, under <strong>Paste Options</strong> choose <strong>Values</strong> (the clipboard icon marked 123), or use <strong>Home</strong> &gt; <strong>Paste</strong> &gt; <strong>Paste Special</strong> &gt; <strong>Values</strong>. The formulas turn into plain numbers that no longer change.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Pull the values.</strong> Click <strong>F2</strong> and type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=VLOOKUP(D2,$A$2:$B$201,2,FALSE)</code>, press Enter, and fill down to <strong>F9</strong>. (Another way: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INDEX($B$2:$B$201,D2)</code> works here because each ID equals its position in the list.) In <strong>F11</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=AVERAGE(F2:F9)</code> for your sample mean.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>The RAND and sort alternative (optional).</strong> To avoid duplicates entirely, put <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RAND()</code> beside each of the 200 IDs, copy and paste those random numbers as values, sort the IDs by the random column (<strong>Data</strong> &gt; <strong>Sort</strong>), and take the first 8. Every ID gets its own random number, so no one can be picked twice.</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; RANDBETWEEN, COUNTIF, AND VLOOKUP IN EXCEL; REPEAT-CHANCES IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,200)</code> picks a whole number from 1 to 200, ends included. Copy it down for as many picks as you need. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF($D$2:$D$9,D2)</code> tells you how many times each pick appears, and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=VLOOKUP(D2,$A$2:$B$201,2,FALSE)</code> (or <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=INDEX($B$2:$B$201,D2)</code>) fetches the value that goes with each ID.<br />
+            <strong>Volatility warning.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RANDBETWEEN</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RAND</code> recalculate <em>every time anything in the workbook changes</em>, and when you reopen the file. So a sample you drew and then analyzed can quietly change under you. Always copy the picks and use <strong>Paste Special &gt; Values</strong> to freeze them before you compute anything from them.<br />
+            <strong>Desmos Scientific</strong> is plain arithmetic here. The chance that 8 picks from 200 (draws that are allowed to repeat) contain at least one repeat is one minus the chance that all 8 differ. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1-(200*199*198*197*196*195*194*193)/200^8</code> and you should get about 0.132, so about 13%. The same idea with 60 IDs, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1-(60*59*58*57*56*55*54*53)/60^8</code>, gives about 0.386.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI WHY RANDOM SAMPLING WORKS; CATCH &ldquo;REPRESENTATIVE ON AVERAGE&rdquo;</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;Why does random sampling work? Explain in about five sentences for a high-school student, and say whether a random sample is representative.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide what a careful answer must say: chance, not a person, decides who is chosen; the <em>method</em> is unbiased; any one sample can still miss the population; and a larger sample shrinks chance error but does not fix bias.<br />
+            <strong>Verify.</strong> Look for the wrong phrases: <em>&ldquo;representative on average&rdquo;</em> and <em>&ldquo;the sample will look just like the population.&rdquo;</em> Did it claim a random sample is guaranteed to mirror the population? Did it say a large sample fixes a biased method? Did it mention that results from different random samples will differ? Ask it to defend the exact phrase, then rewrite its worst sentence so that it is true. <strong>Verdict.</strong> A fluent answer is not a correct answer; you are the checker.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 40 minutes, plus the Excel steps and the interactive above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Who Could Be Chosen?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">12 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Four constructed plans for surveying 600 students at a made-up school. <strong>A:</strong> call every 10th number in the school&rsquo;s printed phone book. <strong>B:</strong> ask the first 30 students who walk past the front office. <strong>C:</strong> number all 600 students and use random numbers to choose 30. <strong>D:</strong> post a link on the school page and use whoever answers. For each, name <em>who has no chance of being chosen</em>, and say whether it is random.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Plan C uses an SRS. Is it possible for it to choose 30 students who are all in the same grade? Is that likely? Does it mean the method is broken?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A researcher says &ldquo;I picked 30 students at random&rdquo; but really chose the ones who &ldquo;looked like they would answer.&rdquo; Explain, in your own words, why that is not random even though he may be honest.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. A: students whose families have no listed number, or whose number is not in the book, have no chance; not a random sample of students. B: anyone not near the front office at that time has no chance; convenience, not random. C: everyone has a chance (30 of 600, so 1 in 20) and every group of 30 is equally likely; this is an SRS. D: only people who see the link and choose to answer; self-selected, not random. 2. Yes, it is possible, but very unlikely; and no, a fair method can occasionally produce an odd sample, which is why we describe the <em>method</em> as unbiased, not each sample as typical. 3. The researcher&rsquo;s judgment, not chance, decided who was in; his hopes about who would answer steered the sample, and nobody can say what each student&rsquo;s chance was.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Draw It by Hand</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up team has 50 members numbered 01 to 50. Use this made-up random digit string, read in pairs from the left: <strong>5 2 3 8 0 7 1 9 4 4 6 1 3 8 2 5 0 9</strong>. Draw an SRS of <em>n</em> = 4. Show which pairs you skip and why.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">You draw 8 picks with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,60)</code> and cell E5 shows 2 next to the pick 37. What does that mean, and what are two ways to fix it?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">You compute your sample mean, then press <strong>F9</strong> and the number changes. Why, and what should you have done first?</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. Pairs: 52, 38, 07, 19, 44, 61, 38, 25, 09. 52 is larger than 50, so skip. 38 keep. 07 keep. 19 keep. 44 keep, which makes four. (61, the repeated 38, and the rest are not needed.) The sample is members <strong>38, 07, 19, 44</strong>. 2. The ID 37 was drawn twice, so the sample has a repeat. Redraw (press F9 until every count is 1, or retype <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RANDBETWEEN(1,60)</code> in one of the two cells and recheck), or use the <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=RAND</code> and sort method, which cannot repeat. 3. <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RANDBETWEEN</code> recalculates whenever the workbook changes. Copy the picks and use <strong>Paste Special &gt; Values</strong> before computing anything.
+                    </div>
+                </details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Say It Honestly</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">13 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Rewrite each sentence so that it is true. <strong>(a)</strong> &ldquo;We picked 50 voters at random, so our sample looks just like the whole town.&rdquo; <strong>(b)</strong> &ldquo;Our survey is accurate because 5,000 people answered.&rdquo; <strong>(c)</strong> &ldquo;A random sample is representative on average.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up club of 60 has 30 card-owners. A random sample of 8 gets 3 owners. The teacher says &ldquo;this sample is not representative, so the method was not random.&rdquo; Use Worked Example 3 to say why that does not follow. (How likely is 3, 4, or 5?)</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In two or three sentences, explain why more responses cannot repair a poll whose invitation list left out many voters.</div>
+                </div>
+                <details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+                    <summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">
+                        1. (a) &ldquo;We chose 50 voters at random, so our method does not lean either way. Our estimate is probably close to the truth for the town, but a different random sample would give a somewhat different result.&rdquo; (b) &ldquo;5,000 people answered, which makes chance error small, but accuracy also depends on who was invited and who replied.&rdquo; (c) &ldquo;The <em>method</em> is unbiased: estimates from many random samples center on the truth. Any one sample can still miss.&rdquo; 2. Getting 3 owners is possible: the chance of 3, 4, or 5 owners together is about 0.746, and 3 alone is about 0.226, so a sample like this is common for a fair method. A sample that does not mirror the population is not evidence the method was not random. 3. More answers shrink chance error, but the missing voters never had a chance to be asked, so the poll still leans the same way, no matter how many answers pile up (Worked Examples 1 and 3, and the simulator at n = 60).
+                    </div>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 30.2 &mdash; Random Sample Workbook</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Draw a random sample of 8 from a made-up population of 60 with RANDBETWEEN, freeze it, compute your statistic, compare it with the true value from all 60, and write a short interpretation. Upload the workbook to Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 30.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on simple random samples, honest use of &ldquo;representative,&rdquo; bias that size cannot fix, duplicates, and freezing random picks.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson 30.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next you will meet the named sampling methods: simple random, stratified, cluster, systematic, and the non-random ones (judgment, quota, convenience).</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Sampling &amp; Study Design</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 30.2 &middot; Random Sampling and Representativeness</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

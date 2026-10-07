@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 27.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 10</div>
+        <div style="font-size: 12px; color: #666;">Bivariate Data &amp; Regression</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 27.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Careful claims</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 27.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Prediction: Interpolation vs. Extrapolation</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A line can answer questions it has no right to answer.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Use a fitted line to predict, decide whether the prediction is inside or beyond the data, and report it honestly with its limits.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read each worked example, try the prediction tool, then build a prediction table in Excel. Plan on about 75 minutes. Every dataset and scenario on this page is constructed; none is real data.</div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use a fitted line &ldquo;y-hat = a + bx&rdquo; to predict a value of <em>y</em> for a given <em>x</em>, and say what the prediction means in context.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> decide whether a prediction is an <strong>interpolation</strong> (<em>x</em> inside the range of the data) or an <strong>extrapolation</strong> (<em>x</em> beyond it).</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> check whether a predicted value is even possible in context, and explain why extrapolation is risky.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> report a prediction honestly: as an estimate (&ldquo;about&rdquo;), with sensible digits, the range the data support, and no claim about cause.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). Save the workbook you build here as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk27_PredictionLesson_YourName.xlsx</code>; you will reuse its layout in Assignment 27.3.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From Lesson 27.2: the idea of a fitted line, its slope and intercept, and the Excel scatter chart with a trendline and its displayed equation.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: A PREDICTION IS A PROMISE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A fitted line is a small machine: you feed it an <em>x</em>, it hands back a <em>y</em>. It never says &ldquo;I do not know.&rdquo; Type in 5 and you get a number. Type in 500 and you get a number just as confidently. The machine does not know that the second question was never part of what the data could answer.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">That is where responsibility enters. Whoever reports a prediction owns the claim. An honest forecaster says how far the data reach, how rough the answer is, and what it does not show. Today you will learn the two checks that keep a prediction honest, and you will practice saying a prediction in a way you could defend.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128208; USING THE LINE TO PREDICT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Lesson 27.2 you fitted a line to data. Its equation is written <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = a + bx</code>, read &ldquo;y-hat equals a plus b x.&rdquo; The hat means <em>predicted</em>: the line gives a predicted <em>y</em>, which is not the same thing as a measured <em>y</em>. Here <em>a</em> is the intercept and <em>b</em> is the slope.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">To predict, substitute your <em>x</em> and do the arithmetic. That is all. The care lies in what the answer means.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A prediction is an estimate.</strong> Real points do not sit on the line; they scatter above and below it. So the predicted <em>y</em> is a typical value at that <em>x</em>, not a guaranteed one. Say &ldquo;about&rdquo; and mean it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A prediction does not show cause.</strong> The line describes a pattern in the data. It does not tell you that changing <em>x</em> would change <em>y</em>. Correlation is not causation, and prediction does not change that.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Do not report more digits than you have earned.</strong> If the data were recorded as whole numbers, an answer like 11.1666667 claims a precision nobody has. Keep about as many digits as the data have, and say &ldquo;about.&rdquo;</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128260; TWO KINDS OF PREDICTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every data set has a smallest and a largest <em>x</em>. Those are the edges of what you actually observed.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Interpolation</strong> means predicting for an <em>x</em> <strong>inside</strong> the range of the observed <em>x</em> values, from the smallest to the largest. If the line fits the data well, an interpolated prediction is reasonably trustworthy, because you are filling in between points you saw.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Extrapolation</strong> means predicting for an <em>x</em> <strong>outside</strong> that range. It is risky, because you are assuming the pattern keeps going in a place where you have no data. It may not.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px;">Two questions to ask every time:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check 1, the range check.</strong> Is <em>x</em> between the smallest and largest <em>x</em> in the data? If yes, interpolation. If no, extrapolation, and you should say so.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Check 2, the sense check.</strong> Is the predicted <em>y</em> even possible in this situation? A negative number of cups, a test score of 140 out of 100, or a negative price means the line has run past where the real situation can follow it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Passing both checks is not a guarantee. Failing either one is a warning you must report.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1 &mdash; PREDICTING INSIDE AND BEYOND THE DATA</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed scenario, not real data.</em> A made-up music student records the hours of practice <em>x</em> in a week and the number of mistakes <em>y</em> in one run-through of a piece. Six weeks of data:</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">Hours <em>x</em></td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">1</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">2</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">3</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">4</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">5</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center;">6</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">Mistakes <em>y</em></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">18</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">15</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">13</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">9</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">8</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center;">4</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Find the line.</strong> The mean of <em>x</em> is 3.5 and the mean of <em>y</em> is 67 &divide; 6 = 11.1667. The least-squares slope is <em>b</em> = &minus;47.5 &divide; 17.5 = <strong>&minus;2.7143</strong>, where 17.5 is the sum of the squared <em>x</em>-deviations and &minus;47.5 is the sum of the products of the <em>x</em>- and <em>y</em>-deviations. The intercept is <em>a</em> = 11.1667 &minus; (&minus;2.7143)(3.5) = <strong>20.667</strong>. So <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 20.667 &minus; 2.7143x</code>. (Excel's trendline will show the same equation; you will check that below.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Say the slope.</strong> Each extra hour of practice goes with about 2.7 fewer mistakes, within these data. The intercept, 20.667, is the predicted number of mistakes at 0 hours, which is just outside the data.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Range check.</strong> The observed hours run from <strong>1 to 6</strong>. That is the interval we may interpolate in.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Predict at <em>x</em> = 3.5 (inside the range).</strong> y&#770; = 20.667 &minus; 2.7143(3.5) = 20.667 &minus; 9.500 = <strong>11.17</strong>. Check 1: 3.5 is between 1 and 6, so this is an <strong>interpolation</strong>. Check 2: 11.17 mistakes is possible. Honest report: &ldquo;about 11 mistakes.&rdquo; (The data are whole numbers, so two decimals would claim too much.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Predict at <em>x</em> = 6.5 (just outside).</strong> y&#770; = 20.667 &minus; 2.7143(6.5) = 20.667 &minus; 17.643 = <strong>3.02</strong>. Check 1: 6.5 is beyond 6, so this is an <strong>extrapolation</strong>. Check 2: 3 mistakes is possible. Honest report: &ldquo;the line suggests about 3 mistakes, but 6.5 hours is beyond the data, so treat this as a rough guess.&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Predict at <em>x</em> = 8 (further out).</strong> y&#770; = 20.667 &minus; 2.7143(8) = 20.667 &minus; 21.714 = <strong>&minus;1.05</strong>. Check 1: 8 is beyond 6, so extrapolation. Check 2: <strong>fails</strong>. A music student cannot make &minus;1.05 mistakes. The line gives an impossible value here.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Predict at <em>x</em> = 12.</strong> y&#770; = 20.667 &minus; 2.7143(12) = <strong>&minus;11.90</strong>. Even more absurd. The line reaches zero when 20.667 &minus; 2.7143<em>x</em> = 0, that is at <em>x</em> = 20.667 &divide; 2.7143 = <strong>7.61</strong> hours. Past about 7.6 hours the line predicts negative mistakes, so it cannot be believed there.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Say it responsibly.</strong> &ldquo;For weeks with 1 to 6 hours of practice, the line predicts about 11 mistakes at 3.5 hours. I will not use it for 8 or 12 hours: the line gives negative mistakes there, so the pattern must change before then. This describes a pattern in six weeks of one student's practice; it does not show that practice is the only reason the mistakes fell.&rdquo;</div>
+<div style="background: #EEF1F8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 10px 16px; margin: 8px 0 0 0; font-size: 17px; color: #1a2340; line-height: 1.6;"><strong>What went wrong at 8 hours?</strong> Nothing in the arithmetic. The line is straight forever; the real situation is not. Mistakes cannot drop below zero, so somewhere past 6 hours the real pattern must bend or flatten. The data never showed us where, because we have no data past 6.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9888;&#65039; FOUR CONSTRUCTED CASES WHERE EXTRAPOLATION GOES WRONG</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px;"><em>All four are made up to show the idea.</em></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A plant that stops growing.</strong> Suppose a made-up seedling is measured each week for weeks 1 to 10, and a line fitted to those weeks is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 6 + 2.5x</code> (centimeters). At week 52 the line says 6 + 2.5(52) = <strong>136 cm</strong>. But suppose this kind of plant stops growing at about 40 cm. Growth levels off, and the line, which is straight, cannot know.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A price that goes negative.</strong> A made-up line for a used item's price falls by a fixed amount each year. Far enough to the right, it predicts a price below zero. Nobody sells something for a negative price. The item's value levels out near zero; the line does not.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A score above 100.</strong> A made-up line predicts a test score from hours studied, with data from 1 to 5 hours. Push the hours high enough and the predicted score passes 100 on a test that cannot score above 100.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A child's height predicting an adult's.</strong> Suppose a made-up line fitted to children aged 2 to 8 is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 75 + 6.2x</code> (centimeters). At age 5 it gives 75 + 6.2(5) = <strong>106 cm</strong>, a sensible interpolation. At age 18 it gives <strong>186.6 cm</strong>, already a stretch. At age 40 it gives 75 + 6.2(40) = <strong>323 cm</strong>, more than 3 meters tall. Growth in childhood does not continue at the same rate for life.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">In each case the straight line was a fine description of the data range and a poor guide beyond it. The pattern changed; the line did not. That is the heart of the danger.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; WORKED EXAMPLE 2 &mdash; REPORTING HONESTLY (RESPONSIBILITY)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed scenario.</em> Using the line from Example 1, a classmate writes a report. Compare two versions.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Careless:</strong> &ldquo;At 12 hours of practice a week you will make &minus;11.9047619 mistakes.&rdquo; Three problems at once: it is an extrapolation reported as fact, the value is impossible, and it has seven decimals the data cannot support.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Responsible:</strong> &ldquo;In the six weeks I recorded, with 1 to 6 hours of practice, more hours went with fewer mistakes: about 2.7 fewer per hour. At 3.5 hours the line predicts about 11 mistakes. The line should not be used beyond 6 hours; it would predict negative mistakes past about 7.6 hours. I only have six weeks from one student, and these data do not show that practice causes the drop.&rdquo;</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Notice the four habits in the responsible version: it states the <strong>range</strong> the data support, it says <strong>about</strong>, it refuses an <strong>impossible</strong> value, and it avoids a <strong>cause</strong> claim. Make those four habits yours.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128201; WHEN EVEN INTERPOLATION CAN BE POOR</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Passing the range check does not make a prediction good. The line is only trustworthy inside the data if a <em>line is the right shape</em> for the pattern. If the points curve, a straight line will sit too high in some places and too low in others, even where you have data. A prediction there can be off by a lot, and the range check will say &ldquo;interpolation&rdquo; anyway.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">You will see this in the tool below, on the <strong>Plant growth (curved)</strong> scenario. Studying this carefully, by looking at how far each point sits from the line, is the main idea of Week 28. For today, just notice the curve and keep in mind that a line can be the wrong shape.</div>
+</div>
+
+<div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+    <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: Fit the Line (Prediction)</div>
+    <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;">Choose a scenario button (<strong>Hours studied</strong>, <strong>Hot chocolate</strong>, <strong>Used car</strong>, <strong>Plant growth (curved)</strong>), pick the <strong>Least-squares line</strong> mode, and type values into the prediction box labeled <strong>x =</strong>. Watch the tag: <strong>Interpolation</strong> or <strong>Extrapolation: beyond the data</strong>, and look for the warning when a value is impossible. For each scenario try three <em>x</em> values: one inside the data, one just beyond the edge, and one far beyond. Record the tag and whether it makes sense. All data are made up.</div>
+    <iframe src="https://optimaondemand.github.io/hsps-widgets/regression-playground.html" width="100%" height="1280" style="border: none; display: block;" title="Fit the Line (Prediction)" allowfullscreen></iframe>
+    <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/regression-playground.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; WHAT THE TOOL SHOULD SHOW (CHECK YOUR WORK)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px;">These values come from the tool's built-in made-up data and its least-squares lines, rounded:</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Hours studied</strong> (hours to quiz score points): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 49.404 + 6.5542x</code>. The data run from 0.5 to 6 hours. At <em>x</em> = 3 the line gives about 69 (interpolation). At <em>x</em> = 7 it gives about 95.3 (extrapolation, still possible). At <em>x</em> = 10 it gives about 114.9, and the tool warns: &ldquo;This prediction does not make sense in context: it gives a score above 100.&rdquo; The score passes 100 once <em>x</em> exceeds about 7.7 hours.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Hot chocolate</strong> (outdoor temperature in &deg;F to cups sold): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 138.998 &minus; 1.4329x</code>. The line reaches zero at about 97&deg;F, and above that the warning is about a negative number of cups.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Used car</strong> (age in years to asking price in $1000s): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 28.334 &minus; 2.0709x</code>. The line reaches zero at about 13.7 years; beyond that the warning is about a negative price.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Plant growth (curved)</strong> (weeks to centimeters): <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 13.875 + 1.3199x</code>. The tool's residual streaks curve, which tells you a straight line is the wrong shape even among the data.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">For each scenario, read the data's range off the graph before you choose your three <em>x</em> values. Then ask: for which of my three did the prediction fail Check 1, and for which did it fail Check 2? Could a prediction fail Check 2 while passing Check 1? (Think about the tags and the warning, and about the plant scenario.)</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A PREDICTION TABLE, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build a prediction table that works for any line. Use the music-practice data from Worked Example 1 now, and reuse the layout in Assignment 27.3 with new data. Type formulas exactly as shown, with commas and no spaces.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 4px;"><strong>Setup.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open a <strong>Blank workbook</strong>. Press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk27_PredictionLesson_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Double-click the tab <em>Sheet1</em>, type <strong>Data</strong>, and press Enter. Click the <strong>+</strong> by the tabs and name the new sheet <strong>Predictions</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 4px;"><strong>Sheet 1: Data, and the trendline equation.</strong></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Hours</code> and in <strong>B1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mistakes</code>. Type the hours 1 to 6 in <strong>A2:A7</strong> and the mistakes 18, 15, 13, 9, 8, 4 in <strong>B2:B7</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Select <strong>A1:B7</strong>. On the <strong>Insert</strong> tab, open the scatter chart button and choose <strong>Scatter</strong> (markers only).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; With the chart selected, click the <strong>+</strong> (Chart Elements) beside it, open the arrow next to <strong>Trendline</strong>, and choose <strong>Linear</strong>. Then right-click the trendline, choose <strong>Format Trendline</strong>, and tick <strong>Display Equation on chart</strong>, as you did in Lesson 27.2.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Read the equation on the chart. It should read about <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y = -2.7143x + 20.667</code>. Write down both numbers; you will type them by hand in a moment. (Menu names differ slightly between desktop Excel and Excel for the web, and the equation may show a few more or fewer digits.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 4px;"><strong>Sheet 2: Predictions.</strong> Click the <em>Predictions</em> tab.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A1</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">a (intercept)</code>; <strong>B1</strong>: type 20.667. <strong>A2</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">b (slope)</code>; <strong>B2</strong>: type -2.7143. These are the two numbers from the chart.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>A3</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Smallest x in data</code>; <strong>B3</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN(Data!A2:A7)</code> (shows 1). <strong>A4</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Largest x in data</code>; <strong>B4</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX(Data!A2:A7)</code> (shows 6). Typing <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Data!</code> tells Excel to look at the Data sheet. Clicking the cells with the mouse while typing the formula works too.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Headings in row 6: <strong>A6</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">x</code>, <strong>B6</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Predicted y</code>, <strong>C6</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Range check</code>, <strong>D6</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Sense check</code>. Select A6:D6 and click <strong>B</strong> (Bold) on the Home tab.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Type the <em>x</em> values to predict in <strong>A7:A10</strong>: 3.5, 6.5, 8, 12.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>B7</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$B$1+$B$2*A7</code>. This is y&#770; = a + b<em>x</em>. The dollar signs lock <strong>B1</strong> and <strong>B2</strong> so that when you fill down they do not move, while <strong>A7</strong> becomes A8, A9, A10. (Pressing <strong>F4</strong> with the cursor on a reference adds the dollar signs.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>C7</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(AND(A7&gt;=$B$3,A7&lt;=$B$4),"inside the data range","beyond the data")</code>. The IF formula checks that <em>x</em> is at least the minimum <strong>and</strong> at most the maximum, and prints the label. Use straight quotation marks.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>D7</strong>: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(B7&gt;=0,"possible","impossible: negative")</code>. This is the sense check; for these data a negative count of mistakes cannot happen.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Select <strong>B7:D7</strong> and drag the fill handle (the small square at the lower-right corner) down to row 10.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Select <strong>B7:B10</strong>, and on the Home tab click <strong>Decrease Decimal</strong> until two decimals show.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Expected values.</strong> Row 7 (3.5): 11.17, inside the data range, possible. Row 8 (6.5): 3.02, beyond the data, possible. Row 9 (8): &minus;1.05, beyond the data, impossible. Row 10 (12): &minus;11.90, beyond the data, impossible.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Where does the line hit zero?</strong> In <strong>A12</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">x where prediction reaches 0</code> and in <strong>B12</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=-B1/B2</code>. Expect 7.61. (Solve a + b<em>x</em> = 0 for <em>x</em>.)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Try it.</strong> Change <strong>B1</strong> to 21 and <strong>B2</strong> to -2.7 and watch every prediction update. Then put the original numbers back. This is why you typed <em>a</em> and <em>b</em> into cells instead of burying them inside every formula.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Honest note.</strong> You type <em>a</em> and <em>b</em> by hand from the chart this week; Week 28 shows Excel functions that compute them. If a cell shows <strong>#NAME?</strong>, check spelling and quotation marks. If the chart shows no equation, check that Display Equation on chart is ticked.</div>
+</div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL FOR THE TABLE, DESMOS FOR THE ARITHMETIC</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel is the star.</strong> Put <em>a</em> and <em>b</em> from the trendline equation in two cells (here B1 and B2). Predicted value: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=$B$1+$B$2*A7</code> filled down. Range flag: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(AND(A7&gt;=$B$3,A7&lt;=$B$4),"inside the data range","beyond the data")</code>, with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MIN(Data!A2:A7)</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=MAX(Data!A2:A7)</code> in B3 and B4. Sense flag: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=IF(B7&gt;=0,"possible","impossible: negative")</code>. Where the line reaches zero: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=-B1/B2</code>. Dollar signs (F4) lock the cells that must not move.<br /><br />
+            <strong>Desmos Scientific</strong> is for plain arithmetic only. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">20.667-2.7143*3.5</code> and read about 11.17. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">75+6.2*40</code> and read 323. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">20.667/2.7143</code> and read about 7.61. Do the Desmos arithmetic first as a check on what Excel gives you.
+        </div>
+    </div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127981; WHERE PEOPLE USE THIS</div>
+        <div style="font-size: 17px; color: #1a2340; line-height: 1.6;">Forecasters of weather, sales, and population all use patterns in past data to say something about the future. Careful ones state a time horizon and a range, not a single confident number, because predictions farther from the data they came from are usually less certain. (This is a general description; every number in this lesson is constructed.) A good habit for any forecast you read: ask how far beyond the observed data it reaches, and whether it admits that.</div>
+    </div>
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; PROMPT &rarr; PREDICT &rarr; VERIFY (THE EXTRAPOLATION TRAP)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool exactly this: <em>&ldquo;A made-up study of students who studied between 1 and 6 hours produced the fitted line predicted score = 40 + 8 &times; hours, where the score is out of 100. What score does this predict for a student who studies 15 hours? Give me the number.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, decide for yourself. Is 15 inside the range 1 to 6? Is the result possible for a test out of 100? Write down what a responsible answer must include.<br />
+            <strong>Verify.</strong> Your verified answer: 40 + 8(15) = <strong>160</strong>. But 15 hours is far <strong>beyond</strong> the data (1 to 6 hours), so it is an <strong>extrapolation</strong> and should be flagged as one, and 160 is <strong>impossible</strong> on a test scored out of 100. (The line reaches 100 at (100 &minus; 40) &divide; 8 = 7.5 hours, still beyond the data.) A responsible answer gives the arithmetic, flags the extrapolation, says that 160 cannot happen, and declines to trust the line there. Now critique the AI. Did it <strong>warn</strong> that 15 is outside the data? Did it report 160 as if it were fine, an <strong>impossible value</strong> given without comment? Did it use <strong>causal words</strong> such as &ldquo;studying 15 hours will cause&rdquo; or &ldquo;will raise your score to&rdquo;? Did it give one number with no &ldquo;about&rdquo; and no range? List each problem you found, and state your own verified answer.
+        </div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 70 minutes, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Inside or Beyond? By Hand</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the line <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">y&#770; = 20.667 &minus; 2.7143x</code> from Worked Example 1 (data from 1 to 6 hours). For each hours value, find y&#770;, label the prediction <strong>interpolation</strong> or <strong>extrapolation</strong>, and say whether it is possible: <em>x</em> = 2.5, 4, 7, 10.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use Desmos for the arithmetic. Write each answer as a sentence that starts with &ldquo;about&rdquo; and has sensible digits.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Which of the four would you report with only a mild caution, and which would you refuse to report? Explain in a sentence each.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><em>x</em> = 2.5: 20.667 &minus; 6.786 = <strong>13.88</strong>, interpolation, possible, report &ldquo;about 14 mistakes.&rdquo; <em>x</em> = 4: 20.667 &minus; 10.857 = <strong>9.81</strong>, interpolation, possible, &ldquo;about 10.&rdquo; <em>x</em> = 7: 20.667 &minus; 19.000 = <strong>1.67</strong>, extrapolation (7 is beyond 6) but possible, so report only with a caution, &ldquo;roughly 2, beyond the data.&rdquo; <em>x</em> = 10: 20.667 &minus; 27.143 = <strong>&minus;6.48</strong>, extrapolation and impossible, refuse to report it.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Prediction Tool: Three x Values per Scenario</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In the embedded tool, choose <strong>Hours studied</strong> and the <strong>Least-squares line</strong> mode. Predict at one <em>x</em> inside the data, one just beyond the edge, and one far beyond. Record the tag and whether each prediction makes sense.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Repeat for <strong>Hot chocolate</strong> and <strong>Used car</strong>. For each, find an <em>x</em> that triggers the impossible-value warning, and compare with the thresholds in the check-your-work box.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open <strong>Plant growth (curved)</strong>. Pick an <em>x</em> inside the data and look at the residual streaks. In two sentences, explain why a prediction inside the range might still be poor here. Do not try to measure the misses yet; that is Week 28.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write one sentence you would be willing to sign: a prediction for one scenario, with the range the data support.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">For Hours studied, <em>x</em> = 3 gives about 69 (Interpolation), <em>x</em> = 7 gives about 95.3 (Extrapolation: beyond the data, still possible), and <em>x</em> = 10 gives about 114.9 with the warning &ldquo;This prediction does not make sense in context: it gives a score above 100.&rdquo; For Hot chocolate the line gives a negative number of cups above about 97&deg;F; for Used car a negative price above about 13.7 years. On Plant growth (curved), the line sits too low at some <em>x</em> values and too high at others, because the points curve, so even an interpolation there can miss by a lot. A good signed sentence names the scenario and the range of <em>x</em>, says &ldquo;about,&rdquo; and makes no cause claim.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel Prediction Table</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Build the Data and Predictions sheets from the click-by-click section with the practice data. Save <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk27_PredictionLesson_YourName.xlsx</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Add a fifth <em>x</em> value in <strong>A11</strong>: 5. Fill your formulas down one more row. Predict first: inside or beyond, possible or impossible?</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Add a heading in <strong>E6</strong>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Report (whole number)</code>, and in <strong>E7</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUND(B7,0)</code> and fill down. Why is rounding to a whole number the honest choice for a count of mistakes?</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Row 11 (<em>x</em> = 5): 20.667 &minus; 13.5715 = <strong>7.10</strong>, inside the data range, possible. (The actual data point at 5 hours was 8, so the line is about a point lower there: a prediction is an estimate, not a copy of the data.) Column E rounds 11.17 to 11, 3.02 to 3, &minus;1.05 to &minus;1, and &minus;11.90 to &minus;12. Rounding to a whole number matches the data's precision, but it does not rescue the impossible rows; rounding does not fix a prediction that fails the sense check.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Find the Mistakes</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Rosa writes: &ldquo;My line is y&#770; = 4 + 2x from data with x from 1 to 5. At x = 20 the line predicts 44, and I am sure it will be exactly 44.&rdquo;</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Dev writes: &ldquo;The line shows that more sleep causes higher scores, so if I sleep 14 hours, my score will be 120.&rdquo; (Scores are out of 100; his data had sleep from 5 to 9 hours.)</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Find and fix every mistake in each statement.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Rosa: 20 is far outside 1 to 5, so it is an extrapolation and the line may not continue; 44 is an estimate, so &ldquo;exactly&rdquo; and &ldquo;sure&rdquo; are wrong. A better sentence: &ldquo;The line suggests about 44, but 20 is far beyond my data, so I would not rely on it.&rdquo; Dev: four mistakes. It claims cause from a pattern; 14 hours is beyond 5 to 9 (extrapolation); 120 is impossible on a test out of 100; and it states one certain value instead of an estimate.</div>
+</details>
+</div></div>
+
+<div style="margin-bottom: 6px;"></div>
+</div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 27.3 &mdash; Prediction Workbook</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Reuse your layout with a new dataset (Wk27_Prediction_YourName.xlsx), add a Notes sheet, answer the Part B numbers, one applied item, and one AI check. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 27.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on interpolation versus extrapolation, computing a prediction, impossible values, and why a prediction does not show cause.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Bivariate Data &amp; Regression</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 27.3 &middot; Prediction: Interpolation vs. Extrapolation</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

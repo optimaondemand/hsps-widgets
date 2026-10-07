@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 35.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER &mdash; drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages &mdash; the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] &mdash; one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] &mdash; one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[&rdquo;"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading&hellip; " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading&hellip; " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 35.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Using numbers to help a community decide</div>
+    </div>
+</div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 35.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Evaluating Data-Based Reports in the Wild</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A news story can quote a real study and still claim more than the study can carry. Six questions, built from everything you have learned this year, show what a report supports and what it does not.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">A reader&rsquo;s checklist for data-based reports: who and how many, how measured, what kind of study, whether the display is honest, whether the numbers carry their uncertainty and size, and who benefits or what is missing; a full critique of a made-up article; honest limits on what a critique proves</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, look for flaws in the made-up article before you read the worked critique, use the Misleading Graph Lab, try the optional Excel check, and complete the three activities at the bottom. The reading, the interactive, and the Excel check take about 35 minutes and the activities about 40 more, so plan on about 75 minutes in all.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> use a six-question reader&rsquo;s checklist (who and how many, how measured, what kind of study, honest display, uncertainty and size, who benefits or what is missing) to evaluate a data-based report.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> name the flaws in a report in the vocabulary of this course (voluntary response, nonresponse, measurement, causal verb from observational data, truncated axis, extrapolation, tiny effect called significant, many tests) and say which verb the study design allows.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> recompute a margin of error or a percent change from a report&rsquo;s own numbers, and tell a result that is statistically significant from one that is big enough to matter.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> write a fair critique: say what the evidence does support, what it does not, and what additional evidence would settle the question.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the optional click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A neighbor forwards you a news story with the message, &ldquo;Look! Science says this app is the secret to better math grades. We should all sign up.&rdquo; The story quotes a researcher, a p-value, and a colorful chart. Every one of those things is a number you now know how to question. Is the story wrong? You cannot tell yet, and that is the point. A careful reader does not shout &ldquo;fake!&rdquo; and does not nod along. She asks six plain questions and lets the answers decide how much to trust the headline.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Over the last two quarters you have collected tools one at a time: honest displays, summaries that fit the shape, relationships that do not prove causes, samples and study designs, margins of error, intervals, and significance. Today you use them <em>all at once</em>, on a single page of text, the way they are used in real life. (Lesson 35.1 gave the formal logic of tests; Lesson 35.3 will ask you to write a complete critique.)</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, is concrete here. Your neighbors will act on what they read: pay for an app, change a schedule, vote for a plan. Reading numbers fairly, and explaining them kindly, protects them from being misled. It also protects them from being talked out of something that might really be good.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every article, researcher, company, town, and number in this lesson is <strong>made up</strong> (constructed) to teach the idea. None of it is real, and no real outlet, person, or study appears anywhere. In the AI Training task you will bring in a real report of your own, but this page never names one.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9989; THE SIX QUESTIONS: A READER&rsquo;S CHECKLIST</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Earlier you learned a five-point checklist for judging a graph (Zero start? Equal gaps? Full range? Sizes true? Labels, source?). Here is a six-point checklist for judging a whole report. Each question points back to a module you have already finished. Keep it beside you while you read.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>1. Who, and how many?</strong> Who is the population, who is in the sample, how were they chosen (random, or by choice and convenience), and how many are there? <em>(Sampling and bias.)</em><br />&#9654; <strong>2. How was it measured?</strong> What exactly was asked or recorded, in what words, by what instrument, and was it self-reported? <em>(Wording, response bias, measurement.)</em><br />&#9654; <strong>3. What kind of study, and so which verbs are allowed?</strong> Survey, observational study, or experiment? Was anything randomly assigned? Does the report stay inside the range of the data? <em>(Study design, association versus causation, extrapolation.)</em><br />&#9654; <strong>4. Is the display honest?</strong> Run the five-point graph checklist: Zero start? Equal gaps? Full range? Sizes true? Labels, source? <em>(Data displays.)</em><br />&#9654; <strong>5. Are the numbers reported with their uncertainty, and is &ldquo;significant&rdquo; paired with the size of the effect?</strong> Is there an <em>n</em>, a margin of error or interval, and the size of the gap in plain units? <em>(Margin of error, intervals, significance.)</em><br />&#9654; <strong>6. Who benefits, and what is missing?</strong> Who paid for it and who gains from the headline? Were many things checked and only one reported? Does the headline match the body? <em>(Source, purpose, many tests.)</em></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Which verbs does the design allow?</strong> This is the question that catches the most errors, so keep this table in mind. A <em>random sample</em> lets you describe the population the sample came from. <em>Observational</em> data (people sort themselves into groups) allow words like &ldquo;is associated with&rdquo; and &ldquo;goes with,&rdquo; but not &ldquo;causes,&rdquo; &ldquo;boosts,&rdquo; &ldquo;raises,&rdquo; or &ldquo;proves.&rdquo; Only <em>random assignment</em> in an experiment, with a gap larger than chance would produce, supports &ldquo;caused&rdquo; (in those subjects). A result is never <em>proved</em> by one study.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A flaw is a question, not a verdict.</strong> Just as an outlier is a question to ask about a data point, a flaw in a report is a question to ask about a claim. It tells you what evidence is missing. It does not tell you the claim is false.</div>
+    </div>
+    <div style="background: #FFFFFF; border: 2px solid #C7922C; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#128240; A MADE-UP NEWS ARTICLE: READ IT AS A SKEPTICAL NEIGHBOR</div>
+        <div style="background: #FDF3E3; border-radius: 6px; padding: 8px 14px; font-size: 15px; color: #1a2340; line-height: 1.55; margin-bottom: 14px;"><strong>Made up.</strong> The Riverbend Courier, Riverbend, the Riverbend Learning Lab, StudyBuddy, and every person and number below are invented for this lesson. Nothing here is real.</div>
+        <div style="font-size: 22px; color: #0E1C42; margin-bottom: 4px;"><strong>App Boosts Riverbend Math Scores, Study Proves</strong></div>
+        <div style="font-size: 14px; color: #666; margin-bottom: 14px;">By Jo Marsh &middot; The Riverbend Courier (made up)</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">RIVERBEND. A new study proves that the StudyBuddy homework app boosts math scores, researchers at the Riverbend Learning Lab said Tuesday.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">Last spring the Lab posted a survey link on the app&rsquo;s home screen. Students who clicked it typed in their weekly app hours and their latest math test score.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">&ldquo;Students who use the app more than three hours a week averaged 80.4 on their last test, against 80.0 for everyone else,&rdquo; said Lab director Dr. Mara Quill. &ldquo;That difference is statistically significant, with a p-value of 0.03.&rdquo; The Courier&rsquo;s chart is shown below.</div>
+        <div style="margin: 0 0 14px 0;"><svg viewBox="0 0 360 230" width="100%" style="max-width: 420px; display: block;" role="img" aria-label="Bar chart from the made-up article. Vertical axis runs from 79.8 to 80.4 and is unlabeled at zero. The bar for students who use the app three hours a week or less is 80.0 and is short; the bar for students who use it more than three hours a week is 80.4 and is three times as tall.">
+  <text x="10" y="18" font-size="13" font-weight="bold" fill="#0E1C42">APP USERS SCORE HIGHER</text>
+  <text x="10" y="34" font-size="11" fill="#555">Average math test score (chart from the made-up article)</text>
+  <line x1="60" y1="50" x2="60" y2="190" stroke="#888" stroke-width="1"/>
+  <line x1="60" y1="190" x2="340" y2="190" stroke="#888" stroke-width="1"/>
+  <line x1="55" y1="190" x2="60" y2="190" stroke="#888"/><text x="50" y="194" font-size="10" fill="#444" text-anchor="end">79.8</text>
+  <line x1="55" y1="150" x2="340" y2="150" stroke="#E4E9F2" stroke-dasharray="2,3"/><text x="50" y="154" font-size="10" fill="#444" text-anchor="end">80.0</text>
+  <line x1="55" y1="110" x2="340" y2="110" stroke="#E4E9F2" stroke-dasharray="2,3"/><text x="50" y="114" font-size="10" fill="#444" text-anchor="end">80.2</text>
+  <line x1="55" y1="70" x2="340" y2="70" stroke="#E4E9F2" stroke-dasharray="2,3"/><text x="50" y="74" font-size="10" fill="#444" text-anchor="end">80.4</text>
+  <rect x="90" y="150" width="80" height="40" fill="#9AA6C4"/>
+  <rect x="220" y="70" width="80" height="120" fill="#C7922C"/>
+  <text x="130" y="144" font-size="12" fill="#0E1C42" text-anchor="middle">80.0</text>
+  <text x="260" y="64" font-size="12" fill="#0E1C42" text-anchor="middle">80.4</text>
+  <text x="130" y="208" font-size="11" fill="#333" text-anchor="middle">Under 3 hrs/week</text>
+  <text x="260" y="208" font-size="11" fill="#333" text-anchor="middle">Over 3 hrs/week</text>
+  <text x="180" y="224" font-size="10" fill="#777" text-anchor="middle">Source: Riverbend Learning Lab (made up)</text>
+</svg></div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">Most respondents reported between zero and eight hours a week. Each extra weekly hour went with about 0.1 more points, Quill said, &ldquo;so a student who used the app 50 hours a week could gain five points.&rdquo; Nearly two in three respondents (64%) said the app helps them &ldquo;stay organized.&rdquo;</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 12px;">&ldquo;The app is clearly the reason Riverbend students are doing better,&rdquo; Quill said. The Lab checked 20 school outcomes, among them reading, science, attendance, and homework completion; Quill called math &ldquo;the standout.&rdquo; Quill said she will ask the school board to promote the app in every Riverbend math class.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The project was paid for by StudyBuddy&rsquo;s maker, which called the results &ldquo;a win for every family.&rdquo;</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; YOUR TURN FIRST: FIND THE FLAWS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Before you read the worked critique, spend three minutes with the article. Use the six questions. Write down every place where the story claims more than the evidence can carry, and next to each one the number (1 to 6) of the question that caught it. Then read on and compare. You will probably find several; the article has been built with <strong>nine</strong>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED CRITIQUE: THE NINE FLAWS, SORTED BY QUESTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Question 1: Who, and how many?</strong> <strong>Flaw 1, voluntary response.</strong> A link on the app&rsquo;s home screen reaches only students who already use the app, and only the ones who chose to click it. That is a self-selected group, not a random sample (Weeks 30 and 31), so nothing here describes Riverbend students in general. <strong>Flaw 2, no <em>n</em>.</strong> The article never says how many students answered, so a reader cannot judge the study at all.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Question 2: How was it measured?</strong> <strong>Flaw 3, self-reported scores.</strong> Students <em>typed in</em> their own test scores. People misremember, round up, and sometimes exaggerate, which is the response and measurement bias you met in Weeks 30 and 31. The Lab did not check the scores against school records, at least not in the article.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Question 3: What kind of study, and which verbs?</strong> <strong>Flaw 4, a causal verb from observational data.</strong> Students chose how much to use the app, so this is observational. &ldquo;Boosts,&rdquo; &ldquo;proves,&rdquo; and &ldquo;clearly the reason&rdquo; are not allowed. Students who use an app more may study more, have more help at home, or be more motivated, and any of those could raise scores by itself (the confounders you met in the regression module). The allowed verb is &ldquo;is associated with,&rdquo; and only for the students who answered. <strong>Flaw 5, extrapolation.</strong> Most respondents reported 0 to 8 hours a week, yet the claim is about 50 hours: 0.1 &times; 50 = 5 points. A straight line fitted to 0&ndash;8 hours says nothing reliable about 50 hours, which is more than a full-time job (the regression module).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Question 4: Is the display honest?</strong> <strong>Flaw 6, a truncated axis.</strong> The chart&rsquo;s vertical axis starts at 79.8, not at 0 (Zero start? No). The two bars are 80.0 and 80.4, but the drawn bars have heights 0.2 and 0.6 above the baseline, so the right bar looks <strong>3 times</strong> as tall. The true ratio is 80.4 &divide; 80.0 = <strong>1.005</strong>, a difference of half of one percent. Same numbers, very different picture.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Question 5: Uncertainty and size?</strong> <strong>Flaw 7, a tiny effect headlined as &ldquo;significant.&rdquo;</strong> The gap is 80.4 &minus; 80.0 = <strong>0.4 points</strong> on a 100-point test. A p-value of 0.03 says the gap is unlikely to come from chance alone <em>if</em> the survey were a fair comparison; it says nothing about size or importance (Week 34). To get a p-value this small from a gap this small, the study must have been huge. Here is a rough check, using an assumed spread of about 10 points in each group (made up). A two-sided p-value of 0.03 corresponds to a z of about 2.17, so the standard error of the gap is about 0.4 &divide; 2.17 = 0.184. With equal groups, SE = &radic;(2 &times; 10&sup2; &divide; <em>n</em>), which gives <em>n</em> &asymp; 5,900 students <strong>in each group</strong>, so roughly 11,800 in all. A sample that large detects almost any gap, however small, and the report hides the size behind the word &ldquo;significant.&rdquo; <strong>Flaw 8, no margin of error or interval.</strong> The 64% &ldquo;stay organized&rdquo; claim comes with no margin. If the Lab&rsquo;s fact sheet says about 11,800 answered, the safe rule gives 1 &divide; &radic;11,800 &asymp; 0.9 points. That looks wonderfully precise, but the margin of error covers only <em>chance</em>. It cannot repair a self-selected sample (Flaw 1). A tight margin on a biased sample is precisely wrong.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Question 6: Who benefits, and what is missing?</strong> <strong>Flaw 9, selective reporting and the funder.</strong> The Lab checked <strong>20</strong> outcomes and reported the standout. If none of the 20 had any real effect, the chance that at least one would look significant at the 5% level is 1 &minus; 0.95<sup>20</sup> = <strong>0.64</strong>, about 64% (Week 34). So &ldquo;math was the standout&rdquo; is exactly what chance alone would often produce. And the work was paid for by the company that sells the app, a fact placed in the last sentence. Funding does not make results false, but it is a reason to want the evidence to be stronger, not weaker.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128209; THE CRITIQUE AT A GLANCE</div>
+<div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 520px;">
+<thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Flaw</th><th style="padding: 8px 10px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Question</th><th style="padding: 8px 10px; font-size: 13px; color: #fff; text-align: left; border: 1px solid #334;">Where it comes from</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Voluntary response</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Sampling and bias</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">No n reported</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">1 and 5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Margin of error and intervals</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Self-reported scores</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">2</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Measurement and response bias</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Causal verb from observational data</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Study design; association versus causation</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Extrapolation to 50 hours</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">3</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Bivariate data and regression</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Truncated axis</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">4</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Data displays</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Tiny effect called &ldquo;significant&rdquo;</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Significance; size of effect</td></tr><tr style="background: #F4F6FA;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">No margin of error; precise but biased</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">5</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Margin of error covers chance only</td></tr><tr style="background: #FFFFFF;"><td style="padding: 8px 10px; font-size: 15px; color: #0e1c42; border: 1px solid #D0D9E8; vertical-align: top;">Many tests, one reported; funder</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">6</td><td style="padding: 8px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Significance by simulation; source</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>What the evidence does support.</strong> A fair summary is: &ldquo;Among the students who chose to answer a survey inside the app, those who reported more than three hours a week of use also reported test scores that averaged 0.4 points higher, a very small difference. The survey cannot say whether the app is the reason, or whether students elsewhere in Riverbend would show the same pattern.&rdquo; That sentence is true to the data. The headline is not.</div>
+    </div>
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself (Optional Refresher): The Misleading Graph Lab</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>One task.</strong> Question 4 is the one place where a picture can mislead you before you read a word. Open the first tab, the cut-off axis, and say what the graph seems to claim before you touch anything. Then use the fix buttons and watch the &ldquo;story meter&rdquo; change. Look at the Courier chart above again and say which of the five distortions it uses. Optionally, visit the other four tabs (the time window, uneven spacing, icon size, and bin width) and finish with the defensive-reading checklist, the same five questions you learned in Module 7. All the organizations and numbers in the lab are made up.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/misleading-graph.html" width="100%" height="900" style="border: none; display: block;" title="The Misleading Graph Lab" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/misleading-graph.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127758; WHERE YOU MIGHT SEE THIS: A FULL-ARTICLE CRITIQUE IN EVERYDAY LIFE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Stories about studies show up in news feeds, school newsletters, product pages, and group chats. Headlines are short, so they tend to squeeze a careful finding into a bold claim. Practices differ from one outlet and one field to another, and many reports are careful, so treat this as a habit of mind, not an accusation.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Read the body before the headline.</strong> The number in the headline is often softer in the paragraphs below it.<br />&#9654; <strong>Look for the sample and the <em>n</em>.</strong> If you cannot find them, say so out loud: &ldquo;the story does not tell me.&rdquo;<br />&#9654; <strong>Match the verb to the design.</strong> &ldquo;Linked to&rdquo; and &ldquo;associated with&rdquo; are honest for observational work; &ldquo;causes&rdquo; needs an experiment.<br />&#9654; <strong>Ask for the size, not just &ldquo;significant.&rdquo;</strong> How big is the gap in the units of the thing measured?<br />&#9654; <strong>Look for what was not reported.</strong> How many things were checked, and who paid?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">This is a service to the people around you. When a neighbor asks, &ldquo;Should we buy this?&rdquo;, you can say what the evidence supports, what it does not, and what would settle it.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9878;&#65039; HONEST LIMITS OF A CRITIQUE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Finding flaws does <strong>not</strong> mean the claim is false. The StudyBuddy app might really help students. It might do nothing. It might help some students and not others. What the critique shows is narrower and more useful: <em>the evidence in this article does not support the claim as it is written</em>. A good reader keeps those two statements apart.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Two habits keep a critique fair. <strong>Say what the study does support</strong> (as in the summary above), and <strong>say what would settle it</strong>. For the app, a better design would randomly assign students to get the app or not, measure scores from school records, report how many students were in each group, and report the size of the gap with an interval. Critique the argument, not the person: a kind, exact sentence helps your neighbor more than a sneer.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL (OPTIONAL): RECOMPUTE A MARGIN OF ERROR FROM A REPORT&rsquo;S COUNTS, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will recompute two margins of error from a report&rsquo;s own counts. Everything here is made up. This is optional practice; you do not upload it.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk35_L2_YourName</code>. Rename the first sheet <strong>Check</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Headings.</strong> In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Claim</code>, in <strong>B1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">p-hat</code>, in <strong>C1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">n</code>, in <strong>D1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Safe rule</code>, and in <strong>E1</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Formula MOE</code>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Row 2, the made-up Courier claim.</strong> In <strong>A2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Stay organized</code>, in <strong>B2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.64</code>, and in <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">11800</code> (the Lab&rsquo;s fact sheet in this made-up story).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; In <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1/SQRT(C2)</code> and in <strong>E2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1.96*SQRT(B2*(1-B2)/C2)</code>. Select D2:E2, then choose <strong>Home &gt; Number</strong> and the <strong>%</strong> button, and add decimals with <strong>Increase Decimal</strong>. You should see about 0.9% and 0.9%.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Row 3, a made-up claim from a different report.</strong> In <strong>A3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Support the plan</code>, in <strong>B3</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.58</code>, and in <strong>C3</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">120</code>. Copy the formulas from D2:E2 down to row 3 (select D2:E2, drag the small square at the corner down one row). You should see about 9.1% and 8.8%.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Compare.</strong> The first margin looks tiny, but the sample was self-selected, so the margin covers chance and nothing else. The second report claimed &ldquo;give or take 2 points.&rdquo; In <strong>F3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUNDUP((1/0.02)^2,0)</code> to see how many replies a 2-point margin needs (2,500). Why is the report&rsquo;s own claim not believable with 120 replies?</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; FULL-TOOLKIT CHECKS: MARGIN OF ERROR, PERCENT CHANGE, AND INTERVALS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> The safe-rule margin is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1/SQRT(n)</code> and the formula margin is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=1.96*SQRT(p*(1-p)/n)</code>. Interval ends are <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=p-moe</code> and <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=p+moe</code>. A percent change is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=(new-old)/old</code> formatted as a percent. A sample size for a target margin <em>m</em> (as a proportion) is <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=ROUNDUP((1/m)^2,0)</code>.<br />
+            <strong>Desmos Scientific</strong> handles plain arithmetic only. For a margin from <em>n</em> = 120, press the <strong>square-root button</strong> on 120 (about 10.95), then enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">1 &divide; 10.95</code> to get about 0.091. For a percent change from 4.0 to 3.1, enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">(3.1 &minus; 4.0) &divide; 4.0</code> and read &minus;0.225, a drop of 22.5%. For the bar-height ratio, enter <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.6 &divide; 0.2</code> (3) and compare it with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">80.4 &divide; 80.0</code> (1.005).
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; CO-AUDIT A REAL ARTICLE WITH AN AI, THEN FIND THE FLAW IT MISSED (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Choose.</strong> This task uses a real article or a real statistic <strong>that you find yourself</strong>, from a news site, a school or community newsletter, or a product page, about a study or a survey (pick one your teacher or parent is comfortable with; this lesson names none). Copy the key paragraphs or write down the main claims and numbers.<br />
+            <strong>Predict.</strong> Before you ask the AI anything, run the six questions yourself and write down every flaw or missing piece you find, with the question number. Include at least one thing you could not judge because the article does not say.<br />
+            <strong>Prompt.</strong> Give the AI the same text and ask: <em>&ldquo;Audit this report. Who was studied and how many? How was it measured? What kind of study is it, and which verbs are allowed? Is any graph or number misleading? Does it report uncertainty and size? Who benefits or what is missing?&rdquo;</em><br />
+            <strong>Verify (the co-audit).</strong> Check every claim the AI makes against the article. Typical AI errors: <strong>(1)</strong> inventing details the article never gave (a sample size, a funder, a quote); <strong>(2)</strong> repeating the article&rsquo;s causal verbs instead of questioning them; <strong>(3)</strong> a long list of generic cautions with no specific numbers; <strong>(4)</strong> declaring the claim &ldquo;false&rdquo; because of a flaw, which is not what a flaw shows. Mark which AI points were right, which were wrong, and which were unsupported. Then do the step AIs rarely do for you: <strong>find one flaw or missing question the AI missed</strong>, and write it with the evidence. <strong>Verdict.</strong> The AI is a second pair of eyes, not a judge; the critique is yours.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 40 minutes, plus the reading, the interactive, and the optional Excel check above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Which Question Caught It?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Each line below is an excerpt from a different made-up report. For each, write the number (1 to 6) of the checklist question that catches the problem, and name the flaw in a few words. Some excerpts could fit two questions; choose the best and say why.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">(a) &ldquo;Visitors to our website were invited to rate the new library hours.&rdquo; (b) &ldquo;Students said how many minutes they read last night.&rdquo; (c) &ldquo;Neighborhoods with more trees have fewer car thefts, so planting trees stops thefts.&rdquo; (d) &ldquo;The bar for 31% is drawn three times as tall as the bar for 29%.&rdquo; (e) &ldquo;The new tutoring program is significant (p = 0.001).&rdquo; The report never gives the size of the gain. (f) &ldquo;The author sells the supplement the study praises.&rdquo;</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. (a) Question 1, voluntary response: only visitors who chose to rate it. (b) Question 2, self-reported measurement: students may misremember minutes. (c) Question 3, a causal verb from observational data; neighborhoods with more trees may differ in income, lighting, and many other ways. (d) Question 4, a truncated axis or a distorted bar: a 2-point gap should not look three times as tall (zero start? no). (e) Question 5, significance without size: a tiny p-value can come with a tiny gain. (f) Question 6, who benefits: the author has a stake in the result. Possible double fits: (c) could also be Question 1 if the neighborhoods were not chosen at random, and (d) is both Question 4 and Question 5, but the best match is the one that names the actual problem.</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Critique a Second Report (Independent Practice)</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">20 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Read the second made-up report below, then critique it with the six questions. Find at least five flaws, name each by flaw and question number, and recompute at least two numbers from the report itself.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><div style="background: #FDF3E3; border-radius: 6px; padding: 12px 16px; margin: 6px 0 8px 0;"><div style="font-size: 14px; color: #8A5A00; margin-bottom: 6px;"><strong>Made up.</strong> The Maple Ridge Gazette, Maple Ridge, the Maple Ridge Wellness Center, and every person and number are invented.</div><div style="font-size: 18px; color: #0E1C42; margin-bottom: 4px;"><strong>Walking Clubs Cut Sick Days in Half, Survey Finds</strong></div><div style="font-size: 16px; color: #1a2340; line-height: 1.6;">MAPLE RIDGE. Joining a walking club cuts sick days in half, according to a survey released by the Maple Ridge Wellness Center. The Center mailed its survey to 400 households chosen at random from the town directory. Only 120 households sent it back. Households with a member in a walking club reported an average of 3.1 sick days last year, against 4.0 for the others. &ldquo;Walking clearly keeps people healthy,&rdquo; said Dr. Ines Calloway, who directs the Center&rsquo;s walking-club program. In the same survey, 58% of replies backed town money for more clubs, &ldquo;give or take 2 points.&rdquo; The Gazette&rsquo;s chart draws one sneaker for each group, scaled so that the members&rsquo; sneaker is 0.775 times as tall and 0.775 times as wide as the other group&rsquo;s. The Center said the survey results &ldquo;confirm&rdquo; its program works. &ldquo;These numbers speak for themselves,&rdquo; Calloway said.</div></div></div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Finish with a fair two-sentence summary of what the report does support, and one sentence naming evidence that would settle the question.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. Flaws (six planted). <strong>Nonresponse</strong> (Question 1): only 120 of 400 households replied, a response rate of 120 &divide; 400 = 30%, and the 70% who did not reply may differ from those who did; the original random mailing does not protect a survey that most people ignore. <strong>Causal verb from observational data</strong> (Question 3): &ldquo;cuts,&rdquo; &ldquo;keeps people healthy,&rdquo; and &ldquo;confirm&rdquo; are not allowed because households chose whether to join; healthier or more active households may be the ones that join (reverse direction and confounding). <strong>Headline does not match the body</strong> (Question 6): &ldquo;in half&rdquo; would mean 2.0 days, but 3.1 against 4.0 is a drop of (4.0 &minus; 3.1) &divide; 4.0 = 0.225, or <strong>22.5%</strong>, not 50%. <strong>Pictograph scaling</strong> (Question 4): scaling the sneaker in both height and width makes its area (0.775)&sup2; = 0.60 of the other, so it looks about 40% smaller when the real gap is 22.5%. <strong>A margin of error that cannot be right</strong> (Question 5): with 120 replies the safe rule gives 1 &divide; &radic;120 &asymp; 9.1 points (the formula at 58% gives about 8.8 points), not 2; a 2-point margin would need about 2,500 replies. And even the right margin would cover chance only, not nonresponse. <strong>Who benefits</strong> (Question 6): the person quoted directs the program being evaluated, and the Center ran the survey. (A seventh point: neither sick-day average comes with an <em>n</em> for each group, an interval, or any significance information.) 2. Fair summary: &ldquo;In the 120 households that replied, those with a walking-club member reported fewer sick days on average (3.1 against 4.0), about 22% fewer. Because only 30% replied and households chose whether to join, the survey cannot show that walking clubs reduce sick days.&rdquo; Settling evidence: randomly assign willing households to join a club or wait, count sick days from records for everyone, and report both group sizes and an interval for the difference.</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Rewrite It Fairly</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Return to the Riverbend Courier article. Write (a) a new headline that the data actually support, and (b) one replacement sentence for &ldquo;The app is clearly the reason Riverbend students are doing better.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In two sentences, say what the Lab should have reported to serve Riverbend families honestly (think about the six questions).</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A classmate says, &ldquo;The article has so many flaws that the app must be useless.&rdquo; Respond in two sentences.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. (a) Example: &ldquo;Survey: App Users Report Slightly Higher Scores, but Study Cannot Say Why.&rdquo; (b) Example: &ldquo;Students who chose to answer the survey and reported more app use also reported test scores about 0.4 points higher on average; the study cannot show whether the app is the reason.&rdquo; 2. Example: the Lab should have said how many students answered and how they were chosen, how scores were checked, the size of the gap with an interval, that 20 outcomes were checked, and that the app&rsquo;s maker paid for the work; a randomized comparison would let it say more. 3. Example: &ldquo;Flaws mean the article does not prove the app works; they do not prove it is useless. The app may help, and a better-designed study could tell us.&rdquo;</div>
+</details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 35.2 &mdash; Spot the Flaw</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded items (matching excerpts to flaws and checklist questions, the allowed verb, and three recomputations) plus a short three-part written critique of a made-up report.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 35.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on reading reports: voluntary response, the allowed verb for a design, percent change, truncated axes, and many tests.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Looking ahead</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Lesson 35.3 is the capstone: you will write a complete seven-part statistical critique of a study report.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 35.2 &middot; Evaluating Data-Based Reports in the Wild</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

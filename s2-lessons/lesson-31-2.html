@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 31.2</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42; ">Q4 &middot; Module 11</div>
+        <div style="font-size: 12px; color: #666;">Sampling &amp; Study Design</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42; ">Lesson 31.2</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; ">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42; ">Responsibility</div>
+        <div style="font-size: 12px; color: #666;">Fair, representative sampling; honest questions</div>
+    </div>
+</div>
+
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 31.2</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Bias: How Samples and Questions Go Wrong</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A survey can fail in two places: in who answers, and in what is asked. Learn to find the failure, name it, and say which way it pushes the result.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">Define bias, sort its sources into &ldquo;who answers&rdquo; and &ldquo;how it is asked,&rdquo; see how a poll can read 75% when the truth is 52%, and rewrite a loaded question so it is fair.</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read the worked example and the question lab, then complete three activities (one in Excel). Plan on about 90 minutes. Every town, school, survey, and number on this page is constructed (made up).</div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>define bias</strong> as a systematic tendency of a method to miss the truth in one direction, and tell it apart from the ordinary wobble of <strong>chance variation</strong>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>identify and explain</strong> the main sources of bias: undercoverage, voluntary response, nonresponse, convenience, response bias, loaded or leading wording, question order, double-barreled questions, and measurement bias.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>judge</strong> a survey question, name what is wrong with it, and <strong>rewrite</strong> it in neutral words.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+<div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> <strong>explain</strong> why a larger sample cannot repair bias, and what random selection does and does not fix.</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 14px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web). You will save a practice workbook as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk31_Bias_YourName.xlsx</code>. You do not upload it for this lesson.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.6;">From earlier this module: the difference between a population and a sample, the seven sampling methods, and what you saw in the sampling simulator (the convenience method stayed off the truth even at n = 60).</div></div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; RESPONSIBILITY: HONEST QUESTIONS, HONEST ANSWERS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A survey is a conversation with a lot of people at once, and the person who writes it holds the power. Choose the wrong people, or phrase the question to nudge them, and the numbers will look scientific while telling a story the people never told. Nobody has to intend this. Most bias is an accident of convenience, hope, or haste.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The virtue here is <strong>responsibility</strong>: to ask fairly, to look for how your own method could mislead, and to say so plainly when it might. A responsible surveyor is the first person to hunt for the flaw in her own survey.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; WHAT BIAS IS (AND WHAT IT IS NOT)</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">In Lesson 31.1 you saw that two honest samples from the same town give different answers. That wobble is <strong>chance variation</strong>. It points in no particular direction: some samples come out a little high, some a little low, and over many samples the misses cancel out.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Bias</strong> is different. A method is <strong>biased</strong> when it tends to miss the truth in the <em>same direction</em> every time you use it. Picture a bathroom scale (made up) that reads 2 kilograms too heavy. Weigh yourself five times and you get five readings that agree closely, and every one is wrong. Repeating the measurement does not help, because the error is built into the method.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"></td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Chance variation</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Bias</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Direction of the miss</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Sometimes high, sometimes low</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Leans the same way each time</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What happens with many repeats</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Misses average out toward the truth</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Average stays off the truth</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Does a bigger sample help?</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Yes: estimates settle down</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">No: a bigger sample just leans harder on the same wrong spot</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Where it comes from</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">The luck of which people were drawn</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">How people were chosen, who answers, how questions are asked, or how things are measured</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A bigger sample cannot repair bias.</strong> You saw it in the sampling simulator: the convenience method stayed off the truth even at n = 60. The 1936 magazine poll is a historical example of the same trap: a very large number of replies, but the way it reached people leaned one way. Size lowers chance error. It does nothing about a lean.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128269; TWO PLACES A SURVEY CAN GO WRONG</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Sort every bias you meet into one of two bins. Ask: <em>is the trouble with who ended up in my results, or with what was asked and how the answer was recorded?</em></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 6px;"><strong>Bin 1: who answers (selection problems).</strong></div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Source</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What goes wrong</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A made-up example</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Undercoverage</strong> (a sampling-frame problem)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">The list you draw from leaves out part of the population, so those people have <em>no chance</em> to be picked, even by a random draw.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A town surveys its residents by drawing from the landline phone book. Households with only mobile phones are never on the list.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Voluntary response</strong> (self-selection)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">People choose themselves. Those with strong feelings answer; the rest stay silent.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An open web poll about a new park: anyone may click, and people may click more than once.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Nonresponse</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">People were chosen fairly but many do not answer, and the ones who do may differ from the ones who do not.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A random mailing of 300 questionnaires: only 60 come back, mostly from people who care about the topic.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Convenience</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Asking whoever is easiest to reach.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Surveying the first 20 students who walk into the gym about how much students exercise.</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 6px;"><strong>Bin 2: how it is asked and recorded (response and measurement problems).</strong></div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Source</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What goes wrong</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A made-up example</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Response bias</strong> (including social desirability)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">People give an answer that is untrue, often because they want to look good or avoid a clash.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Asked aloud in front of classmates, &ldquo;Did you copy anyone&rsquo;s homework this month?&rdquo; Fewer people say yes than did it.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Loaded or leading wording</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Words or phrasing push toward one answer.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Don&rsquo;t you agree that the cafeteria is far too crowded?&rdquo;</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Question order</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">An earlier question changes how people hear a later one.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">See the order example below.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Double-barreled question</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Two questions in one, so a single answer cannot be read.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Should the school start later and add a longer lunch?&rdquo; Someone who wants only one of the two cannot answer honestly.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Measurement bias</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">The tool or procedure itself reads off in one direction.</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A scale that always reads 2 kg too heavy; a thermometer left in the sun.</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Notice a pattern: nearly every item in Bin 1 is about <em>who</em> and nearly every item in Bin 2 is about <em>what</em>. A single survey can fail in both bins at once.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127981; WORKED EXAMPLE &mdash; HOW A CALL-IN POLL READS 75% WHEN THE TRUTH IS 52%</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Constructed data, not real.</em> A made-up town of <strong>1,000</strong> residents is deciding on a skate park. The local radio station asks, &ldquo;Should we build it? Call in and tell us.&rdquo; We know something the station does not. Suppose we could ask everybody. Then <strong>520</strong> of the 1,000 would say yes, so the <strong>true yes share is 520 / 1,000 = 52%</strong>.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now the mechanism. Residents differ in how strongly they feel, and the people who feel strongly are far more likely to pick up the phone. Say the town splits into three groups, with a different chance of calling in:</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Group</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Residents</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Would say yes</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Would say no</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Chance of calling in</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Calls</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Yes calls</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">No calls</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Feel strongly</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">300</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">280</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">20</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">25%</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">75</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">70</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">5</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Feel somewhat</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">200</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">160</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">40</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">10%</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">20</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">16</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">4</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">Feel little</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">500</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">80</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">420</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">5%</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">25</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">4</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;">21</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>Whole town</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>1,000</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>520</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>480</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>12% overall</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>120</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>90</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: center; vertical-align: top;"><strong>30</strong></td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Each call count is the group size times the chance of calling in. For example, the strong group: 300 &times; 0.25 = 75 calls. Of those 300 residents, 280 would say yes, so 280 &times; 0.25 = 70 yes calls and 20 &times; 0.25 = 5 no calls. Do the same for the other two rows and add the columns.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>What the station sees:</strong> 120 calls, 90 of them yes. The station announces 90 / 120 = <strong>75%</strong> in favor.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>What is true:</strong> 520 / 1,000 = <strong>52%</strong> in favor.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>The miss:</strong> 75 &minus; 52 = <strong>23 percentage points</strong> too high, and it leans <em>upward</em> every time the station runs a poll this way.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px; padding-left: 16px;">&#9654; <strong>Where it came from:</strong> the &ldquo;feel strongly&rdquo; group is 30% of the town (300 of 1,000) but <strong>62.5%</strong> of the calls (75 of 120). That group says yes about 93% of the time (70 of 75), so it drags the result up. The &ldquo;feel little&rdquo; group is half the town but only about 21% of the calls (25 of 120), and it mostly says no (21 of 25).</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A repair, with a caution.</strong> Because we know the group sizes in this made-up town, we can undo the imbalance by weighting each group&rsquo;s yes share by its share of the town: 0.30 &times; (70/75) + 0.20 &times; (16/20) + 0.50 &times; (4/25) = 0.28 + 0.16 + 0.08 = 0.52. That is 52%, the truth. But a real surveyor rarely knows each caller&rsquo;s group, or the group sizes, so this is a thinking tool, not a rescue for a self-selected poll. The honest report is the narrow one: <em>&ldquo;Of the 120 people who called, 75% said yes. We cannot say what the town thinks.&rdquo;</em></div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; THE QUESTION LAB: SIX PAIRS, LOADED AND NEUTRAL</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>All questions below are constructed examples.</em> Read each loaded version and decide what is wrong before you read across to the right-hand column. Then check how the neutral version fixes it.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">#</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Loaded version</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Neutral version</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">What is wrong with the loaded one</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">1</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Don&rsquo;t you agree that our crowded cafeteria needs to be fixed?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;How satisfied are you with the seating space in the cafeteria? (Very satisfied, Satisfied, Neutral, Dissatisfied, Very dissatisfied)&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Leading (begins &ldquo;Don&rsquo;t you agree&rdquo;) and loaded (&ldquo;crowded,&rdquo; &ldquo;needs to be fixed&rdquo; assume the answer)</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">2</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Do you support the wasteful new bus route?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Do you support or oppose adding the new bus route?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Loaded word (&ldquo;wasteful&rdquo;)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">3</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Should the town build a new library and cut the park budget?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Two questions: &ldquo;Should the town build a new library?&rdquo; and, separately, &ldquo;Should the town reduce the park budget?&rdquo; (each: support, oppose, no opinion)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Double-barreled</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">4</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Do you join the responsible majority who recycle at home?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;At home, how often do you recycle? (Always, Usually, Sometimes, Never)&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Loaded and pressuring: it makes one answer sound good and the other shameful (invites social desirability)</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">5</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Experts say students get too much homework. Do you think you get too much?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;Compared with what you think is right, do you get too little, about the right amount, or too much homework?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Leading: it opens with an authority that points to one answer (and the unnamed &ldquo;experts&rdquo; cannot be checked)</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">6</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;You finish your homework every night, right?&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">&ldquo;In the past 7 nights, on how many nights did you finish all your homework? (0 to 7)&rdquo;</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Leading (&ldquo;right?&rdquo;) and invites a flattering answer; the neutral version asks for a count, which is easier to answer truthfully</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>What the neutral versions have in common.</strong> They ask <em>one thing</em> at a time. They use plain words with no judgment built in. They offer answer choices that cover every honest answer, in balanced order (satisfied and dissatisfied, support and oppose). And when the topic invites a flattering answer, they ask about something specific the person can report, not about who they are.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A quick test.</strong> Cover the question and read only the answer choices. Could a reader tell which answer the writer hopes for? If yes, rewrite.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128260; QUESTION ORDER: AN EXAMPLE TO IMAGINE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>This is a hypothetical, not a report of a real study.</em> Imagine a made-up school survey with two questions. Version X asks: &ldquo;(1) Do you think the school has too much homework? (2) How would you rate the school overall?&rdquo; Version Y asks the same two questions in the opposite order.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Now imagine students who answer Version X. By the time they reach the overall rating, they have just been thinking about homework, so a complaint about homework may color their rating. Students answering Version Y rate the school first, with homework not yet on their minds. If the two versions gave different overall ratings, nothing about the school changed. Only the order did.</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">We cannot say how large such an effect would be in any real survey, and it will vary from survey to survey. The responsible habit is to <strong>keep general questions before specific ones</strong> when possible, to give every respondent the same order, and, when the order might matter, to use two versions and compare them.</div>
+</div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; WHAT RANDOM SELECTION FIXES, AND WHAT IT DOES NOT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A random method protects you from <em>the chooser&rsquo;s</em> bias, and from the bias of people choosing themselves. It is a powerful tool, but it is not a cure for everything. Read the table and notice how many problems remain.</div>
+<div style="overflow-x: auto; margin: 6px 0 14px 0;"><table style="border-collapse: collapse; ">
+<tr style="background: #0E1C42;"><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Problem</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Does a random draw fix it?</td><td style="padding: 7px 12px; font-size: 16px; color: #fff; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Why</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Convenience or judgment choosing (the picker leans toward the easy or the familiar)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Yes</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Chance does the choosing, so no one&rsquo;s habits steer who is picked.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Voluntary response (people select themselves)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>Yes</strong>, if you choose whom to ask instead of letting people opt in</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Everyone on your list has a chance, not just the eager.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Undercoverage (the list is incomplete)</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>No</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">You can only draw from the list you have. A fair draw from a list with missing people still misses them.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Nonresponse</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>No</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Chosen people can still say nothing, and those who stay silent may differ.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Loaded wording, order, double-barreled questions</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>No</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">The question steers the answer even when the sample is perfect.</td></tr>
+<tr style="background: #F4F6FA;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Response bias and measurement bias</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>No</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">People still misreport, and a scale that reads high still reads high.</td></tr>
+<tr style="background: #FFFFFF;"><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">Chance variation</td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;"><strong>No, but it can be measured</strong></td><td style="padding: 7px 12px; font-size: 16px; color: #1a2340; border: 1px solid #D0D9E8; text-align: left; vertical-align: top;">A random sample still wobbles from sample to sample; chance lets us say how much.</td></tr>
+</table></div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The lesson is not &ldquo;randomize and relax.&rdquo; It is: <strong>randomize to protect against the chooser, then hunt for every other lean by hand.</strong> A well-run survey chases nonresponse (follow-up calls, short questions), checks the list against the population, and tests the questions before using them.</div>
+</div>
+
+    <div style="background: #FDF3E3; border-left: 5px solid #C7922C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 8px;">&#127963;&#65039; WHERE PEOPLE USE THIS &middot; PUSH POLLS AND SELF-SELECTED ONLINE POLLS</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">Two things you may meet in everyday life are worth knowing by name. A <strong>push poll</strong> is a call dressed up as a survey whose real aim is to spread a message. Its &ldquo;questions&rdquo; are loaded on purpose, such as a question that states a damaging claim about someone as if it were fact and then asks how the listener feels. Many people who study polling treat push polls as persuasion, not measurement. A <strong>self-selected online poll</strong> is one where anyone who sees the link may click, possibly more than once, and where the people most motivated to click are the ones who answer. Neither one is a reliable estimate of what a population thinks. When you meet a poll, ask the questions from this lesson: who was asked, who answered, how was it asked, and could anyone vote more than once? Details differ from poll to poll, so look up how a survey was done before relying on its numbers.</div>
+    </div>
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; EXCEL: A QUICK WEIGHTED CHECK ON A SELF-SELECTED POLL</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+<strong>Set up the table.</strong> Put these headings in row 1: A <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Group</code>, B <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Residents</code>, C <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Would say yes</code>, D <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Replies</code>, E <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Yes replies</code>. Type one group per row in rows 2 to 4, and totals with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:B4)</code> in row 5 (copy across to C, D, E).<br /><br /><strong>Reply share by group.</strong> In F2 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=D2/$D$5</code> and fill down. This is each group&rsquo;s share of the <em>replies</em>. Compare it with its share of the <em>town</em>, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2/$B$5</code>. A group that has a much bigger share of replies than of the town is over-represented.<br /><br /><strong>Respondent-only percent versus whole-population percent.</strong> In one cell type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E5/D5</code> (yes among those who replied) and, in the next cell, <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C5/B5</code> (yes in the whole population). Format both as percentages. The difference between them is the bias.<br /><br /><strong>Weighted check.</strong> In H2 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E2/D2</code> and fill down to H4 (each group&rsquo;s yes share among its repliers). Then in a cell type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUMPRODUCT(B2:B4,H2:H4)/B5</code>. It multiplies each group&rsquo;s yes share by the number of residents in the group and divides by the town total. This works only when you know the group sizes, so use it to understand a bias, not to excuse a bad poll.<br /><br /><strong>Desmos Scientific</strong> is for plain arithmetic only. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">90/120</code> to get 0.75, then multiply by 100 for 75%. Type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">520/1000</code> for 0.52. The weighted check is plain arithmetic too: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">0.3*70/75+0.2*16/20+0.5*4/25</code> gives 0.52.
+        </div>
+    </div>
+
+
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+<div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI FOR AN UNBIASED QUESTION, THEN BIAS-HUNT IT (PROMPT &rarr; PREDICT &rarr; VERIFY)</div>
+<div style="font-size: 17px; color: #0E1C42; line-height: 1.65;"><strong>Predict first.</strong> Before you open any AI tool, write your own neutral survey question about this topic: <em>whether students should start the school day 30 minutes later.</em> Keep it to one sentence with answer choices.<br /><strong>Prompt.</strong> Now give an AI tool exactly this: <em>&ldquo;Write one unbiased survey question, with answer choices, asking high-school students how they feel about starting the school day 30 minutes later.&rdquo;</em><br /><strong>Verify with the five-flag bias hunt.</strong> Check the AI&rsquo;s question against all five flags and record your result in your notebook:<br />
+&#9654; <strong>Flag 1, loaded words:</strong> any word that carries praise or blame (&ldquo;much-needed,&rdquo; &ldquo;disruptive&rdquo;)?<br />
+&#9654; <strong>Flag 2, leading frame:</strong> does the phrasing signal which answer is wanted (&ldquo;Wouldn&rsquo;t you agree&hellip;&rdquo;, a reason offered for only one side)?<br />
+&#9654; <strong>Flag 3, double-barreled:</strong> is more than one question packed into one?<br />
+&#9654; <strong>Flag 4, unbalanced choices:</strong> are the answer choices lopsided, missing a middle or a &ldquo;no opinion,&rdquo; or not covering every honest answer?<br />
+&#9654; <strong>Flag 5, pressure to look good:</strong> does the question make one answer feel like the admirable one?<br />
+Record a table with one row per flag: <em>tripped or clear</em>, and the exact words that tripped it. Then report: how many flags did the AI&rsquo;s question trip, what did you change, and did your own question trip any flag? Try the prompt a second time with different wording, and compare. An AI may sound confident while quietly adding a persuasive reason or a lopsided scale, so treat its first draft as a draft.<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Hints for the bias hunt</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Things an AI sometimes does: (1) adds a justification such as &ldquo;to improve sleep and learning&rdquo; that supports one side; (2) combines two ideas, such as &ldquo;later and more flexible&rdquo;; (3) offers choices like &ldquo;Strongly support, Support, Neutral&rdquo; with nothing on the oppose side; (4) says &ldquo;unbiased&rdquo; in its own description without checking itself. A clean version might be: &ldquo;How do you feel about starting the school day 30 minutes later than it does now? (Strongly support, Support, Neither support nor oppose, Oppose, Strongly oppose)&rdquo; Your result may differ, and a clean first try is possible. If the AI&rsquo;s question trips no flags, say so and say how you checked.</div>
+</details>
+</div>
+    </div>
+
+<div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+<div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#9889; TODAY'S ACTIVITIES (about 90 minutes, including the reading)</div>
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Name the Bias, Name the Direction</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For each made-up situation below, write (a) the bias source from the two bins and (b) which way the result is likely to lean, with one reason.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> A local radio station asks listeners to call in about a new stadium. <strong>(b)</strong> A town surveys its residents by drawing 200 names at random from the list of households with a home-delivery newspaper subscription. <strong>(c)</strong> A school emails 200 randomly chosen students a survey about sleep, and 30 reply. <strong>(d)</strong> A teacher asks the class aloud and by raised hands, &ldquo;Who has copied homework this month?&rdquo; <strong>(e)</strong> An interviewer outside the gym asks 40 people, &ldquo;Do you exercise regularly?&rdquo; <strong>(f)</strong> A form asks, &ldquo;Do you support better, safer bike lanes?&rdquo;</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">For situation (c), say what you would need to know about the 170 students who did not reply before you could trust the 30.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>(a)</strong> Voluntary response (Bin 1). It over-represents people with strong feelings, so the lean is toward the side with the more motivated callers. We cannot know which side that is without more information. <strong>(b)</strong> Undercoverage (Bin 1). Households without a subscription have no chance of being picked; if subscribers differ from non-subscribers, the results lean toward subscribers&rsquo; views. <strong>(c)</strong> Nonresponse (Bin 1). Only 15% replied (30 of 200); students who feel strongly about sleep may be the ones who answer. Check: do the repliers look like the full 200 in grade, and what do we know about the others? <strong>(d)</strong> Response bias, social desirability (Bin 2). Fewer people will admit it in front of others, so the count of &ldquo;yes&rdquo; is likely too low. <strong>(e)</strong> Convenience (Bin 1), and probably response bias too. People outside a gym probably exercise more than most, so the share is likely too high. <strong>(f)</strong> Double-barreled (&ldquo;better&rdquo; and &ldquo;safer&rdquo; are two ideas) and loaded (the adjectives praise the lanes). It leans toward yes.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Rewrite the Question</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">25 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Each question below is constructed and has a flaw. Name the flaw, then rewrite it neutrally with balanced answer choices.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>(a)</strong> &ldquo;Do you agree that our dangerous parking lot should be repaired immediately?&rdquo; <strong>(b)</strong> &ldquo;How often do you stay up too late and skip breakfast?&rdquo; <strong>(c)</strong> &ldquo;Most students love the new schedule. Do you like it too?&rdquo; <strong>(d)</strong> &ldquo;Would you volunteer for the helpful, worthwhile food drive?&rdquo;</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Pick one of your rewrites and run it through the five flags from the AI Training box. Did it trip any? If it did, fix it again.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;"><strong>(a)</strong> Leading and loaded (&ldquo;dangerous,&rdquo; &ldquo;immediately&rdquo;). Rewrite: &ldquo;How would you rate the condition of the school parking lot? (Very good, Good, Fair, Poor, Very poor)&rdquo; <strong>(b)</strong> Double-barreled (late nights and skipped breakfast) and loaded (&ldquo;too late&rdquo;). Rewrite as two questions: &ldquo;On how many school nights last week did you go to bed after 11 pm? (0 to 5)&rdquo; and &ldquo;On how many school days last week did you eat breakfast? (0 to 5)&rdquo; <strong>(c)</strong> Leading: it announces that most students love it. Rewrite: &ldquo;How do you feel about the new schedule? (Like it a lot, Like it somewhat, Neither like nor dislike, Dislike it somewhat, Dislike it a lot)&rdquo; <strong>(d)</strong> Loaded (&ldquo;helpful, worthwhile&rdquo;) and pressuring. Rewrite: &ldquo;Would you be willing to volunteer for the food drive? (Yes, Maybe, No)&rdquo; Your wording will differ; what matters is that nothing in it points to an answer.</div>
+</details>
+</div></div>
+
+<div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+<div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+<div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+<div style="font-size: 18px; color: #0e1c42; flex: 1;">Excel: Reply Shares and the Weighted Check</div>
+<span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">40 min</span>
+</div>
+<div style="padding: 16px 18px;">
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Open a <strong>Blank workbook</strong>, press <strong>Ctrl+S</strong>, name it <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk31_Bias_YourName.xlsx</code>, and save it in your OneDrive <em>Optima &rarr; Math</em> folder.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">The data are constructed. A made-up community center has 500 members, and it posts a link asking, &ldquo;Should we extend evening hours?&rdquo; Type these headings in A1:E1: <strong>Group, Members, Would say yes, Replies, Yes replies.</strong> Row 2: Daily users, 100, 70, 60, 42. Row 3: Occasional users, 150, 90, 30, 18. Row 4: Rare users, 250, 50, 20, 4.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In A5 type <strong>Total</strong>. In B5 use <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUM(B2:B4)</code>, then copy it across to C5, D5, and E5. Expect 500, 210, 110, and 64.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In F1 type <strong>Reply share</strong> and in F2 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=D2/$D$5</code>, then fill down to F4. In G1 type <strong>Member share</strong> and in G2 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=B2/$B$5</code>, then fill down. Format F and G as percentages. Which group has a far bigger share of the replies than of the membership?</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In A7 type <strong>Respondents only</strong> and in B7 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E5/D5</code>. In A8 type <strong>Whole membership</strong> and in B8 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=C5/B5</code>. Format both as percentages with one decimal place. In A9 type <strong>Gap (points)</strong> and in B9 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=(B7-B8)*100</code>.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">6</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">In H1 type <strong>Yes share of replies</strong> and in H2 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=E2/D2</code>, then fill down to H4. In A11 type <strong>Weighted check</strong> and in B11 type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=SUMPRODUCT(B2:B4,H2:H4)/B5</code>. Compare it with B8.</div></div>
+<div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">7</span>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Write three sentences: which group dominates the replies, which way the respondent-only percent leans compared with the truth, and why the weighted check can only be done when you know something a real survey often does not.</div></div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">Section checks: row 5 totals are 500, 210, 110, 64. Reply shares: Daily users 60/110 = 54.5%, Occasional 30/110 = 27.3%, Rare 20/110 = 18.2%. Member shares: 20%, 30%, 50%. B7 = 64/110 = 58.2%. B8 = 210/500 = 42.0%. B9 = 16.2 points. H2:H4 = 70%, 60%, 20%. B11 = 42.0%, matching B8. <strong>Written answer, sample:</strong> Daily users are only 20% of the members but 54.5% of the replies, so the respondent-only percent (58.2%) leans well above the true 42.0%, because the people most attached to the center are the ones who replied. The weighted check works only if you know each group&rsquo;s size and each person&rsquo;s group, which a real self-selected poll usually does not tell you. If a cell shows #NAME?, check you typed the equals sign; if B11 shows an error, check that the ranges B2:B4 and H2:H4 are the same length.</div>
+</details>
+</div></div>
+
+<div style="margin-bottom: 6px;"></div>
+</div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU'LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 31.2 &mdash; Spot the Bias, Fix the Question</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded questions (naming the bias, a reply-percent calculation) and one short written item: name the bias, say which way it pushes the result, and propose a fix. Submit in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 31.2</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on bias versus chance, sources of bias, why a larger sample does not fix bias, rewriting a question, and what random selection does not fix.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Sampling &amp; Study Design</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 31.2 &middot; Bias: How Samples and Questions Go Wrong</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>

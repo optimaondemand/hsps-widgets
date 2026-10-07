@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 34.3</title>
+<style>html, body { margin: 0; padding: 0; background: #ffffff; }</style>
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════════════
+     OPTIMA READ-ALOUD PLAYER — drop-in snippet for GitHub-hosted lesson pages
+     ═══════════════════════════════════════════════════════════════════════
+
+     WHAT IT DOES
+       Adds a "Listen" player that reads the page aloud using the browser's
+       built-in Web Speech API (no accounts, no API keys, works offline once
+       the page is loaded). The paragraph currently being read is highlighted
+       in pale gold and scrolled into view. Works inside a Canvas iframe.
+
+     WHERE TO PASTE
+       Into any GitHub-hosted Optima lesson page (the full-HTML-document kind,
+       NOT Canvas RCE pages — the RCE strips <script>). Paste this whole block
+       just inside the body wrapper, right BEFORE the first content card.
+
+     OPTIONS
+       • Add  data-ra-skip  to any element the reader should NOT read
+         (e.g. the local preview banner, decorative text, answer keys).
+       • Add  data-readaloud-root  to one container to limit reading to it.
+         Default scope: the .canvas-frame wrapper, else <body>.
+
+     NOTES
+       • The player never reads itself, <button> labels, or hidden elements
+         (so unrevealed widget feedback stays unread until shown).
+       • If the browser has no speech voices, the player disables itself
+         with a friendly message instead of breaking the page.
+-->
+<div id="optima-read-aloud">
+<style>
+    #optima-read-aloud { background: linear-gradient(135deg, #E8F6FB 0%, #F4F9FC 100%); border: 1px solid #C5DCE5; border-left: 5px solid #2196D0; border-radius: 8px; padding: 14px 18px; margin: 0 0 20px 0; }
+    #optima-read-aloud .ora-kicker { font-size: 11px; color: #1B6A94; letter-spacing: 0.4px; margin-bottom: 10px; }
+    #optima-read-aloud .ora-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    #optima-read-aloud .ora-controls button { border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+    #ora-play { background: #0E1C42; color: #FFFFFF; border: 1.5px solid #0E1C42; }
+    #ora-play:hover:enabled { background: #1B2D5E; }
+    #ora-play:disabled { background: #D0D9E8; border-color: #D0D9E8; color: #6b7a99; cursor: default; }
+    #ora-stop { background: #FFFFFF; color: #0E1C42; border: 1.5px solid #D0D9E8; }
+    #ora-stop:hover:enabled { background: #F4F6FA; border-color: #55C8E8; }
+    #ora-stop:disabled { color: #999; border-color: #E4E9F2; cursor: default; }
+    #optima-read-aloud .ora-speed { font-size: 12px; color: #6b7a99; display: flex; align-items: center; gap: 6px; }
+    #ora-rate { font-family: inherit; font-size: 13px; color: #0E1C42; border: 1.5px solid #D0D9E8; border-radius: 6px; padding: 5px 8px; background: #FFFFFF; }
+    #ora-status { font-size: 12px; color: #666; }
+    .ora-highlight { background: #FDF3E3 !important; box-shadow: inset 4px 0 0 #C7922C; border-radius: 4px; transition: background 0.2s; }
+</style>
+    <div class="ora-kicker">&#128266; READ ALOUD &mdash; LISTEN TO THIS PAGE</div>
+    <div class="ora-controls">
+        <button id="ora-play" type="button" aria-label="Listen to this page">&#9654;&#65039; Listen</button>
+        <button id="ora-stop" type="button" aria-label="Stop reading" disabled>&#9632; Stop</button>
+        <label class="ora-speed">Speed
+            <select id="ora-rate" aria-label="Reading speed">
+                <option value="0.8">Slower</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.25">Faster</option>
+            </select>
+        </label>
+        <span id="ora-status" role="status" aria-live="polite"></span>
+    </div>
+<script>
+(function () {
+    "use strict";
+    var playBtn  = document.getElementById("ora-play");
+    var stopBtn  = document.getElementById("ora-stop");
+    var rateSel  = document.getElementById("ora-rate");
+    var statusEl = document.getElementById("ora-status");
+
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+        playBtn.disabled = true;
+        rateSel.disabled = true;
+        statusEl.textContent = "Read-aloud is not supported in this browser.";
+        return;
+    }
+
+    var LABEL_PLAY   = "▶️ Listen";
+    var LABEL_PAUSE  = "⏸️ Pause";
+    var LABEL_RESUME = "▶️ Resume";
+    var BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dt, dd, figcaption, div";
+    var SKIP_SEL  = "#optima-read-aloud, [data-ra-skip], button, script, style, select, noscript, iframe";
+
+    var queue = [];        // [{ el, text }] — one entry per sentence
+    var idx = 0;
+    var playing = false, paused = false, stopping = false;
+    var currentBlock = null;
+    var currentUtterance = null;  // held to dodge a Chrome garbage-collection bug
+
+    var voices = [];
+    function loadVoices() { voices = window.speechSynthesis.getVoices(); }
+    loadVoices();
+    if ("onvoiceschanged" in window.speechSynthesis) {
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    function pickVoice() {
+        if (!voices.length) loadVoices();
+        var en = voices.filter(function (v) { return /^en/i.test(v.lang); });
+        return en.filter(function (v) { return /natural/i.test(v.name); })[0]
+            || en.filter(function (v) { return /google us english/i.test(v.name); })[0]
+            || en.filter(function (v) { return v.default; })[0]
+            || en[0] || null;
+    }
+
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+
+    // Walk text nodes, attach each to its nearest block ancestor, split into sentences.
+    function collectQueue() {
+        var root = document.querySelector("[data-readaloud-root]")
+                || document.querySelector(".canvas-frame")
+                || document.body;
+        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+        var items = [];   // [{ el, text }] — one entry per block, in reading order
+        var node;
+        while ((node = walker.nextNode())) {
+            if (!/\S/.test(node.textContent)) continue;
+            var el = node.parentElement;
+            if (!el || el.closest(SKIP_SEL)) continue;
+            if (!isVisible(el)) continue;
+            var block = el.closest(BLOCK_SEL) || root;
+            var last = items[items.length - 1];
+            if (last && last.el === block) last.text += " " + node.textContent;
+            else items.push({ el: block, text: node.textContent });
+        }
+        var q = [];
+        items.forEach(function (item) {
+            var clean = item.text.replace(/\s+/g, " ").trim();
+            if (!clean) return;
+            var sentences = clean.match(/[^.!?]+[.!?]+[”"')\]]*\s*|[^.!?]+$/g) || [clean];
+            sentences.forEach(function (s) {
+                s = s.trim();
+                if (s) q.push({ el: item.el, text: s });
+            });
+        });
+        return q;
+    }
+
+    function highlight(el) {
+        if (el === currentBlock) return;
+        clearHighlight();
+        currentBlock = el;
+        if (el && el !== document.body) {
+            el.classList.add("ora-highlight");
+            try { el.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) {}
+        }
+    }
+    function clearHighlight() {
+        if (currentBlock) currentBlock.classList.remove("ora-highlight");
+        currentBlock = null;
+    }
+
+    function speakNext() {
+        if (idx >= queue.length) { finish("Finished reading this page."); return; }
+        var item = queue[idx];
+        highlight(item.el);
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.rate = parseFloat(rateSel.value) || 1;
+        var v = pickVoice();
+        if (v) u.voice = v;
+        u.onend = function () {
+            if (stopping) return;
+            idx++;
+            speakNext();
+        };
+        u.onerror = function (e) {
+            if (stopping || e.error === "canceled" || e.error === "interrupted") return;
+            idx++;
+            speakNext();
+        };
+        currentUtterance = u;
+        window.speechSynthesis.speak(u);
+        statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+    }
+
+    function finish(message) {
+        playing = false;
+        paused = false;
+        clearHighlight();
+        playBtn.textContent = LABEL_PLAY;
+        stopBtn.disabled = true;
+        statusEl.textContent = message || "";
+        currentUtterance = null;
+    }
+
+    playBtn.addEventListener("click", function () {
+        if (playing && !paused) {
+            window.speechSynthesis.pause();
+            paused = true;
+            playBtn.textContent = LABEL_RESUME;
+            statusEl.textContent = "Paused";
+            return;
+        }
+        if (playing && paused) {
+            window.speechSynthesis.resume();
+            paused = false;
+            playBtn.textContent = LABEL_PAUSE;
+            statusEl.textContent = "Reading… " + (idx + 1) + " / " + queue.length;
+            return;
+        }
+        queue = collectQueue();
+        if (!queue.length) { statusEl.textContent = "Nothing to read on this page."; return; }
+        idx = 0;
+        stopping = false;
+        playing = true;
+        paused = false;
+        window.speechSynthesis.cancel();
+        playBtn.textContent = LABEL_PAUSE;
+        stopBtn.disabled = false;
+        speakNext();
+    });
+
+    stopBtn.addEventListener("click", function () {
+        stopping = true;
+        window.speechSynthesis.cancel();
+        finish("");
+    });
+
+    // Changing speed mid-read restarts the current sentence at the new rate.
+    rateSel.addEventListener("change", function () {
+        if (!playing || paused) return;
+        stopping = true;
+        window.speechSynthesis.cancel();
+        setTimeout(function () { stopping = false; speakNext(); }, 60);
+    });
+
+    window.addEventListener("pagehide", function () { window.speechSynthesis.cancel(); });
+})();
+</script>
+</div>
+<!-- ═══ END OPTIMA READ-ALOUD PLAYER ═══ -->
+<!-- ===== HEADER ===== -->
+<div style="background: #0E1C42; border-bottom: 5px solid #55C8E8; padding: 22px 34px;">
+    <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"><img src="https://raw.githubusercontent.com/optimaondemand/optima-assets/eeb0b335630058906d52f478028361d352253a93/images/Optima%20Final%20Circle%20-%20Owl%20Only.png" alt="Optima Academy" style="width: 50px; height: 40px; object-fit: contain;" /></div>
+        <div>
+            <div style="font-size: 28px; color: #ffffff; line-height: 1.2;">Optima Academy Online</div>
+            <div style="font-size: 12px; color: #55c8e8;">An Education Experience Company</div>
+        </div>
+    </div>
+    <div style="font-size: 36px; color: #ffffff; margin-bottom: 6px;">PROBABILITY &amp; STATISTICS HONORS</div>
+</div>
+<!-- ===== METADATA STRIP ===== -->
+<div style="background: #FFFFFF; border-bottom: 2px solid #D0D9E8; display: flex; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Quarter / Module</div>
+        <div style="font-size: 17px; color: #0e1c42;">Q4 &middot; Module 12</div>
+        <div style="font-size: 12px; color: #666;">Inference &amp; Statistical Reasoning</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Lesson</div>
+        <div style="font-size: 17px; color: #0e1c42;">Lesson 34.3</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px; border-right: 1px solid #D0D9E8;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Reading</div>
+        <div style="font-size: 17px; color: #0e1c42; font-style: italic;">Embedded in this lesson</div>
+        <div style="font-size: 12px; color: #666;">Everything you need is on this page</div>
+    </div>
+    <div style="flex: 1; min-width: 140px; padding: 12px 16px;">
+        <div style="font-size: 11px; color: #6b7a99; margin-bottom: 4px;">Module Theme</div>
+        <div style="font-size: 17px; color: #0e1c42;">Service</div>
+        <div style="font-size: 12px; color: #666;">Using numbers to help a community decide</div>
+    </div></div>
+<!-- ===== BODY WRAPPER ===== -->
+<div style="padding: 24px 34px;">
+
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-radius: 7px; padding: 18px 22px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 6px;">Lesson 34.3</div>
+        <div style="font-size: 22px; color: #0e1c42; margin-bottom: 4px;">Is the Difference Real? Significance by Simulation</div>
+        <div style="font-size: 16px; color: #666;">Lesson</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #C7922C; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128214; TODAY'S FOCUS</div>
+        <div style="font-size: 20px; color: #0e1c42; font-style: italic; margin-bottom: 2px;">A result is called &ldquo;real&rdquo; only after you have asked how often plain chance, in a world where nothing is going on, would produce something just as striking.</div>
+        <div style="font-size: 15px; color: #555; margin-bottom: 10px;">The boring world (null model), the simulated p-value, the 5% convention, what a p-value is and is not, statistical significance versus practical importance, and why honest reporting includes the results that were not significant</div>
+        <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>Reading &amp; work:</strong> Read every section in order, work each example on paper before you read its solution, use the Significance Simulator, follow the Excel steps, and complete the three activities at the bottom. The reading, interactive, and Excel steps take about 35 minutes and the activities about 40 more, so plan on about 75 minutes in all.</div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127919; BY THE END OF THIS LESSON YOU WILL BE ABLE TO&hellip;</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> describe the four moves of a simulation test: name the <strong>boring world</strong> (the model where nothing interesting is going on), choose a statistic from the data, simulate many boring worlds, and report the share at least as extreme as the data, the <strong>p-value</strong>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> estimate a p-value with the Significance Simulator and apply a rule fixed in advance (the 5% convention) to call a result <strong>statistically significant</strong> or not.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> say what a p-value is and what it is <em>not</em> (not the probability the claim is true, not the probability of being wrong, not the size or importance of an effect), and tell statistically significant from practically important.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;">
+            <div style="min-width: 26px; height: 26px; border-radius: 50%; background: #C7922C; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">4</div>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.65;"><strong>I will be able to</strong> explain why running many tests produces false alarms by chance, and why honest reporting includes the non-significant results.</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128203; WHAT YOU NEED FOR THIS LESSON</div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">A notebook and pencil.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">The free Desmos Scientific Calculator, open in another tab: <a href="https://www.desmos.com/scientific" target="_blank" rel="noopener">desmos.com/scientific</a>.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">Microsoft Excel (desktop or web) for the click-by-click part.</div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; border-left: 3px solid #D0D9E8; padding-left: 14px;"><span style="color: #c7922c; font-size: 18px; flex-shrink: 0;">&#9654;</span>
+            <div style="font-size: 18px; color: #1a2340; line-height: 1.6;">An AI tool of your choice for the AI Training task (you will check its answer, not trust it).</div>
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#10024; A WONDER TO START WITH</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">A made-up student council settles disputes by flipping one school coin. A member grumbles that the coin favors heads. To test it, the council flips the coin 100 times and gets <strong>60 heads</strong>. &ldquo;There it is, the coin is rigged!&rdquo; says one member. &ldquo;Sixty is only ten away from fifty,&rdquo; says another. &ldquo;Anyone could get that.&rdquo; Which member is right? Staring at the number will not settle it. What settles it is a question you can answer by simulation: <em>if the coin were perfectly fair, how often would 100 flips look this lopsided?</em></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You have already asked that question twice this week. In <strong>Comparing Two Populations from Two Random Samples</strong> you asked how far apart two sample means can be. In <strong>Comparing Two Treatments in a Randomized Experiment</strong> you shuffled group labels to see whether chance alone could produce the gap you saw. Today we name the idea behind both, make it general, and use it on the coin so that you can see the whole machine in one picture.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Service</strong>, this module&rsquo;s virtue, comes with a responsibility here. People who lean on your numbers (a council, a clinic, a classroom teacher) will often hear only the word &ldquo;significant.&rdquo; Serving them well means telling them what the word does and does not mean, and reporting the results that did not turn out exciting along with the ones that did.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>A note on honesty.</strong> Every coin result, group, and study in this lesson is <strong>constructed</strong> (made up) or <strong>simulated</strong> by a computer to teach the idea. Nothing here is real data.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; THE BORING WORLD AND THE FOUR MOVES</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Every simulation test has the same four moves. Learn them once and you can run them on any claim.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>Move 1: Name the boring world.</strong> This is the model in which <em>nothing interesting is going on</em>: the coin is fair, the treatment does nothing, the two populations are alike. Statisticians call it the <strong>null model</strong>. We pretend it is true so that we can see what plain chance does on its own.<br />&#9654; <strong>Move 2: Choose a statistic from the data.</strong> A number that captures what caught your eye: the number of heads, the difference of two means, the difference of two proportions.<br />&#9654; <strong>Move 3: Simulate many boring worlds.</strong> Generate the data again and again as the boring world would, and record the statistic each time. A computer can do a thousand worlds in a moment.<br />&#9654; <strong>Move 4: Count the share at least as extreme.</strong> What fraction of the simulated boring worlds produced a statistic as far out as yours, or farther? That share is the <strong>p-value</strong>. When it comes from a simulation, the simulator calls it the <strong>empirical p-value</strong>, because it was observed from simulated worlds instead of computed from a formula.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Here are two settings you already know, written in the same four-move language:</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 560px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Setting</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">The boring world</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">The statistic</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">&ldquo;At least as extreme&rdquo; means</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A coin (today)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The coin is fair: every flip is heads with chance 0.5</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Number of heads in 100 flips</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60 or more heads <em>or</em> 40 or fewer (in either direction)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A randomized experiment (the plant data from the last lesson)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">The fertilizer does nothing, so the group labels are arbitrary and shuffling them is harmless</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">Observed difference in means (B minus A)</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">A shuffled gap at least as big as 1.39 cm, in either direction</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>&ldquo;Extreme&rdquo; can mean one direction or both.</strong> A <strong>one-sided</strong> count looks at only one tail (at or beyond your result, in the direction you care about). A <strong>two-sided</strong> count looks at both tails: results as far from what the boring world expects, in either direction. In the simulator these are the toggle <em>One-sided (at or beyond)</em> and <em>Two-sided</em>. Unless there is a strong reason to care about only one direction, and that reason was settled <em>before</em> the data came in, use two-sided. It is the honest default, and it is what you did with the shuffle histogram.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>One more honest note.</strong> Real studies often use a formula-based method that gives nearly the same answer as the simulation without running thousands of worlds. You may meet those formulas later. Simulation comes first here because it shows what the answer is an answer <em>to</em>.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128209; THE 5% CONVENTION, AND WHY IT IS A CONVENTION</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Once you have a p-value, you need a way to talk about it. By long-standing convention, a result is called <strong>statistically significant</strong> when fewer than 5% of boring worlds are at least this extreme: a p-value below 0.05. The Significance Simulator shows this in a panel called <em>The 5% convention</em>.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">Three cautions keep that convention honest.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">&#9654; <strong>It is a convention, not a law of nature.</strong> Nothing special happens at 0.05. A p-value of 0.049 and a p-value of 0.051 describe almost the same amount of surprise. Some fields use stricter lines such as 1%.<br />&#9654; <strong>Decide the rule before you look.</strong> Choose the line (5%) and the sides (two-sided) <em>first</em>. If you pick the rule after seeing the answer, you can always find one that makes your result look good, and then the p-value stops meaning anything.<br />&#9654; <strong>Borderline results are borderline.</strong> A simulation is itself random. Try 1,000 boring worlds again and again for the same data and the empirical p-value moves a little each run. For a result whose true two-sided p-value is about 0.057 (you will meet one in a moment), repeated runs of 1,000 worlds typically land between about 0.047 and 0.069, so some runs fall just under 0.05 and some just over. Do not let a coin toss of a simulation decide the verdict; report the number and say it is near the edge.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128173; WHAT A P-VALUE IS, AND WHAT IT IS NOT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">The p-value answers exactly one question: <em>if nothing interesting were going on, how often would boring randomness alone produce a result like mine, or more extreme?</em> That is all. People read much more into it, so learn the four most common overreadings now.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">&#9654; <strong>It is not the probability that the claim is true.</strong> A p-value of 0.03 does <em>not</em> mean &ldquo;a 3% chance that the treatment does nothing&rdquo; or &ldquo;a 97% chance that it works.&rdquo; The p-value is computed <em>assuming</em> the boring world; it cannot also tell you how likely that world is.<br />&#9654; <strong>It is not the probability that you are wrong.</strong> It describes how surprising the data would be in the boring world, not how likely a particular conclusion is to be a mistake.<br />&#9654; <strong>It is not the size of the effect.</strong> A tiny p-value can come with a tiny effect (when the sample is huge) and a large effect can come with a modest p-value (when the sample is small).<br />&#9654; <strong>It is not a verdict that something is important.</strong> &ldquo;Significant&rdquo; here is a technical word about chance. It does not mean &ldquo;large,&rdquo; &ldquo;useful,&rdquo; or &ldquo;worth acting on.&rdquo;</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">And one more, in the opposite direction: <strong>a large p-value does not show there is no effect.</strong> It shows only that boring chance could easily have produced what you saw. A small or noisy study often has a large p-value even when something real is going on. Not significant means &ldquo;not enough evidence here,&rdquo; not &ldquo;nothing is there.&rdquo;</div>
+    </div>
+    <!-- ===== WIDGET EMBED ===== -->
+    <div style="margin: 0 0 20px 0; border: 2px solid #0E1C42; border-radius: 12px; overflow: hidden; background: #f8f9fa;">
+        <div style="background: #0E1C42; color: #fff; padding: 10px 18px; font-size: 17px;">&#127922; Try It Yourself: The Significance Simulator</div>
+        <div style="background: #EEF1F8; padding: 10px 18px; font-size: 15px; color: #1a2340; line-height: 1.55;"><strong>Six tasks.</strong> The simulator builds &ldquo;boring worlds&rdquo; in which a coin really is fair. <strong>(1)</strong> Leave <em>n, flips per experiment</em> at its default of 100. Enter <strong>60</strong> in <em>Your observed number of heads</em>, choose <em>Two-sided</em>, and press <em>Simulate 1,000 null worlds</em>. The histogram shows how many heads each simulated fair-coin world produced; the red tails are the worlds at least as extreme as yours and the gold line marks your count. Read the <em>Empirical p-value</em>. Exact arithmetic says it should be near 0.057. <strong>(2)</strong> Press <em>Simulate 1,000 null worlds</em> again several times. Your p-value wobbles from run to run. Is it ever below 0.05? <strong>(3)</strong> Switch to <em>One-sided (at or beyond)</em> and read the new p-value. It should be about half the two-sided one. <strong>(4)</strong> Try 55 heads: this is an ordinary result for a fair coin. <strong>(5)</strong> Read the panel <em>The 5% convention</em> and the panel <em>What to watch</em>. Compare them with the four overreadings above. <strong>(6)</strong> Press <em>Reset</em> when you finish. Your numbers will differ each time, because the worlds are random. If the page lets you raise <em>n</em> above 100, try the same percent of heads at a larger <em>n</em> (for example 120 of 200) and watch the p-value shrink.</div>
+        <iframe src="https://optimaondemand.github.io/hsps-widgets/significance-simulator.html" width="100%" height="820" style="border: none; display: block;" title="The Significance Simulator" allowfullscreen></iframe>
+        <div style="padding: 6px 18px; font-size: 13px; color: #666; background: #EEF1F8;">If the interactive doesn't load, <a href="https://optimaondemand.github.io/hsps-widgets/significance-simulator.html" target="_blank" rel="noopener">open it in a new tab</a>.</div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 1: THE SCHOOL COIN, 60 HEADS IN 100</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> The made-up student council&rsquo;s coin gave 60 heads in 100 flips. Decide, using the 5% convention (two-sided, chosen in advance), whether the result is statistically significant.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>Move 1.</strong> The boring world is a fair coin: each flip is heads with chance 0.5. <strong>Move 2.</strong> The statistic is the number of heads, which we saw to be 60. <strong>Move 3.</strong> Simulate many 100-flip fair-coin worlds. A fair coin averages 50 heads. <strong>Move 4.</strong> &ldquo;At least as extreme, in either direction&rdquo; means 60 or more heads <em>or</em> 40 or fewer, because 40 is just as far from 50 as 60 is. The share of boring worlds that land in those tails is about <strong>0.057</strong> (exact arithmetic gives 0.0569; one side alone is 0.0284). So about 6 boring worlds in 100 are this lopsided.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;"><strong>Verdict.</strong> 0.057 is <em>not</em> below 0.05, so by our rule the result is not statistically significant. In words: a fair coin produces a result this lopsided about 6 times in 100, which is uncommon but not rare enough to rule out plain chance. Note carefully what we did <em>not</em> prove. We did not show the coin is fair; we showed only that this evidence is not strong enough to call it unfair. Sixty heads sits near the edge of what a fair coin does, so a sensible next step is to flip the coin more, not to announce a verdict.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 2: AN ORDINARY RESULT AND A VERY UNUSUAL ONE</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> Use the same boring world (a fair coin). Find the two-sided p-value for (a) 55 heads in 100 flips, and (b) 36 heads in 50 flips.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> <strong>(a)</strong> Extreme means 55 or more heads or 45 or fewer. The share is about <strong>0.37</strong> (exact: 0.3682). More than a third of boring worlds do at least this well, so 55 heads tells us nothing unusual. <strong>(b)</strong> With 50 flips a fair coin averages 25 heads. Extreme means 36 or more or 14 or fewer. The share is about <strong>0.003</strong> (exact: 0.0026), roughly 1 boring world in 400. That is far below 0.05, so the result is statistically significant: a fair coin would almost never do this.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">Notice the pattern. At 100 flips, 60% heads (60 of 100) sits near the edge, and 55% heads is ordinary. At 50 flips, 72% heads (36 of 50) is a big surprise. The p-value depends on <em>how far</em> you are from what the boring world expects <em>measured against how much chance scatter that world has</em>, and the scatter depends on how many flips there are.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 3: THE SAME PERCENT, MORE FLIPS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> What happens to the p-value when the <em>percent</em> of heads stays the same but the number of flips grows?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> Here are exact two-sided p-values for a fair coin.</div><div style="overflow-x: auto; margin-bottom: 14px;"><table style="width: 100%; border-collapse: collapse; min-width: 480px;"><thead><tr style="background: #0E1C42;"><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Percent heads</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Flips and heads</th><th style="padding: 8px 10px; font-size: 14px; color: #fff; text-align: left; border: 1px solid #334;">Two-sided p-value (exact)</th></tr></thead><tbody><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60 of 100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.057</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">120 of 200</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0057</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">60%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">600 of 1,000</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">about 0.0000000003 (less than 1 in a billion)</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">55%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">55 of 100</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.37</td></tr><tr style="background: #FFFFFF;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">55%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">110 of 200</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.18</td></tr><tr style="background: #F4F6FA;"><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">55%</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">550 of 1,000</td><td style="padding: 6px 10px; font-size: 15px; color: #1a2340; border: 1px solid #D0D9E8; vertical-align: top;">0.0017</td></tr></tbody></table></div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The same 60% that was merely suggestive at 100 flips is overwhelming at 1,000. Why? More flips means less chance scatter in the percent of heads (this is the same pattern as the shrinking standard error you saw earlier in the module). A 10-point gap is easy for 100 flips to produce by luck and nearly impossible for 1,000. One honest limit: a simulation of 1,000 worlds cannot resolve a p-value like 0.0000000003. It would show 0 red-tail worlds, and all you could say is &ldquo;fewer than about 1 in 1,000.&rdquo; (In the comparison tool, the made-up &ldquo;clear difference&rdquo; data hit the same limit: 0 of 20,000 shuffles.)</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128221; WORKED EXAMPLE 4: SIGNIFICANT BUT NOT IMPORTANT</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><strong>Problem.</strong> A made-up school flips its kickoff coin 10,000 times in a computer test and gets 5,100 heads (51%). Is that statistically significant? Does it matter?</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;"><em>Teacher&rsquo;s voice:</em> The boring world is a fair coin and the average is 5,000 heads. Extreme means 5,100 or more or 4,900 or fewer. The share is about <strong>0.047</strong> (exact: 0.0466), which is below 0.05, so by the 5% convention the result is <strong>statistically significant</strong>. But look at the size of the effect: the coin lands heads 51% of the time instead of 50%. For deciding who kicks off, that is a trivial difference; nobody would replace the coin. So the result is <strong>statistically significant but not practically important</strong>. With enough data, even a tiny effect can clear the 5% line. Significance tells you chance is an unlikely explanation. It does not tell you the effect is big.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The reverse also happens. In the last lesson, the made-up &ldquo;barely a difference&rdquo; data had a shuffle share of about 0.76, so chance easily explains the gap. But a small study can also miss a real, meaningful effect because there are too few observations to separate it from chance. A large p-value with a small sample is a reason to gather more data, not to declare the effect absent.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128279; CONNECTING THE PIECES FROM THIS WEEK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You have now seen three tools that answer related questions. In the plant experiment, the bootstrap range for the true difference was about 0.68 to 2.10 cm, which stays well away from zero, and the shuffle share was about 0.001. In the &ldquo;barely a difference&rdquo; data, the bootstrap range was about &minus;1.8 to 2.6, which includes zero, and the shuffle share was about 0.76. In the seed experiment, the shuffle share was about 0.20. Usually (not always, because the two methods answer slightly different questions) an interval that stays away from zero goes with a small p-value, and an interval that includes zero goes with a large one.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">The two tools also say different things. The p-value speaks only to whether chance alone is a reasonable explanation. The interval tells you the <em>size</em> of the difference that is plausible, and that is usually the more useful half of the story.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#127922; MANY TESTS, A FEW FALSE ALARMS</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">There is a trap hiding in the 5% convention. Suppose a made-up club tests 20 different ideas, and in every one of them the boring world is actually true (nothing is going on). Each test has a 5% chance of looking significant purely by luck, and a 95% chance of not doing so. If the 20 tests are independent (a simplifying assumption), the chance that <em>none</em> of them looks significant is 0.95<sup>20</sup> = <strong>0.358</strong>. So the chance that <em>at least one</em> does is 1 &minus; 0.358 = <strong>0.642</strong>. About 64 times in 100, a club that tests 20 empty ideas will turn up a &ldquo;significant&rdquo; one. On average that is about 1 false alarm in 20 tests.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 0px;">This matters for <strong>honesty</strong> and for <strong>service</strong>. If the club tells the council, &ldquo;Idea 14 is significant!&rdquo; and says nothing about the 19 others, the council is misled, because the surprising result was <em>selected</em> from many tries. The honest practice is to say how many comparisons were made, to decide which ones to run in advance, and to report the ones that were not significant too. A small, honest negative result is a real contribution; it can save a community from acting on a false alarm.</div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 12px;">&#128187; EXCEL: A SMALL NULL-WORLD SIMULATOR, CLICK BY CLICK</div>
+<div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 14px;">You will build a tiny simulator that does what the Significance Simulator does, using a formula that draws a fair-coin world. Everything here is made up. This is a practice build; you do not upload it (Assignment 34.3 is answered in Canvas). Excel behavior in this section has not been tested against the live program by the course team, so if a step does not work, tell your teacher which step it was.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; Open Excel and start a <strong>Blank workbook</strong>. Save it as <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Wk34_L3_YourName</code>. Rename the first sheet <strong>NullWorlds</strong> (right-click the sheet tab at the bottom, choose <strong>Rename</strong>, type the name, press Enter).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>One boring world.</strong> In <strong>A1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.INV(100,0.5,RAND())</code> and press Enter. The formula asks Excel for a random number of heads in 100 flips of a fair coin. The three inputs are the number of flips (100), the chance of heads (0.5), and a random number between 0 and 1 supplied by <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">RAND()</code>. Press <strong>F9</strong> a few times and watch the number change; it should hover around 50.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>One thousand boring worlds.</strong> Click the <strong>Name Box</strong> (the small box just left of the formula bar), type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">A1:A1000</code>, and press Enter. That selects 1,000 cells. Now type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.INV(100,0.5,RAND())</code> (do not press Enter alone) and press <strong>Ctrl + Enter</strong>, which fills every selected cell with the formula.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Your observed result.</strong> In <strong>C1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Observed heads</code> and in <strong>D1</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">60</code>. In <strong>C2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Mirror</code> and in <strong>D2</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=100-D1</code> (this is 100 minus 60, the mirror image of 60).</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Count the extremes.</strong> In <strong>C3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Extreme worlds</code> and in <strong>D3</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(A1:A1000,"&gt;="&amp;D1)+COUNTIF(A1:A1000,"&lt;="&amp;D2)</code>. This counts the worlds with 60 or more heads plus the worlds with 40 or fewer.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Turn the count into a p-value.</strong> In <strong>C4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">Empirical p-value</code> and in <strong>D4</strong> type <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=D3/1000</code>. Format <strong>D4</strong> with three decimals, or leave it as it is.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Run it again.</strong> Press <strong>F9</strong>. All 1,000 worlds are redrawn and the p-value changes. Press it ten times and write down the p-values. They should usually fall between about 0.04 and 0.08, near the exact value 0.057. That wobble is the simulation error you read about earlier in this lesson.</div><div style="font-size: 18px; color: #1a2340; line-height: 1.65; margin-bottom: 8px; padding-left: 16px;">&#9654; <strong>Try it.</strong> Change <strong>D1</strong> to <strong>55</strong> (the mirror cell updates by itself) and press F9 a few times. Which p-value do you expect? Then change D1 to <strong>65</strong>. What happens to the count?</div>
+    </div>
+    <div style="background: #EEF1F8; border-left: 5px solid #0E1C42; border-top: 3px solid #55C8E8; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #0e1c42; margin-bottom: 8px;">&#128187; CALCULATOR SKILLS &middot; NULL-WORLD COUNTS IN EXCEL; P-VALUE ARITHMETIC IN DESMOS</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Excel.</strong> <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=BINOM.INV(100,0.5,RAND())</code> draws one fair-coin world of 100 flips. Fill it down a column to get many worlds, then count the extremes with <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(range,"&gt;="&amp;obs)</code> plus <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(range,"&lt;="&amp;mirror)</code>, and divide by the number of worlds. For a set of simulated gaps you can use the same idea: <code style="background: #F4F6FA; border: 1px solid #D0D9E8; border-radius: 4px; padding: 1px 6px; font-family: Consolas, Monaco, monospace; font-size: 0.92em; color: #0E1C42;">=COUNTIF(range,"&gt;="&amp;obs)+COUNTIF(range,"&lt;="&amp;-obs)</code> counts the ones at least as big as your observed gap in either direction. Press <strong>F9</strong> to redraw all the random numbers.<br />
+            <strong>Desmos Scientific</strong> handles plain arithmetic only here. An empirical p-value is a count divided by the number of worlds: type 130 &divide; 2000 to get 0.065. The false-alarm arithmetic is 1 &minus; 0.95 raised to the 20th power: type 1 &minus; 0.95, then use the exponent key for the power of 20 (you should see about 0.642). Desmos has no built-in simulation here; the simulating belongs to the widget and to Excel.
+        </div>
+    </div>
+    <div style="background: #FDECEC; border-left: 5px solid #C0392B; border-top: 3px solid #E74C3C; border-radius: 6px; padding: 14px 20px; margin: 0 0 20px 0;">
+        <div style="font-size: 11px; color: #8A1F16; margin-bottom: 8px;">&#129302; AI TRAINING &middot; ASK AN AI TO DESIGN A SIMULATION TEST, THEN RUN IT YOURSELF</div>
+        <div style="font-size: 17px; color: #0E1C42; line-height: 1.65;">
+            <strong>Prompt.</strong> Ask an AI tool: <em>&ldquo;A coin landed heads 62 times in 100 flips. Design a simulation test to decide whether the coin is fair. Say what the null model is, what statistic you use, how many simulations to run, and how you would read the p-value.&rdquo;</em><br />
+            <strong>Predict.</strong> Before you read its answer, write your own design in four lines: the boring world (a fair coin), the statistic (the number of heads), the simulation (many 100-flip fair-coin worlds), and what &ldquo;extreme&rdquo; means (62 or more, or 38 or fewer, in the two-sided version). Predict the p-value: because 60 heads was near the edge, will 62 be below or above 0.05?<br />
+            <strong>Verify.</strong> Run the AI&rsquo;s design in the Significance Simulator (n = 100, observed 62, two-sided). You should find a p-value near 0.02 (exact arithmetic gives 0.0210). Then read the AI&rsquo;s explanation sentence by sentence. Look especially for the most common error: saying the p-value is &ldquo;the probability that the coin is fair&rdquo; or &ldquo;the probability the result is due to chance.&rdquo; Also check whether it chose one-sided or two-sided and whether it said why, and whether it claims the test &ldquo;proves&rdquo; anything. Rewrite its worst sentence so that it is true. <strong>Verdict.</strong> A tidy design is not a correct explanation; your simulation is the referee.
+        </div>
+    </div>
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#9889; TODAY&rsquo;S ACTIVITIES (about 40 minutes, plus the reading, the interactive, and the Excel steps above)</div>
+
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Predict, Run, Record</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Use the Significance Simulator with <em>n</em> = 100 and <em>Two-sided</em> selected. Make a table with these observed head counts: <strong>55, 58, 60, 62, 65</strong>. For each, <strong>predict</strong> whether the p-value will be below 0.05 (write yes or no) and guess its size.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Run</strong> <em>Simulate 1,000 null worlds</em> twice for each count and record both empirical p-values in your table.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Reflect.</strong> (a) For which counts did you predict correctly? (b) For 60 heads, did your two runs fall on the same side of 0.05? What does that tell you about borderline results? (c) Switch to <em>One-sided</em> for 60 heads. How does the p-value compare with the two-sided one? A classmate says, &ldquo;I will use one-sided, because it gets me under 0.05.&rdquo; Explain what is wrong with deciding that after seeing the result.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. Exact two-sided values for reference: 55 about 0.37, 58 about 0.13, 60 about 0.057, 62 about 0.021, 65 about 0.0035. So only 62 and 65 should be below 0.05. 2. Your runs will differ from these a little; for 60 heads, repeated runs of 1,000 worlds usually land between about 0.047 and 0.069. 3. (a) Check your yes or no against your recorded runs; 60 is the tricky one. (b) Not necessarily; a run near 0.05 can land on either side. For a result near the line, report the number and say it is borderline instead of announcing a verdict. (c) One-sided for 60 is about 0.028, roughly half of the two-sided 0.057. Choosing the side after seeing the data, just to get under 0.05, is dishonest: the rule (5%, two-sided) must be set before looking, or the p-value no longer means what it says.</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">What Does the P-Value Say?</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">10 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">A made-up randomized study of a tutoring method finds a shuffle share (p-value) of <strong>0.03</strong>. The rule, set in advance, was two-sided at 5%. For each statement write <strong>C</strong> if it is a correct reading, or <strong>M</strong> if it is a misreading.<br /><strong>(a)</strong> &ldquo;If the tutoring did nothing, shuffling alone would produce a gap this big about 3 times in 100.&rdquo;<br /><strong>(b)</strong> &ldquo;There is a 3% chance that the tutoring method does nothing.&rdquo;<br /><strong>(c)</strong> &ldquo;There is a 97% chance the tutoring works.&rdquo;<br /><strong>(d)</strong> &ldquo;The p-value is small, so the gap between the groups must be large and important.&rdquo;<br /><strong>(e)</strong> &ldquo;There is a 3% chance we are making a mistake by calling this result real.&rdquo;<br /><strong>(f)</strong> &ldquo;By our 5% rule the result is statistically significant. That is a statement about chance, not a measurement of how much the tutoring helps.&rdquo;</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;">Pick one statement you marked M and rewrite it so that it is correct.</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. (a) C. (b) M: the p-value is computed assuming the boring world, so it cannot be the probability that the boring world is true. (c) M: same error in the other direction. (d) M: the p-value is not the size of the effect; a huge study can give a small p-value for a tiny gap. (e) M: it is not the probability of being wrong; it describes how surprising the data are in the boring world. (f) C. 2. Example rewrite of (b): &ldquo;If the tutoring did nothing, a gap this large would show up in only about 3 of 100 shuffles, which is unusual enough that we are doubtful that chance alone explains it.&rdquo;</div>
+</details>
+            </div>
+        </div>
+        <div style="border: 1px solid #D0D9E8; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #EEF1F8; border-bottom: 1px solid #D0D9E8;">
+                <div style="width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #ffffff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+                <div style="font-size: 18px; color: #0e1c42; flex: 1;">Worked, Then Your Turn</div>
+                <span style="background: #C7922C; color: #fff; font-size: 13px; padding: 3px 10px; border-radius: 10px; white-space: nowrap;">15 min</span>
+            </div>
+            <div style="padding: 16px 18px;">
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">1</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Worked.</strong> A made-up student shuffles group labels 1,000 times (the boring world: the treatment does nothing) and finds that 23 of the 1,000 shuffled gaps are at least as big as the observed gap, in either direction. The rule, set in advance, was 5%. Find the empirical p-value, give the verdict, and say what the verdict would be if the rule had been 1%.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">2</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (a count).</strong> In 500 simulated boring worlds, 41 were at least as extreme as the data in either direction. Give the empirical p-value and the verdict under a 5% rule. Is it fair to say the effect &ldquo;does not exist&rdquo;?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">3</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (an exact check).</strong> A made-up spinner is supposed to land on red half the time. It lands on red 28 times in 40 spins. The exact two-sided p-value for a fair spinner is about 0.017. Say what a simulation of many fair spinners would show, give the verdict under a 5% rule, and explain one reason the result still does not prove the spinner is unfair in a way that matters for the game.</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">4</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (importance).</strong> A made-up app company randomly assigns 12,000 students to each of two study apps. The gap in mean quiz score is 0.5 points out of 100, and the shuffle share is about 0.01. Is the result statistically significant? Is it practically important? What would you want to know before recommending the app?</div>
+                </div>
+                <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;"><span style="min-width: 20px; height: 20px; border-radius: 50%; background: #D0D9E8; color: #0e1c42; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px;">5</span>
+                    <div style="font-size: 17px; color: #1a2340; line-height: 1.65;"><strong>Your turn (many tests).</strong> A made-up student runs 40 independent comparisons where nothing real is going on, each at the 5% rule. About how many will look significant by chance? What is the chance that at least one does? What should the student report?</div>
+                </div>
+<details style="background: #FFFFFF; border: 1px solid #D0D9E8; border-left: 4px solid #C7922C; border-radius: 6px; padding: 12px 18px; margin: 6px 0 0 0;">
+<summary style="font-size: 16px; color: #0E1C42; cursor: pointer; list-style: none;"><span style="color: #C7922C;">&#9654;</span>&nbsp; Check</summary>
+<div style="font-size: 17px; color: #1a2340; line-height: 1.6; margin-top: 10px; padding-top: 10px; border-top: 1px solid #EEF1F8;">1. 23 &divide; 1000 = <strong>0.023</strong>. That is below 0.05, so the result is statistically significant at 5%. If the rule had been 1% (0.01), 0.023 is not below it, so the result would not be significant. The data did not change; the rule did, which is why the rule must be fixed before looking. 2. 41 &divide; 500 = <strong>0.082</strong>. That is above 0.05, so the result is not statistically significant. It is not fair to say the effect does not exist: chance could easily produce a gap like this, but a real effect could also be hiding behind noise or a small sample. 3. A simulation would show only about 17 of 1,000 fair-spinner worlds that are this extreme (0.017 &lt; 0.05), so the result is statistically significant. It still does not prove the spinner is unfair in a way that matters: the p-value does not give the size of the effect (here 70% red versus 50%), and one test does not rule out a design flaw, such as how the spinner was spun. 4. Significant: yes, by the 5% rule (about 0.01 &lt; 0.05). Important: probably not, since half a point out of 100 is a very small gain. Before recommending it, ask about cost, how students were chosen, whether the gain differs for students who most need help, and what the interval for the difference looks like. 5. Expected false alarms: 40 &times; 0.05 = <strong>2</strong>. The chance of at least one is 1 &minus; 0.95<sup>40</sup> = 1 &minus; 0.1285 = <strong>0.8715</strong>, about 0.87. The student should report all 40 comparisons, say how many were run, and describe any significant result as one of many tests, not as a stand-alone discovery.</div>
+</details>
+            </div>
+        </div>
+    </div>
+
+    <div style="background: #FFFFFF; border-top: 3px solid #0E1C42; border: 1px solid #D0D9E8; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+        <div style="font-size: 11px; color: #c7922c; margin-bottom: 16px;">&#10145;&#65039; WHAT YOU&rsquo;LL DO NEXT</div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">1</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Assignment 34.3 &mdash; Boring Worlds and Honest Reports</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Seven auto-graded items on empirical p-values, what they mean, significance versus importance, and the many-tests trap, plus one short written item about reporting a result honestly. Everything is answered in Canvas.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">2</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Lesson Quiz 34.3</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Five questions on empirical p-values, reading a p-value correctly, the effect of sample size, significance versus importance, and false alarms from many tests.</div>
+            </div>
+        </div>
+        <div style="display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;">
+            <div style="min-width: 34px; height: 34px; border-radius: 50%; background: #0E1C42; color: #fff; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">3</div>
+            <div>
+                <div style="font-size: 18px; color: #0e1c42; margin-bottom: 4px;"><strong>Looking ahead</strong></div>
+                <div style="font-size: 16px; color: #1a2340; line-height: 1.55;">Next week you will use these habits to evaluate claims in data-based reports.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+<!-- ===== /BODY WRAPPER ===== -->
+
+<!-- ===== FOOTER ===== -->
+<div style="background: #0E1C42; border-top: 3px solid #55C8E8; padding: 18px 34px; text-align: center;">
+    <div style="font-size: 18px; color: #ffffff; margin-bottom: 6px;"><span style="color: #55c8e8;">Optima Academy Online</span> &middot; PROBABILITY &amp; STATISTICS HONORS &middot; Quarter 4 &middot; Inference &amp; Statistical Reasoning</div>
+    <div style="font-size: 13px; color: rgba(255,255,255,0.65); margin-bottom: 4px;">Lesson 34.3 &middot; Is the Difference Real? Significance by Simulation</div>
+    <div style="font-size: 12px; color: rgba(255,255,255,0.4);">&copy; Optima Academy Online &middot; An Education Experience Company</div>
+</div>
+
+</body>
+</html>
